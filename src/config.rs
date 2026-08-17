@@ -30,6 +30,17 @@ fn parse_optional_i64(s: &str) -> Option<i64> {
     )
 }
 
+/// Execution mode for the service.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum RunMode {
+    /// Continuous operation: periodic registry refreshes and liquidation rounds.
+    #[default]
+    Loop,
+    /// One registry refresh + one liquidation round, then exit.
+    /// For cron / Cloud Run Jobs / K8s CronJob deployments.
+    Once,
+}
+
 fn validate_percentage(s: &str) -> Result<u8, String> {
     let value: u8 = s
         .parse()
@@ -84,6 +95,15 @@ pub struct Args {
     /// Registry refresh interval in seconds
     #[arg(long, env = "REGISTRY_REFRESH_INTERVAL", default_value_t = 3600)]
     pub registry_refresh_interval: u64,
+
+    /// Execution mode: `loop` runs continuously, `once` performs a single
+    /// scan-and-liquidate cycle and exits
+    #[arg(long, env = "RUN_MODE", value_enum, default_value_t = RunMode::Loop)]
+    pub run_mode: RunMode,
+
+    /// Shorthand for `--run-mode once`
+    #[arg(long, default_value_t = false)]
+    pub once: bool,
 
     /// Concurrency for liquidations
     #[arg(short, long, env = "CONCURRENCY", default_value_t = 10)]
@@ -382,6 +402,11 @@ impl Args {
             transaction_timeout: self.transaction_timeout,
             liquidation_scan_interval: self.liquidation_scan_interval,
             registry_refresh_interval: self.registry_refresh_interval,
+            run_mode: if self.once {
+                RunMode::Once
+            } else {
+                self.run_mode
+            },
             // `0` would make `buffer_unordered` hang forever; a refresh/scan with
             // no concurrency makes no sense, so floor it at 1.
             concurrency: self.concurrency.max(1),
@@ -444,6 +469,8 @@ mod tests {
             transaction_timeout: 60,
             liquidation_scan_interval: 600,
             registry_refresh_interval: 3600,
+            run_mode: RunMode::Loop,
+            once: false,
             concurrency: 10,
             partial_percentage: Some(50),
             fixed_liquidation_amount_usd: None,
@@ -719,5 +746,20 @@ mod tests {
         args.scan_failure_notify_threshold = 5;
         let config = args.build_config();
         assert_eq!(config.scan_failure_notify_threshold, 5);
+    }
+
+    #[test]
+    fn run_mode_defaults_to_loop() {
+        let args = create_test_args();
+        assert_eq!(args.run_mode, RunMode::Loop);
+        assert!(!args.once);
+    }
+
+    #[test]
+    fn once_flag_forces_once_mode() {
+        let mut args = create_test_args();
+        args.once = true;
+        let config = args.build_config();
+        assert_eq!(config.run_mode, RunMode::Once);
     }
 }

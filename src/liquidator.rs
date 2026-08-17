@@ -43,7 +43,7 @@ pub mod service;
 pub mod swap;
 
 // Re-exports for convenience
-pub use config::Args;
+pub use config::{Args, RunMode};
 pub use executor::LiquidationExecutor;
 pub use inventory::InventoryManager;
 pub use oracle::OracleFetcher;

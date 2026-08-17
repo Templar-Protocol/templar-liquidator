@@ -74,6 +74,8 @@ pub struct ServiceConfig {
     pub liquidation_scan_interval: u64,
     /// Registry refresh interval in seconds
     pub registry_refresh_interval: u64,
+    /// Execution mode: continuous loop or single cycle
+    pub run_mode: crate::config::RunMode,
     /// Concurrency for liquidations
     pub concurrency: usize,
     /// Liquidation strategy
@@ -354,48 +356,66 @@ impl LiquidatorService {
                     }
                 }
                 _ = liquidation_interval.tick() => {
-                    // Refresh collateral inventory (detect accumulated dust from prior runs)
-                    if let Err(e) = self.inventory.write().await.refresh_collateral().await {
-                        tracing::warn!(error = ?e, "Failed to refresh collateral inventory before batch swap");
-                    }
-
-                    // Batch swap accumulated collateral before liquidation round
-                    if self.config.batch_swap_on_cycle_start {
-                        self.batch_swap_collateral().await;
-                    }
-
-                    // Refresh borrow asset inventory before liquidations
-                    self.refresh_inventory().await;
-
-                    // Run liquidation round
-                    self.run_liquidation_round().await;
-
-                    // Refresh collateral inventory after liquidations (for tracking)
-                    match self.inventory.write().await.refresh_collateral().await {
-                        Ok(balances) => {
-                            let count = balances.len();
-                            if count > 0 {
-                                tracing::debug!(
-                                    collateral_asset_count = count,
-                                    "Collateral inventory refreshed"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = ?e,
-                                "Failed to refresh collateral inventory"
-                            );
-                        }
-                    }
-
-                    tracing::info!(
-                        interval_seconds = self.config.liquidation_scan_interval,
-                        "Liquidation round completed"
-                    );
+                    self.liquidation_cycle().await;
                 }
             }
         }
+    }
+
+    /// One liquidation cycle: collateral refresh, optional batch swap,
+    /// inventory refresh, liquidation round.
+    async fn liquidation_cycle(&mut self) {
+        // Refresh collateral inventory (detect accumulated dust from prior runs)
+        if let Err(e) = self.inventory.write().await.refresh_collateral().await {
+            tracing::warn!(error = ?e, "Failed to refresh collateral inventory before batch swap");
+        }
+
+        // Batch swap accumulated collateral before liquidation round
+        if self.config.batch_swap_on_cycle_start {
+            self.batch_swap_collateral().await;
+        }
+
+        // Refresh borrow asset inventory before liquidations
+        self.refresh_inventory().await;
+
+        // Run liquidation round
+        self.run_liquidation_round().await;
+
+        // Refresh collateral inventory after liquidations (for tracking)
+        match self.inventory.write().await.refresh_collateral().await {
+            Ok(balances) => {
+                let count = balances.len();
+                if count > 0 {
+                    tracing::debug!(
+                        collateral_asset_count = count,
+                        "Collateral inventory refreshed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    "Failed to refresh collateral inventory"
+                );
+            }
+        }
+
+        tracing::info!(
+            interval_seconds = self.config.liquidation_scan_interval,
+            "Liquidation round completed"
+        );
+    }
+
+    /// Runs a single scan-and-liquidate cycle, then returns.
+    ///
+    /// Errors if the initial registry refresh fails and leaves nothing to scan.
+    pub async fn run_once(mut self) -> Result<(), LiquidatorError> {
+        if let Some(ref provider) = self.oneclick_provider {
+            provider.load_supported_tokens().await;
+        }
+        self.refresh_registry().await?;
+        self.liquidation_cycle().await;
+        Ok(())
     }
 
     /// Check if a market should be processed based on asset filtering rules.

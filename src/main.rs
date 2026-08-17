@@ -1,4 +1,4 @@
-use templar_liquidator::{Args, LiquidatorService};
+use templar_liquidator::{Args, LiquidatorService, RunMode};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -22,8 +22,17 @@ async fn main() {
     args.log_startup();
 
     let config = args.build_config();
+    let run_mode = config.run_mode;
 
     // Create and run service
     let service = LiquidatorService::new(config);
-    service.run().await;
+    match run_mode {
+        RunMode::Loop => service.run().await,
+        RunMode::Once => {
+            if let Err(e) = service.run_once().await {
+                tracing::error!(error = %e, "run-once cycle failed");
+                std::process::exit(1);
+            }
+        }
+    }
 }

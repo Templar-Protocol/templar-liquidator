@@ -201,17 +201,14 @@ where
 
     // Should not normally reach here, but be safe
     Err(last_error
-        .map_or_else(
-            || {
-                SwapError::new(
-                    SwapErrorKind::Unknown {
-                        message: "Retry loop exhausted".into(),
-                    },
-                    swap_name.to_string(),
-                )
-            },
-            |e| e,
-        )
+        .unwrap_or_else(|| {
+            SwapError::new(
+                SwapErrorKind::Unknown {
+                    message: "Retry loop exhausted".into(),
+                },
+                swap_name.to_string(),
+            )
+        })
         .into())
 }
 

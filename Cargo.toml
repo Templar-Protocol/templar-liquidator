@@ -1,0 +1,88 @@
+[package]
+name = "templar-liquidator"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.86"
+license = "GPL-3.0-only"
+repository = "https://github.com/Templar-Protocol/templar-liquidator"
+description = "Inventory-based liquidation bot for Templar Protocol lending markets on NEAR"
+
+# Standalone crate: stop Cargo from walking up to the backend monorepo's
+# workspace root (/workspace/Cargo.toml) while this checkout lives nested
+# under it as a worktree. Harmless once extracted to its own repo.
+[workspace]
+
+[lib]
+path = "src/liquidator.rs"
+
+[[bin]]
+name = "liquidator"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1.89"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.6.0", features = ["derive", "env"] }
+futures = "0.3.31"
+hex = { version = "0.4.3", features = ["serde"] }
+near-account-id = "2.6"
+near-api = "0.8.6"
+near-crypto = "0.34.7"
+near-jsonrpc-client = "0.20.0"
+near-sdk = { version = "5.25", default-features = false, features = ["unstable", "non-contract-usage"] }
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0.18"
+tokio = { version = "1.51.0", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5"
+
+# ── Templar crates: ONE uniform rev for every crate (mixed revs make Cargo
+# resolve two contracts checkouts whose types don't unify — same rule as the
+# backend's blockchain-gateway). Bump ALL revs together, never one alone.
+templar-common = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0", features = ["rpc"] }
+templar-gateway-client = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0", features = ["clap"] }
+templar-gateway-core = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0" }
+templar-gateway-methods-spec = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0" }
+templar-gateway-oracle-updates-dispatch = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0" }
+templar-gateway-oracle-updates-spec = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0" }
+templar-gateway-types = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0" }
+templar-proxy-oracle-near-common = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0" }
+
+[dev-dependencies]
+anyhow = "1.0.102"
+templar-gateway-testing = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0" }
+test-utils = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0" }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+large_futures = "allow"
+redundant_closure_for_method_calls = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+unwrap_used = "deny"
+expect_used = "warn"
+large_digit_groups = "warn"
+wildcard_imports = "allow"
+doc_markdown = "allow"
+result_large_err = "allow"
+ignore_without_reason = "allow"
+# clippy::pedantic lint added after this codebase's pedantic-warn baseline was
+# set upstream; fires on lifted code (incl. src/swap/oneclick.rs sleep
+# intervals); allowed to keep the lifted source unmodified — purely stylistic.
+duration_suboptimal_units = "allow"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = "fat"
+debug = false
+panic = "abort"
+strip = "symbols"
+overflow-checks = true

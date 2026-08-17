@@ -435,7 +435,7 @@ impl OneClickSwap {
                 // NEP-245: extract underlying asset
                 if let Some((_, token_id)) = asset.clone().into_nep245() {
                     // Token ID should already be in format "nep141:..."
-                    token_id.to_string()
+                    token_id.clone()
                 } else {
                     // Fallback
                     format!("nep141:{}", asset.contract_id())

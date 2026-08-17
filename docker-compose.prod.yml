@@ -10,6 +10,10 @@ services:
     environment:
       - RUST_LOG=info,templar_liquidator=info
       - RUST_BACKTRACE=0
+      # Production mode opts in to live transactions. The bot is safe-by-default
+      # (DRY_RUN=true); this file sets it explicitly so flipping the code
+      # default never silently turns a production deployment into a simulation.
+      - DRY_RUN=false
 
     deploy:
       resources:

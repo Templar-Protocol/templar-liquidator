@@ -19,10 +19,10 @@ build: ## Build Docker image
 build-clean: ## Build without cache
 	docker build --no-cache -t $(IMAGE):$(TAG) -f Dockerfile ../..
 
-start: ## Start in dry-run mode
+start: ## Start in dry-run mode (default; set DRY_RUN=false in .env to go live)
 	$(COMPOSE) --env-file $(ENV_FILE) up -d
 
-start-prod: ## Start in production mode
+start-prod: ## Start in production mode (submits real transactions; DRY_RUN=false)
 	$(COMPOSE) --env-file $(ENV_FILE) -f docker-compose.prod.yml up -d
 
 stop: ## Stop all containers

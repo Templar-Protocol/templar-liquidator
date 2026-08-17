@@ -127,8 +127,10 @@ pub struct Args {
     #[arg(long, env = "MIN_PROFIT_BPS", default_value_t = 50)]
     pub min_profit_bps: u32,
 
-    /// Dry run mode - scan without executing transactions
-    #[arg(long, env = "DRY_RUN", default_value_t = false)]
+    /// Dry run mode - scan and log without executing transactions.
+    /// Defaults to `true`: a public bot that moves money must simulate
+    /// unless the operator explicitly opts into live mode with `DRY_RUN=false`.
+    #[arg(long, env = "DRY_RUN", default_value_t = true)]
     pub dry_run: bool,
 
     /// Collateral strategy: "hold" or "swap-to-borrow"
@@ -453,6 +455,10 @@ impl Args {
 
         if self.dry_run {
             tracing::info!("DRY RUN MODE: Scanning only, no transactions will be executed");
+        } else {
+            tracing::warn!(
+                "LIVE MODE: transactions WILL be submitted on-chain (set DRY_RUN=true to simulate instead)"
+            );
         }
     }
 }
@@ -485,7 +491,9 @@ mod tests {
             partial_percentage: Some(50),
             fixed_liquidation_amount_usd: None,
             min_profit_bps: 100,
-            dry_run: false,
+            // Matches the CLI default (safe-by-default): tests that care about
+            // live-mode behavior override this explicitly.
+            dry_run: true,
             collateral_strategy: "hold".to_string(),
             oneclick_api_token: None,
             ref_contract: None,
@@ -655,7 +663,9 @@ mod tests {
         args.liquidation_scan_interval = 300;
         args.registry_refresh_interval = 1800;
         args.concurrency = 5;
-        args.dry_run = true;
+        // dry_run now defaults to true; the case that actually matters here is
+        // an explicit opt-in to live mode propagating through to the config.
+        args.dry_run = false;
         args.oneclick_api_token = Some("test_token".to_string());
         args.ref_contract = Some("ref.testnet".to_string());
         args.allowed_collateral_assets = vec!["nep141:usdc.testnet".to_string()];
@@ -672,7 +682,7 @@ mod tests {
         assert_eq!(config.liquidation_scan_interval, 300);
         assert_eq!(config.registry_refresh_interval, 1800);
         assert_eq!(config.concurrency, 5);
-        assert!(config.dry_run);
+        assert!(!config.dry_run);
         assert_eq!(config.allowed_collateral_assets.len(), 1);
         assert_eq!(config.ignored_collateral_assets.len(), 1);
     }
@@ -809,5 +819,12 @@ mod tests {
         args.once = true;
         let config = args.build_config();
         assert_eq!(config.run_mode, RunMode::Once);
+    }
+
+    #[test]
+    fn dry_run_is_the_default() {
+        // A public bot that moves money must simulate unless the operator
+        // explicitly opts into live mode.
+        assert!(parse_with(&[]).dry_run);
     }
 }

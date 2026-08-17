@@ -234,6 +234,28 @@ impl Notifier {
         self.telegram.is_some()
     }
 
+    /// Waits for all in-flight notifications to finish sending, up to `timeout`.
+    ///
+    /// A no-op when Telegram is unconfigured — nothing was ever spawned. Works
+    /// by acquiring every semaphore permit: that only succeeds once every
+    /// `spawn_send` task has released its permit, i.e. once the background
+    /// sends have all completed. Single-cycle runs must call this before
+    /// returning, since dropping the runtime otherwise cancels any Telegram
+    /// POST still in flight; long-running modes never need this because the
+    /// process keeps running past any individual cycle.
+    pub async fn drain(&self, timeout: Duration) {
+        if self.telegram.is_none() {
+            return;
+        }
+        let all_permits = u32::try_from(MAX_INFLIGHT_NOTIFICATIONS).unwrap_or(u32::MAX);
+        if tokio::time::timeout(timeout, self.semaphore.acquire_many(all_permits))
+            .await
+            .is_err()
+        {
+            tracing::warn!("Timed out draining in-flight notifications");
+        }
+    }
+
     /// Notify about a successful liquidation.
     #[allow(clippy::too_many_arguments)]
     pub fn notify_liquidation(
@@ -709,5 +731,25 @@ mod tests {
         notifier.notify_swap_unsupported("m", "a", "b", "1");
         notifier.notify_scan_failures("m", 2, "err");
         notifier.notify_scan_recovered("m", 3);
+    }
+
+    #[tokio::test]
+    async fn drain_is_noop_when_disabled() {
+        let notifier = Notifier::new(None);
+        // No Telegram config means nothing was ever spawned; must return
+        // immediately even with a near-zero budget.
+        notifier.drain(Duration::from_millis(1)).await;
+    }
+
+    #[tokio::test]
+    async fn drain_completes_when_no_inflight_sends() {
+        let config = TelegramConfig {
+            bot_token: "123:ABC".to_string().into(),
+            chat_id: "-100123".to_string(),
+            thread_id: None,
+        };
+        let notifier = Notifier::new(Some(config));
+        // All permits are free — draining must not block or time out.
+        notifier.drain(Duration::from_secs(1)).await;
     }
 }

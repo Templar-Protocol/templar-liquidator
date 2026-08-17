@@ -357,6 +357,10 @@ impl LiquidatorService {
                 }
                 _ = liquidation_interval.tick() => {
                     self.liquidation_cycle().await;
+                    tracing::debug!(
+                        interval_seconds = self.config.liquidation_scan_interval,
+                        "Next liquidation scan interval"
+                    );
                 }
             }
         }
@@ -400,22 +404,32 @@ impl LiquidatorService {
             }
         }
 
-        tracing::info!(
-            interval_seconds = self.config.liquidation_scan_interval,
-            "Liquidation round completed"
-        );
+        tracing::info!("Liquidation round completed");
     }
 
     /// Runs a single scan-and-liquidate cycle, then returns.
     ///
-    /// Errors if the initial registry refresh fails and leaves nothing to scan.
+    /// Returns `Ok` even when individual markets fail to scan or liquidate;
+    /// fatal only when the registry listing fails or yields zero markets.
     pub async fn run_once(mut self) -> Result<(), LiquidatorError> {
-        if let Some(ref provider) = self.oneclick_provider {
-            provider.load_supported_tokens().await;
-        }
-        self.refresh_registry().await?;
-        self.liquidation_cycle().await;
-        Ok(())
+        // `refresh_registry` reloads the 1-Click supported-tokens cache
+        // unconditionally at its tail, so no separate pre-call is needed here.
+        let result = match self.refresh_registry().await {
+            Ok(()) if self.markets.is_empty() => Err(LiquidatorError::NoMarkets),
+            Ok(()) => {
+                self.liquidation_cycle().await;
+                tracing::info!("Run-once cycle completed");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
+
+        // Single-cycle runs must drain before returning: the tokio runtime
+        // shutting down after `main` returns would otherwise cancel any
+        // Telegram POST still in flight, on both the success and error paths.
+        self.config.notifier.drain(Duration::from_secs(10)).await;
+
+        result
     }
 
     /// Check if a market should be processed based on asset filtering rules.

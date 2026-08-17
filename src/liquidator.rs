@@ -123,6 +123,12 @@ pub enum LiquidatorError {
     StrategyError(String),
     #[error("Insufficient balance for liquidation")]
     InsufficientBalance,
+    /// Registry refresh succeeded but discovered zero supported markets —
+    /// enumeration worked, there was simply nothing to scan. Single-cycle
+    /// runs treat this as fatal so a scheduled job records a failure instead
+    /// of a silent no-op success.
+    #[error("Registry refresh yielded zero supported markets")]
+    NoMarkets,
 }
 
 /// Classifies where in the liquidation pipeline an error occurred.
@@ -179,6 +185,7 @@ pub enum NotificationKind {
     Strategy,
     InsufficientBalance,
     OracleUpdate,
+    NoMarkets,
 }
 
 impl NotificationKind {
@@ -205,6 +212,7 @@ impl NotificationKind {
             Self::Strategy => "strategy",
             Self::InsufficientBalance => "insufficient_balance",
             Self::OracleUpdate => "oracle_update",
+            Self::NoMarkets => "no_markets",
         }
     }
 }
@@ -232,7 +240,8 @@ impl LiquidatorError {
             | Self::ListBorrowPositionsError(_)
             | Self::ListDeploymentsError(_)
             | Self::GetConfigurationError(_)
-            | Self::FetchBalanceError(_) => ErrorPhase::Scan,
+            | Self::FetchBalanceError(_)
+            | Self::NoMarkets => ErrorPhase::Scan,
 
             Self::AccessKeyDataError(_)
             | Self::SerializeError(_)
@@ -275,6 +284,7 @@ impl LiquidatorError {
             Self::StrategyError(_) => NotificationKind::Strategy,
             Self::InsufficientBalance => NotificationKind::InsufficientBalance,
             Self::OracleUpdateError(_) => NotificationKind::OracleUpdate,
+            Self::NoMarkets => NotificationKind::NoMarkets,
         }
     }
 }

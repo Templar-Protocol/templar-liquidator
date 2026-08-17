@@ -2,7 +2,7 @@ use templar_liquidator::{Args, LiquidatorService, RunMode};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     tracing_subscriber::registry()
         .with(
             fmt::layer()
@@ -27,12 +27,16 @@ async fn main() {
     // Create and run service
     let service = LiquidatorService::new(config);
     match run_mode {
-        RunMode::Loop => service.run().await,
-        RunMode::Once => {
-            if let Err(e) = service.run_once().await {
-                tracing::error!(error = %e, "run-once cycle failed");
-                std::process::exit(1);
-            }
+        RunMode::Loop => {
+            service.run().await;
+            std::process::ExitCode::SUCCESS
         }
+        RunMode::Once => match service.run_once().await {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "run-once cycle failed");
+                std::process::ExitCode::FAILURE
+            }
+        },
     }
 }

@@ -101,7 +101,8 @@ pub struct Args {
     #[arg(long, env = "RUN_MODE", value_enum, default_value_t = RunMode::Loop)]
     pub run_mode: RunMode,
 
-    /// Shorthand for `--run-mode once`
+    /// Shorthand for `--run-mode once`. Forces once mode; takes precedence
+    /// over `--run-mode`.
     #[arg(long, default_value_t = false)]
     pub once: bool,
 
@@ -285,6 +286,15 @@ impl Args {
         }
     }
 
+    /// Resolves the effective run mode, applying the `--once` override.
+    const fn effective_run_mode(&self) -> RunMode {
+        if self.once {
+            RunMode::Once
+        } else {
+            self.run_mode
+        }
+    }
+
     /// Build service configuration from arguments
     #[allow(clippy::too_many_lines)]
     pub fn build_config(&self) -> ServiceConfig {
@@ -402,11 +412,7 @@ impl Args {
             transaction_timeout: self.transaction_timeout,
             liquidation_scan_interval: self.liquidation_scan_interval,
             registry_refresh_interval: self.registry_refresh_interval,
-            run_mode: if self.once {
-                RunMode::Once
-            } else {
-                self.run_mode
-            },
+            run_mode: self.effective_run_mode(),
             // `0` would make `buffer_unordered` hang forever; a refresh/scan with
             // no concurrency makes no sense, so floor it at 1.
             concurrency: self.concurrency.max(1),
@@ -441,6 +447,7 @@ impl Args {
         tracing::info!(
             network = %self.network,
             dry_run = self.dry_run,
+            run_mode = ?self.effective_run_mode(),
             "Starting liquidator bot"
         );
 
@@ -456,12 +463,15 @@ mod tests {
 
     use super::*;
 
+    /// Signer key shared by all config tests. Any valid ed25519 key works —
+    /// only its presence (a required arg) matters here.
+    const TEST_SIGNER_KEY: &str =
+        "ed25519:5JQFYvABVhxnvvvULXqZUSP8QtEiRBMUi5dHfkqZmJ2FLVJqMn3mEhZpF8p8qvC6SvdZLd5VDSvkeVJdyBDZfGi1";
+
     fn create_test_args() -> Args {
         Args {
             registries: vec!["registry.testnet".parse().unwrap()],
-            signer_key: "ed25519:5JQFYvABVhxnvvvULXqZUSP8QtEiRBMUi5dHfkqZmJ2FLVJqMn3mEhZpF8p8qvC6SvdZLd5VDSvkeVJdyBDZfGi1"
-                .parse()
-                .unwrap(),
+            signer_key: TEST_SIGNER_KEY.parse().unwrap(),
             signer_account: "liquidator.testnet".parse().unwrap(),
             network: Network::Testnet,
             near_rpc_url: None,
@@ -491,11 +501,56 @@ mod tests {
             swap_retry_attempts: 3,
             swap_retry_base_delay_ms: 2000,
             scan_failure_notify_threshold: 2,
-            failure_notification_cooldown_hours: crate::notifier::DEFAULT_FAILURE_NOTIFY_COOLDOWN_HOURS,
+            failure_notification_cooldown_hours:
+                crate::notifier::DEFAULT_FAILURE_NOTIFY_COOLDOWN_HOURS,
             telegram_bot_token: String::new(),
             telegram_chat_id: String::new(),
             telegram_thread_id: String::new(),
         }
+    }
+
+    /// Parses `Args` from the minimal required CLI args plus `extra`,
+    /// exercising clap's real parser (`try_parse_from`) rather than the
+    /// struct-literal helper above — this is what catches CLI-contract
+    /// regressions (arg names, env var names, kebab-case values) that a
+    /// struct literal can't, since it bypasses clap entirely.
+    fn parse_with(extra: &[&str]) -> Args {
+        let mut argv = vec![
+            "templar-liquidator",
+            "--registries",
+            "registry.testnet",
+            "--signer-key",
+            TEST_SIGNER_KEY,
+            "--signer-account",
+            "liquidator.testnet",
+        ];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("minimal required args should parse")
+    }
+
+    /// `Args::command().debug_assert()` walks clap's derived argument graph
+    /// and panics on internal inconsistencies (conflicting ids, bad defaults,
+    /// etc.) that only surface at parse time otherwise.
+    #[test]
+    fn arg_definitions_are_valid() {
+        use clap::CommandFactory as _;
+        Args::command().debug_assert();
+    }
+
+    #[test]
+    fn run_mode_defaults_to_loop() {
+        // clap reads the real process environment for `#[arg(env = "RUN_MODE")]`;
+        // an exported RUN_MODE in the test process's environment would change
+        // what this default-value assertion observes.
+        let args = parse_with(&[]);
+        assert_eq!(args.run_mode, RunMode::Loop);
+        assert!(!args.once);
+    }
+
+    #[test]
+    fn run_mode_once_parses_and_reaches_config() {
+        let args = parse_with(&["--run-mode", "once"]);
+        assert_eq!(args.build_config().run_mode, RunMode::Once);
     }
 
     /// A VAA is only accepted by the Pyth receiver whose guardian set signed it.
@@ -746,13 +801,6 @@ mod tests {
         args.scan_failure_notify_threshold = 5;
         let config = args.build_config();
         assert_eq!(config.scan_failure_notify_threshold, 5);
-    }
-
-    #[test]
-    fn run_mode_defaults_to_loop() {
-        let args = create_test_args();
-        assert_eq!(args.run_mode, RunMode::Loop);
-        assert!(!args.once);
     }
 
     #[test]

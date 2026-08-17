@@ -28,7 +28,7 @@ start-prod: ## Start in production mode (submits real transactions; DRY_RUN=fals
 stop: ## Stop all containers
 	$(COMPOSE) down
 
-restart: stop start ## Restart in dry-run mode
+restart: stop start ## Restart in dry-run mode (default; set DRY_RUN=false in .env to go live)
 
 logs: ## Follow container logs
 	$(COMPOSE) logs -f

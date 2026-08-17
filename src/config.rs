@@ -130,7 +130,17 @@ pub struct Args {
     /// Dry run mode - scan and log without executing transactions.
     /// Defaults to `true`: a public bot that moves money must simulate
     /// unless the operator explicitly opts into live mode with `DRY_RUN=false`.
-    #[arg(long, env = "DRY_RUN", default_value_t = true)]
+    /// Accepts an optional value so live mode is reachable from argv-only
+    /// surfaces (compose `command:` arrays, Cloud Run Job args): bare
+    /// `--dry-run` means true, `--dry-run=false` / `--dry-run false` opt out.
+    #[arg(
+        long,
+        env = "DRY_RUN",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_value_t = true,
+        default_missing_value = "true"
+    )]
     pub dry_run: bool,
 
     /// Collateral strategy: "hold" or "swap-to-borrow"
@@ -663,8 +673,8 @@ mod tests {
         args.liquidation_scan_interval = 300;
         args.registry_refresh_interval = 1800;
         args.concurrency = 5;
-        // dry_run now defaults to true; the case that actually matters here is
-        // an explicit opt-in to live mode propagating through to the config.
+        // The case that matters for build_config is an explicit opt-in to
+        // live mode (dry_run = false) propagating through to the config.
         args.dry_run = false;
         args.oneclick_api_token = Some("test_token".to_string());
         args.ref_contract = Some("ref.testnet".to_string());
@@ -824,7 +834,38 @@ mod tests {
     #[test]
     fn dry_run_is_the_default() {
         // A public bot that moves money must simulate unless the operator
-        // explicitly opts into live mode.
+        // explicitly opts into live mode. clap reads the real process
+        // environment for `#[arg(env = "DRY_RUN")]`; an exported DRY_RUN in
+        // the test process's environment would make this assertion vacuous
+        // (or fail outright) regardless of the declared default.
         assert!(parse_with(&[]).dry_run);
+    }
+
+    #[test]
+    fn dry_run_accepts_bare_and_explicit_forms() {
+        // Argv-only surfaces (compose `command:` arrays, Cloud Run Job args)
+        // can only ever select MORE simulation unless an explicit false is
+        // reachable from the CLI, not just from the environment.
+        assert!(parse_with(&["--dry-run"]).dry_run);
+        assert!(parse_with(&["--dry-run=true"]).dry_run);
+        assert!(!parse_with(&["--dry-run=false"]).dry_run);
+        assert!(!parse_with(&["--dry-run", "false"]).dry_run);
+    }
+
+    #[test]
+    fn explicit_live_mode_opt_out_reaches_config() {
+        // The assertion production safety rests on: docker-compose.prod.yml
+        // sets DRY_RUN=false, and that opt-out must survive all the way to
+        // ServiceConfig, not just to Args.
+        assert!(!parse_with(&["--dry-run=false"]).build_config().dry_run);
+        assert!(!parse_with(&["--dry-run", "false"]).build_config().dry_run);
+    }
+
+    #[test]
+    fn create_test_args_matches_the_cli_default() {
+        // Pins the claim made where create_test_args() sets dry_run: true —
+        // that it mirrors Args's own default rather than an independently
+        // chosen value that could drift from it.
+        assert_eq!(create_test_args().dry_run, parse_with(&[]).dry_run);
     }
 }

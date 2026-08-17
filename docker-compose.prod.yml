@@ -10,10 +10,14 @@ services:
     environment:
       - RUST_LOG=info,templar_liquidator=info
       - RUST_BACKTRACE=0
-      # Production mode opts in to live transactions. The bot is safe-by-default
-      # (DRY_RUN=true); this file sets it explicitly so flipping the code
-      # default never silently turns a production deployment into a simulation.
-      - DRY_RUN=false
+      # Interpolated from the project .env at `docker compose` invocation
+      # time, so .env stays authoritative in both directions (a fresh
+      # DRY_RUN=true from .env.example still simulates; an explicit
+      # DRY_RUN=false still goes live). Only an unset/blank DRY_RUN falls
+      # back to `false` — production's documented live posture — so this
+      # entry, not the code default, is what stops a prod deployment from
+      # silently becoming a simulation when .env omits DRY_RUN entirely.
+      - DRY_RUN=${DRY_RUN:-false}
 
     deploy:
       resources:

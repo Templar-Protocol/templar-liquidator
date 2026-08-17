@@ -50,6 +50,10 @@ MAX_LOOP_ITERATIONS="${MAX_LOOP_ITERATIONS:-10}"
 TRANSACTION_TIMEOUT="${TRANSACTION_TIMEOUT:-60}"
 MIN_PROFIT_BPS="${MIN_PROFIT_BPS:-50}"
 DRY_RUN="${DRY_RUN:-true}"
+# Exported (unlike the other CMD_ARGS-driven values above) because the binary
+# reads it back via `env = "DRY_RUN"` rather than an explicit --dry-run
+# argument below — a `source`d .env value stays shell-local otherwise.
+export DRY_RUN
 
 # Collateral strategy configuration
 COLLATERAL_STRATEGY="${COLLATERAL_STRATEGY:-hold}"
@@ -143,7 +147,9 @@ for registry in $REGISTRIES; do
     CMD_ARGS+=("--registries" "$registry")
 done
 
-[ "$DRY_RUN" = "true" ] && CMD_ARGS+=("--dry-run")
+# DRY_RUN reaches the binary via the exported env var above, not an argv
+# flag — an argv flag would need `--dry-run=false` to select live mode, and
+# omitting it entirely would leave the binary on its own default either way.
 
 # Add NEAR_RPC_URL if set. The bot no longer sends an X-API-Key header, so fold
 # any NEAR_API_KEY into the URL (FastNear/QuickNode accept `?apiKey=<key>`).

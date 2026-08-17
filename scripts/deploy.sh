@@ -191,26 +191,49 @@ EOF
 
 start_service() {
     log_info "Starting liquidator service..."
-    
+
+    # What an unset DRY_RUN in .env resolves to depends on which compose file
+    # ends up active on the server: --build-local ships docker-compose.prod.yml
+    # AS docker-compose.yml (its `DRY_RUN=${DRY_RUN:-false}` applies), while a
+    # git deploy runs the repo's own, untouched docker-compose.yml (no DRY_RUN
+    # override, so the binary's own safe-by-default true applies).
+    if [ "$BUILD_LOCAL" = true ]; then
+        DEFAULT_DRY_RUN_IF_UNSET="false"
+    else
+        DEFAULT_DRY_RUN_IF_UNSET="true"
+    fi
+
     ssh ${SERVER_USER}@${SERVER_IP} << EOF
         if [ "$BUILD_LOCAL" = true ]; then
             cd ${APP_DIR}
         else
             cd ${APP_DIR}/repo/service/liquidator
         fi
-        
-        # Start in dry-run mode first
+
         docker compose down 2>/dev/null || true
         docker compose up -d
-        
+
+        # Report what actually started rather than assuming: read the same
+        # DRY_RUN .env carries into the container.
+        DRY_RUN_VALUE=\$(grep -E '^DRY_RUN=' .env 2>/dev/null | tail -1 | cut -d '=' -f2-)
+        DRY_RUN_VALUE="\${DRY_RUN_VALUE:-$DEFAULT_DRY_RUN_IF_UNSET}"
+
         echo ""
-        echo "Liquidator started in DRY-RUN mode"
-        echo ""
-        echo "Next steps:"
-        echo "  1. Check logs: docker compose logs -f"
-        echo "  2. Verify operation for 24h"
-        echo "  3. Edit .env and set DRY_RUN=false"
-        echo "  4. Restart: docker compose down && docker compose up -d"
+        if [ "\$DRY_RUN_VALUE" = "true" ]; then
+            echo "Liquidator started in DRY-RUN mode (simulating only, no transactions submitted)"
+            echo ""
+            echo "Next steps:"
+            echo "  1. Check logs: docker compose logs -f"
+            echo "  2. Verify operation for 24h"
+            echo "  3. Edit .env and set DRY_RUN=false to go live"
+            echo "  4. Restart: docker compose down && docker compose up -d"
+        else
+            echo "Liquidator started in LIVE mode (DRY_RUN=\$DRY_RUN_VALUE) — it WILL submit real transactions"
+            echo ""
+            echo "Next steps:"
+            echo "  1. Check logs: docker compose logs -f"
+            echo "  2. To go back to simulating: edit .env, set DRY_RUN=true, and restart"
+        fi
 EOF
 }
 

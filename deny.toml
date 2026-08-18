@@ -1,0 +1,23 @@
+[licenses]
+allow = [
+    "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+    "Unicode-3.0", "CC0-1.0", "GPL-3.0-only", "MPL-2.0", "BSL-1.0",
+]
+
+# `redstone` (git dep of near-sdk's oracle stack) carries no `license` /
+# `license-file` field in its own Cargo.toml — the real license (Boost
+# Software License 1.0) lives in a LICENSE file at the git repo's workspace
+# root, one level above the package directory cargo-deny scans. Manually
+# asserted here rather than silently allowed; verified by hand against
+# https://github.com/redstone-finance/rust-sdk/blob/3.1.0-pre1/LICENSE.
+[[licenses.clarify]]
+crate = "redstone"
+expression = "BSL-1.0"
+license-files = []
+
+[advisories]
+yanked = "warn"
+
+[bans]
+multiple-versions = "allow"

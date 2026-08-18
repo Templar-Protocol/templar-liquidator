@@ -232,6 +232,10 @@ pub struct Args {
     /// Accepts an empty env var gracefully (treated as unset).
     #[arg(long, env = "TELEGRAM_THREAD_ID", default_value = "")]
     pub telegram_thread_id: String,
+
+    /// Port for the optional `/healthz` + `/metrics` HTTP endpoint (disabled when unset)
+    #[arg(long, env = "HTTP_PORT")]
+    pub http_port: Option<u16>,
 }
 
 impl Args {
@@ -451,6 +455,7 @@ impl Args {
             },
             notifier,
             scan_failure_notify_threshold: self.scan_failure_notify_threshold,
+            http_port: self.http_port,
         }
     }
 
@@ -524,6 +529,7 @@ mod tests {
             telegram_bot_token: String::new(),
             telegram_chat_id: String::new(),
             telegram_thread_id: String::new(),
+            http_port: None,
         }
     }
 
@@ -821,6 +827,19 @@ mod tests {
         args.scan_failure_notify_threshold = 5;
         let config = args.build_config();
         assert_eq!(config.scan_failure_notify_threshold, 5);
+    }
+
+    #[test]
+    fn http_port_defaults_to_disabled() {
+        assert_eq!(parse_with(&[]).http_port, None);
+        assert_eq!(create_test_args().build_config().http_port, None);
+    }
+
+    #[test]
+    fn http_port_reaches_config() {
+        let mut args = create_test_args();
+        args.http_port = Some(9090);
+        assert_eq!(args.build_config().http_port, Some(9090));
     }
 
     #[test]

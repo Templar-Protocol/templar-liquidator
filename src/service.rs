@@ -5,7 +5,12 @@
 //! - Inventory refresh (updating asset balances)
 //! - Liquidation rounds (scanning and executing liquidations)
 
-use std::{collections::HashMap, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    num::NonZeroU32,
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 
 use near_sdk::AccountId;
 use templar_gateway_client::{
@@ -28,8 +33,9 @@ use templar_common::{
 };
 
 use crate::{
-    inventory::InventoryManager, liquidation_strategy::LiquidationStrategy,
+    inventory::InventoryManager, liquidation_strategy::LiquidationStrategy, metrics::Metrics,
     oracle::PythUpdatesClient, swap::SwapProvider, CollateralStrategy, Liquidator, LiquidatorError,
+    RoundSummary,
 };
 
 /// Page size for listing registry deployments.
@@ -114,6 +120,9 @@ pub struct ServiceConfig {
     pub notifier: crate::notifier::SharedNotifier,
     /// Consecutive scan failures before sending a Telegram alert (0 = disabled)
     pub scan_failure_notify_threshold: u32,
+    /// Port for the optional `/healthz` + `/metrics` HTTP endpoint (disabled
+    /// when unset). Never started in `RunMode::Once`.
+    pub http_port: Option<u16>,
 }
 
 /// Liquidator service that manages the bot lifecycle
@@ -132,6 +141,8 @@ pub struct LiquidatorService {
     collateral_price_map: HashMap<String, CollateralPriceInfo>,
     /// Consecutive scan failure count per market (reset on success)
     scan_failure_counts: HashMap<AccountId, u32>,
+    /// Operational counters served by the optional `/metrics` endpoint.
+    metrics: Arc<Metrics>,
 }
 
 impl LiquidatorService {
@@ -226,6 +237,7 @@ impl LiquidatorService {
             oracle_fetcher,
             collateral_price_map: HashMap::new(),
             scan_failure_counts: HashMap::new(),
+            metrics: Arc::new(Metrics::default()),
         }
     }
 
@@ -293,6 +305,16 @@ impl LiquidatorService {
 
     /// Run the service event loop
     pub async fn run(mut self) {
+        // Optional operational HTTP surface. Loop mode only: a `run_once`
+        // process exits before anything could scrape it.
+        if let Some(port) = self.config.http_port {
+            crate::http::spawn(
+                port,
+                Arc::clone(&self.metrics),
+                self.config.liquidation_scan_interval.saturating_mul(3),
+            );
+        }
+
         // Create intervals for periodic tasks
         let mut registry_interval = interval(TokioDuration::from_secs(
             self.config.registry_refresh_interval,
@@ -369,6 +391,8 @@ impl LiquidatorService {
     /// One liquidation cycle: collateral refresh, optional batch swap,
     /// inventory refresh, liquidation round.
     async fn liquidation_cycle(&mut self) {
+        self.metrics.scans_total.fetch_add(1, Ordering::Relaxed);
+
         // Refresh collateral inventory (detect accumulated dust from prior runs)
         if let Err(e) = self.inventory.write().await.refresh_collateral().await {
             tracing::warn!(error = ?e, "Failed to refresh collateral inventory before batch swap");
@@ -383,7 +407,19 @@ impl LiquidatorService {
         self.refresh_inventory().await;
 
         // Run liquidation round
-        self.run_liquidation_round().await;
+        let round_summary = self.run_liquidation_round().await;
+        self.metrics
+            .candidates_found_total
+            .fetch_add(round_summary.candidates, Ordering::Relaxed);
+        self.metrics
+            .liquidations_attempted_total
+            .fetch_add(round_summary.attempted, Ordering::Relaxed);
+        self.metrics
+            .liquidations_succeeded_total
+            .fetch_add(round_summary.succeeded, Ordering::Relaxed);
+        self.metrics
+            .liquidations_failed_total
+            .fetch_add(round_summary.failed, Ordering::Relaxed);
 
         // Refresh collateral inventory after liquidations (for tracking)
         match self.inventory.write().await.refresh_collateral().await {
@@ -405,6 +441,7 @@ impl LiquidatorService {
         }
 
         tracing::info!("Liquidation round completed");
+        self.metrics.mark_scan_success();
     }
 
     /// Runs a single scan-and-liquidate cycle, then returns.
@@ -973,12 +1010,14 @@ impl LiquidatorService {
         }
     }
 
-    /// Run a single liquidation round across all markets
-    async fn run_liquidation_round(&mut self) {
+    /// Run a single liquidation round across all markets, returning the
+    /// combined tally for the optional `/metrics` endpoint.
+    async fn run_liquidation_round(&mut self) -> RoundSummary {
         let liquidation_span = tracing::debug_span!("liquidation_round");
         let market_ids: Vec<AccountId> = self.markets.keys().cloned().collect();
         let market_count = market_ids.len();
         let threshold = self.config.scan_failure_notify_threshold;
+        let mut round_summary = RoundSummary::default();
 
         async {
             for (i, market) in market_ids.iter().enumerate() {
@@ -996,7 +1035,8 @@ impl LiquidatorService {
 
                 // Handle errors gracefully and track consecutive failures
                 match result {
-                    Ok(()) => {
+                    Ok(summary) => {
+                        round_summary.merge(summary);
                         // Reset failure counter; notify recovery if we previously alerted
                         let prev = self
                             .scan_failure_counts
@@ -1012,6 +1052,8 @@ impl LiquidatorService {
                         tracing::info!(market = %market, "Market scan completed");
                     }
                     Err(e) => {
+                        self.metrics.scan_failures_total.fetch_add(1, Ordering::Relaxed);
+
                         let phase = e.phase();
                         if is_rate_limit_error(&e) {
                             tracing::error!(
@@ -1059,6 +1101,8 @@ impl LiquidatorService {
         }
         .instrument(liquidation_span)
         .await;
+
+        round_summary
     }
 }
 

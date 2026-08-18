@@ -32,8 +32,10 @@ use crate::liquidation_strategy::{LiquidationStrategy, SAFETY_BUFFER_BPS};
 pub mod config;
 pub mod executor;
 pub mod format;
+pub mod http;
 pub mod inventory;
 pub mod liquidation_strategy;
+pub mod metrics;
 pub mod notifier;
 pub mod oracle;
 pub mod profitability;
@@ -68,6 +70,35 @@ impl From<inventory::InventoryError> for LiquidatorError {
             }
             _ => LiquidatorError::StrategyError(err.to_string()),
         }
+    }
+}
+
+/// Tally of a liquidation round, additive across every market scanned in it.
+///
+/// Feeds the optional Prometheus counters in [`crate::metrics`]. `candidates`
+/// only counts positions that reached profitability evaluation or a
+/// submitted transaction — a scan/preparation-phase error before that point
+/// (e.g. a failed RPC read) is not counted, since it isn't known whether the
+/// position was actually liquidatable.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RoundSummary {
+    /// Underwater positions identified this round.
+    pub candidates: u64,
+    /// Liquidation transactions submitted (or simulated in dry-run).
+    pub attempted: u64,
+    /// Liquidations that landed successfully.
+    pub succeeded: u64,
+    /// Liquidations that failed after a transaction was submitted.
+    pub failed: u64,
+}
+
+impl RoundSummary {
+    /// Folds another round's tally into this one.
+    pub fn merge(&mut self, other: Self) {
+        self.candidates += other.candidates;
+        self.attempted += other.attempted;
+        self.succeeded += other.succeeded;
+        self.failed += other.failed;
     }
 }
 
@@ -976,7 +1007,7 @@ impl Liquidator {
 
     /// Runs liquidations for all eligible positions in the market.
     #[tracing::instrument(skip(self, _concurrency), level = "info", fields(market = %self.market))]
-    pub async fn run_liquidations(&self, _concurrency: usize) -> LiquidatorResult {
+    pub async fn run_liquidations(&self, _concurrency: usize) -> LiquidatorResult<RoundSummary> {
         let max_percentage = self.strategy.max_liquidation_percentage();
 
         tracing::info!(
@@ -1011,23 +1042,26 @@ impl Liquidator {
 
         if oracle_response.is_empty() {
             tracing::warn!("Oracle returned no prices, skipping market");
-            return Ok(());
+            return Ok(RoundSummary::default());
         }
 
         // Scan for positions
         let borrows = self.scanner.get_all_borrows().await?;
         if borrows.is_empty() {
             tracing::info!("No borrow positions found");
-            return Ok(());
+            return Ok(RoundSummary::default());
         }
 
         tracing::info!(positions = borrows.len(), "Evaluating positions");
 
         // Process positions
-        let mut liquidated = 0;
-        let mut not_liquidatable = 0;
-        let mut unprofitable = 0;
-        let mut failed = 0;
+        let mut liquidated = 0u64;
+        let mut not_liquidatable = 0u64;
+        let mut unprofitable = 0u64;
+        let mut failed = 0u64;
+        // Subset of `failed` where a transaction was actually submitted
+        // (execution phase) rather than failing before submission.
+        let mut failed_execution = 0u64;
         let total = borrows.len();
 
         for (i, (account, position)) in borrows.into_iter().enumerate() {
@@ -1050,6 +1084,7 @@ impl Liquidator {
                 Err(e) => {
                     let phase = e.phase();
                     if phase == ErrorPhase::Execution {
+                        failed_execution += 1;
                         tracing::error!(borrower = %account, phase = %phase, error = %e, "Liquidation failed");
                         self.notifier.notify_liquidation_failed(
                             self.market.as_ref(),
@@ -1077,7 +1112,23 @@ impl Liquidator {
             "Liquidation run completed"
         );
 
-        Ok(())
+        // `attempted`/`succeeded`/`failed` reflect only positions where a
+        // transaction was submitted (or simulated in dry-run): every
+        // `execute_liquidation` call returns either `Liquidated` or an
+        // execution-phase error, never anything else, so this pairing is
+        // exhaustive. `unprofitable` positions reached profitability
+        // evaluation but never submission, so they count toward `candidates`
+        // but not `attempted`. Scan/preparation-phase failures (`failed` minus
+        // `failed_execution`) are excluded from `candidates` since it isn't
+        // known whether those positions were actually liquidatable.
+        let round_summary = RoundSummary {
+            candidates: liquidated + unprofitable + failed_execution,
+            attempted: liquidated + failed_execution,
+            succeeded: liquidated,
+            failed: failed_execution,
+        };
+
+        Ok(round_summary)
     }
 }
 

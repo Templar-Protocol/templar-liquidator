@@ -5,12 +5,7 @@
 //! - Inventory refresh (updating asset balances)
 //! - Liquidation rounds (scanning and executing liquidations)
 
-use std::{
-    collections::HashMap,
-    num::NonZeroU32,
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
+use std::{collections::HashMap, num::NonZeroU32, sync::Arc, time::Duration};
 
 use near_sdk::AccountId;
 use templar_gateway_client::{
@@ -391,7 +386,7 @@ impl LiquidatorService {
     /// One liquidation cycle: collateral refresh, optional batch swap,
     /// inventory refresh, liquidation round.
     async fn liquidation_cycle(&mut self) {
-        self.metrics.scans_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics.inc_scan();
 
         // Refresh collateral inventory (detect accumulated dust from prior runs)
         if let Err(e) = self.inventory.write().await.refresh_collateral().await {
@@ -408,18 +403,7 @@ impl LiquidatorService {
 
         // Run liquidation round
         let round_summary = self.run_liquidation_round().await;
-        self.metrics
-            .candidates_found_total
-            .fetch_add(round_summary.candidates, Ordering::Relaxed);
-        self.metrics
-            .liquidations_attempted_total
-            .fetch_add(round_summary.attempted, Ordering::Relaxed);
-        self.metrics
-            .liquidations_succeeded_total
-            .fetch_add(round_summary.succeeded, Ordering::Relaxed);
-        self.metrics
-            .liquidations_failed_total
-            .fetch_add(round_summary.failed, Ordering::Relaxed);
+        self.metrics.add_round(&round_summary);
 
         // Refresh collateral inventory after liquidations (for tracking)
         match self.inventory.write().await.refresh_collateral().await {
@@ -441,7 +425,16 @@ impl LiquidatorService {
         }
 
         tracing::info!("Liquidation round completed");
-        self.metrics.mark_scan_success();
+
+        // A cycle only counts as a successful scan if at least one market
+        // scanned cleanly — reaching this line doesn't imply that (every
+        // per-market error inside `run_liquidation_round` is swallowed so
+        // the cycle can move on to the next market). An empty registry
+        // (zero configured markets) also does not count: `healthz` must not
+        // report healthy for a bot that isn't reaching any market.
+        if round_summary.markets_scanned_ok > 0 {
+            self.metrics.mark_scan_success();
+        }
     }
 
     /// Runs a single scan-and-liquidate cycle, then returns.
@@ -1037,6 +1030,7 @@ impl LiquidatorService {
                 match result {
                     Ok(summary) => {
                         round_summary.merge(summary);
+                        round_summary.markets_scanned_ok += 1;
                         // Reset failure counter; notify recovery if we previously alerted
                         let prev = self
                             .scan_failure_counts
@@ -1052,7 +1046,8 @@ impl LiquidatorService {
                         tracing::info!(market = %market, "Market scan completed");
                     }
                     Err(e) => {
-                        self.metrics.scan_failures_total.fetch_add(1, Ordering::Relaxed);
+                        round_summary.markets_failed += 1;
+                        self.metrics.inc_market_scan_failure();
 
                         let phase = e.phase();
                         if is_rate_limit_error(&e) {

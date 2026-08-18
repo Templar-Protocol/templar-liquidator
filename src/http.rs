@@ -3,10 +3,22 @@
 //! Started only when `HTTP_PORT` is configured; never started in
 //! `--run-mode once`. Binds 0.0.0.0 — meant for private networks / container
 //! port mappings, not public exposure.
+//!
+//! `/healthz` is a **readiness** signal (can this process currently do its
+//! job?), not a liveness one. Wiring it to a liveness probe would
+//! restart-loop a bot stuck on a persistent problem (e.g. every market
+//! unreachable) without fixing anything — restarting doesn't change whether
+//! the RPC endpoint is up.
 
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, routing::get, Router};
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    response::IntoResponse,
+    routing::get,
+    Router,
+};
 
 use crate::metrics::Metrics;
 
@@ -17,6 +29,15 @@ struct AppState {
     unhealthy_after_secs: u64,
 }
 
+/// Builds the route table. Shared by `spawn` and the tests below, so a
+/// renamed or removed route can't leave a hand-rebuilt test table green.
+fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics_text))
+        .with_state(state)
+}
+
 /// Spawns the HTTP listener as a background task.
 pub fn spawn(port: u16, metrics: Arc<Metrics>, unhealthy_after_secs: u64) {
     let state = AppState {
@@ -24,10 +45,7 @@ pub fn spawn(port: u16, metrics: Arc<Metrics>, unhealthy_after_secs: u64) {
         unhealthy_after_secs,
     };
     tokio::spawn(async move {
-        let app = Router::new()
-            .route("/healthz", get(healthz))
-            .route("/metrics", get(metrics_text))
-            .with_state(state);
+        let app = router(state);
         let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
             Ok(l) => l,
             Err(e) => {
@@ -50,33 +68,28 @@ async fn healthz(State(s): State<AppState>) -> (StatusCode, &'static str) {
     }
 }
 
-async fn metrics_text(State(s): State<AppState>) -> String {
-    s.metrics.render()
+async fn metrics_text(State(s): State<AppState>) -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        s.metrics.render(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Builds a router identical to the one `spawn` serves, without binding
-    /// a real port — lets handler tests run without network I/O.
-    fn test_router(metrics: Arc<Metrics>, unhealthy_after_secs: u64) -> Router {
-        let state = AppState {
-            metrics,
-            unhealthy_after_secs,
-        };
-        Router::new()
-            .route("/healthz", get(healthz))
-            .route("/metrics", get(metrics_text))
-            .with_state(state)
-    }
-
-    /// Exercises the real HTTP path (bind + request), not just handler
-    /// functions, so routing and status-code plumbing are covered too.
+    /// Exercises the real HTTP path (bind + request) through the exact
+    /// route table `spawn` serves, not just the handler functions, so
+    /// routing and status-code plumbing are covered too.
     #[tokio::test]
     async fn healthz_reflects_scan_health_and_metrics_serves_prometheus_text() {
         let metrics = Arc::new(Metrics::default());
-        let app = test_router(Arc::clone(&metrics), 1800);
+        let state = AppState {
+            metrics: Arc::clone(&metrics),
+            unhealthy_after_secs: 1800,
+        };
+        let app = router(state);
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -107,15 +120,21 @@ mod tests {
             .expect("healthz request");
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
-        metrics
-            .scans_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics.inc_scan();
         let resp = client
             .get(format!("{base}/metrics"))
             .send()
             .await
             .expect("metrics request");
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .expect("content-type header present")
+                .to_str()
+                .expect("content-type is ASCII"),
+            "text/plain; version=0.0.4"
+        );
         let body = resp.text().await.expect("metrics body");
         assert!(body.contains("templar_liquidator_scans_total 1"));
     }

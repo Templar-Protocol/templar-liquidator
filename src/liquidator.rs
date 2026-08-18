@@ -75,14 +75,18 @@ impl From<inventory::InventoryError> for LiquidatorError {
 
 /// Tally of a liquidation round, additive across every market scanned in it.
 ///
-/// Feeds the optional Prometheus counters in [`crate::metrics`]. `candidates`
-/// only counts positions that reached profitability evaluation or a
-/// submitted transaction — a scan/preparation-phase error before that point
-/// (e.g. a failed RPC read) is not counted, since it isn't known whether the
-/// position was actually liquidatable.
+/// Feeds the optional Prometheus counters in [`crate::metrics`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RoundSummary {
-    /// Underwater positions identified this round.
+    /// Positions that reached profitability evaluation or a submitted
+    /// transaction this round. Excludes positions skipped for insufficient
+    /// inventory (bucketed as `not_liquidatable` alongside genuinely healthy
+    /// positions — see [`LiquidationOutcome::Skipped`]) and any
+    /// scan/preparation-phase error before evaluation (e.g. a failed RPC
+    /// read), since in both cases it isn't known whether the position was
+    /// actually liquidatable. This undercounts true underwater positions;
+    /// splitting `Skipped` into "healthy" vs. "liquidatable but unfunded" is
+    /// tracked as follow-up work, not done here.
     pub candidates: u64,
     /// Liquidation transactions submitted (or simulated in dry-run).
     pub attempted: u64,
@@ -90,6 +94,11 @@ pub struct RoundSummary {
     pub succeeded: u64,
     /// Liquidations that failed after a transaction was submitted.
     pub failed: u64,
+    /// Markets whose scan completed this round without error.
+    pub markets_scanned_ok: u64,
+    /// Markets whose scan failed this round. A single round can contribute
+    /// more than one, since it iterates every configured market.
+    pub markets_failed: u64,
 }
 
 impl RoundSummary {
@@ -99,6 +108,8 @@ impl RoundSummary {
         self.attempted += other.attempted;
         self.succeeded += other.succeeded;
         self.failed += other.failed;
+        self.markets_scanned_ok += other.markets_scanned_ok;
+        self.markets_failed += other.markets_failed;
     }
 }
 
@@ -1112,20 +1123,29 @@ impl Liquidator {
             "Liquidation run completed"
         );
 
-        // `attempted`/`succeeded`/`failed` reflect only positions where a
-        // transaction was submitted (or simulated in dry-run): every
-        // `execute_liquidation` call returns either `Liquidated` or an
-        // execution-phase error, never anything else, so this pairing is
-        // exhaustive. `unprofitable` positions reached profitability
+        // `attempted`/`succeeded`/`failed` are keyed off `phase() ==
+        // ErrorPhase::Execution`, not off which call inside `liquidate()`
+        // raised the error — `execute_liquidation` can itself fail before
+        // submitting a transaction (e.g. the pre-submission inventory
+        // reserve maps to `InsufficientBalance`, classified `Preparation`),
+        // so "the error came from inside execute_liquidation" is NOT the
+        // same claim as "a transaction was submitted and failed"; only the
+        // `phase()` check is. `unprofitable` positions reached profitability
         // evaluation but never submission, so they count toward `candidates`
         // but not `attempted`. Scan/preparation-phase failures (`failed` minus
         // `failed_execution`) are excluded from `candidates` since it isn't
         // known whether those positions were actually liquidatable.
+        // `markets_scanned_ok`/`markets_failed` are round-level bookkeeping
+        // the caller (`LiquidatorService::run_liquidation_round`) fills in
+        // from the Ok/Err of this whole call — a single market's summary
+        // has nothing to report there.
         let round_summary = RoundSummary {
             candidates: liquidated + unprofitable + failed_execution,
             attempted: liquidated + failed_execution,
             succeeded: liquidated,
             failed: failed_execution,
+            markets_scanned_ok: 0,
+            markets_failed: 0,
         };
 
         Ok(round_summary)

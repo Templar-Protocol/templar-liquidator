@@ -18,6 +18,39 @@ license-files = []
 
 [advisories]
 yanked = "warn"
+ignore = [
+    # RUSTSEC-2026-0222 — wasmtime 45.0.3, "Stores can mix up type indices
+    # between engines". Path: near-sdk 5.29.0 (feature `unit-testing`) ->
+    # near-vm-runner -> wasmtime. `unit-testing` is enabled ONLY by our
+    # dev-dependencies templar-gateway-testing / test-utils (pinned
+    # Templar-Protocol/contracts rev), which use it as a mock-contract WASM
+    # test harness — none of the crate's own [dependencies] or the regular
+    # (non-dev) templar-* deps request it. Verified with
+    # `cargo tree -e normal -i wasmtime` and `cargo tree -e no-dev -i
+    # wasmtime`: both resolve to nothing, so wasmtime is entirely absent
+    # from `cargo build --release --bin liquidator` — it never ships, and
+    # our own source never touches near-vm-runner/wasmtime APIs. Clears
+    # when near-sdk ships a patched wasmtime, or the templar-* pin moves to
+    # a contracts rev whose test harness is off the vulnerable range.
+    { id = "RUSTSEC-2026-0222", reason = "wasmtime is reachable only through near-sdk's unit-testing feature, activated solely by our dev-dependencies (templar-gateway-testing / test-utils); confirmed absent from the release binary via `cargo tree -e normal -i wasmtime` (empty). Clears when near-sdk ships a patched wasmtime." },
+
+    # RUSTSEC-2024-0436 — `paste` 1.0.15, unmaintained (not a vulnerability;
+    # repo archived, no safe upgrade). Path: alloy (via
+    # templar-universal-account -> alloy-signer-local -> alloy) ->
+    # alloy-primitives -> paste. `cargo tree -e normal -i paste` confirms it
+    # resolves as `(proc-macro)`: it runs only during macro expansion at
+    # compile time and contributes no code to the compiled binary. Clears
+    # when alloy drops its `paste` dependency upstream.
+    { id = "RUSTSEC-2024-0436", reason = "paste is a proc-macro (compile-time only, no runtime code in the shipped binary), pulled in transitively via alloy -> templar-universal-account. Unmaintained, not a vulnerability; no safe upgrade exists. Clears when alloy drops it." },
+
+    # RUSTSEC-2025-0134 — `rustls-pemfile` 1.0.4, unmaintained (not a
+    # vulnerability; repo archived). Path: reqwest 0.11.27 (our own direct
+    # dependency) -> rustls-pemfile. Unlike the two above, this one DOES
+    # compile into the release binary. No safe upgrade exists within
+    # reqwest 0.11; the real fix is the already-identified reqwest 0.11 ->
+    # 0.12 migration, which drops rustls-pemfile entirely.
+    { id = "RUSTSEC-2025-0134", reason = "unmaintained (not a vulnerability), pulled in via our direct reqwest 0.11.27 dependency. Fix is the reqwest 0.11 -> 0.12 migration (tracked as follow-up work), which removes rustls-pemfile." },
+]
 
 [bans]
 multiple-versions = "allow"

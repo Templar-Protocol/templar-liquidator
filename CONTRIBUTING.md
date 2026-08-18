@@ -1,6 +1,19 @@
 # Contributing
 
-Thanks for considering a contribution to `templar-liquidator`. This is a public reference implementation — the expected way most people will use this repo is forking it and configuring/extending it for their own deployment (see the README's [extension seams](README.md#how-it-works)), but improvements to the shared bot are welcome upstream too.
+Thanks for considering a contribution to `templar-liquidator`. This is a public reference implementation — the expected way most people will use this repo is forking it and configuring/extending it for their own deployment (see the README's [extension seams](README.md#how-it-works)).
+
+## Who can open pull requests and issues
+
+Pull requests and issues are currently limited to members of the Templar
+Protocol organization. **Forking is unaffected** — the repo exists to be forked,
+run, and modified for your own deployment, and nothing here restricts that or
+the GPL-3.0 rights you have over your fork.
+
+If you have found a bug, a security issue, or want a change upstreamed, that is
+genuinely wanted — reach the maintainers through the contact in
+[`SECURITY.md`](SECURITY.md) rather than the issue tracker, and a maintainer
+will open the issue or shepherd the change. The rest of this guide applies to
+anyone working in the repo, org member or fork owner.
 
 ## Toolchain
 

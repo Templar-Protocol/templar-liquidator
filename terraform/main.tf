@@ -149,6 +149,16 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
 
 # Fires the job on var.schedule by POSTing to the Cloud Run Jobs "run" API,
 # authenticated as the invoker service account.
+#
+# Before setting env.DRY_RUN = "false" (going live), manually trigger this
+# job once and confirm in Cloud Run -> Jobs -> Executions -> Logs that:
+#   1. exactly one execution was created (`gcloud scheduler jobs run
+#      "$(terraform output -raw scheduler_job_name)" --location <region>`
+#      followed by `gcloud run jobs executions list --job <job-name>`),
+#   2. it pulled local.mirrored_image (not a stale or unmirrored tag), and
+#   3. every secret_env reference resolved (a bad Secret Manager id fails
+#      the execution at container start, not at `terraform apply`).
+# See the README's "15-minute walkthrough" step 6.
 resource "google_cloud_scheduler_job" "liquidator" {
   project  = var.project_id
   region   = var.region

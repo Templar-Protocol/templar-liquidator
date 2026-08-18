@@ -94,6 +94,13 @@ Do the same for any other secret you plan to reference in `secret_env`
    `terraform apply` again. This is a deliberate, separate step — going
    live should never be a side effect of an unrelated change.
 
+   Before this step, trigger the Scheduler job once more and confirm in
+   **Cloud Run → Jobs → Executions → Logs** that it created exactly one
+   execution, pulled the mirrored image (`terraform output image`), and
+   resolved every `secret_env` reference — a bad Secret Manager id fails
+   the execution at container start, not at `terraform apply`, so this is
+   the last checkpoint before real inventory moves.
+
 ## The overlap rule
 
 `task_timeout_seconds` **must stay below the schedule interval**. The job

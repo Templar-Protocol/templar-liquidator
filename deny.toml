@@ -54,3 +54,17 @@ ignore = [
 
 [bans]
 multiple-versions = "allow"
+
+[sources]
+# Fail closed on any git dependency not explicitly listed below, so a new
+# transitive git source can't slip in unreviewed. The three URLs are every
+# git source currently in Cargo.lock (verified via
+# `rg 'source = "git\+' Cargo.lock` / `cargo tree -e no-dev -i <crate>`);
+# add a new one here deliberately when a dependency change legitimately
+# introduces another.
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/Templar-Protocol/contracts",
+    "https://github.com/Templar-Protocol/pyth-lazer-public",
+    "https://github.com/redstone-finance/rust-sdk",
+]

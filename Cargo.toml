@@ -2,7 +2,7 @@
 name = "templar-liquidator"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.97.0"
 license = "GPL-3.0-only"
 repository = "https://github.com/Templar-Protocol/templar-liquidator"
 description = "Inventory-based liquidation bot for Templar Protocol lending markets on NEAR"

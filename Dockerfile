@@ -7,7 +7,14 @@
 # ============================================
 # Build Stage
 # ============================================
-FROM rust:1.97-bookworm AS builder
+# Pinned by digest (not just tag) so the same source revision always
+# produces the same image, even after upstream retags rust:1.97.0-bookworm
+# or the Debian repository underneath it changes. Tag kept alongside the
+# digest for readability; the digest is what's actually resolved. Matches
+# rust-toolchain.toml's `channel = "1.97.0"`. To refresh deliberately:
+#   docker buildx imagetools inspect rust:1.97.0-bookworm
+# and update both the tag and the digest below together.
+FROM rust:1.97.0-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e75fea57e2a2a5c3073 AS builder
 
 # git is already present in rust:*-bookworm and is required: the templar-*
 # dependencies below are pulled from github.com/Templar-Protocol/contracts
@@ -20,7 +27,7 @@ FROM rust:1.97-bookworm AS builder
 # to produce a JS bundle embedded in the compiled binary. Same requirement as
 # services/blockchain-gateway/Dockerfile in the backend monorepo, which
 # depends on the same crate.
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     nodejs \
@@ -33,11 +40,11 @@ WORKDIR /app
 #
 # Deliberately NOT copied:
 #   - rust-toolchain.toml: pins channel "1.97.0" + the rustfmt/clippy
-#     components for local dev and CI. The builder image ships rustc 1.97.1,
-#     which already satisfies Cargo.toml's `rust-version = "1.86"` MSRV;
-#     adding rust-toolchain.toml here would make rustup try to fetch a
-#     different exact patch plus components neither needed for `cargo
-#     build`, for no benefit.
+#     components for local dev and CI. The builder image above is already
+#     pinned to the matching rustc 1.97.0, which is also Cargo.toml's
+#     `rust-version` MSRV; adding rust-toolchain.toml here would make
+#     rustup try to fetch components neither needed for `cargo build`, for
+#     no benefit.
 #   - .cargo/config.toml: sets CARGO_WORKSPACE_DIR, read via env!() only by
 #     the templar-gateway-testing dev-dependency (used by tests/). `cargo
 #     build --release --bin liquidator` never compiles dev-dependencies, so
@@ -46,12 +53,16 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-RUN cargo build --release --bin liquidator
+RUN cargo build --locked --release --bin liquidator
 
 # ============================================
 # Runtime Stage
 # ============================================
-FROM debian:bookworm-slim
+# Pinned by digest for the same reproducibility reason as the builder stage
+# above. To refresh deliberately:
+#   docker buildx imagetools inspect debian:bookworm-slim
+# and update both the tag and the digest below together.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
 # ca-certificates: TLS to NEAR RPC / oracle / notification endpoints.
 # libssl3:         runtime counterpart of the builder's libssl-dev.
@@ -65,7 +76,7 @@ FROM debian:bookworm-slim
 # "not by the liquidator" note in src/oracle.rs). Unlike
 # services/blockchain-gateway/Dockerfile in the backend monorepo, which does
 # call it and installs `nodejs` at runtime for exactly that reason.
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     procps \
@@ -95,7 +106,7 @@ EXPOSE 9090
 # currently reach the chain?), not a liveness one, and restarting a process
 # stuck because RPC is down doesn't fix RPC being down (see src/http.rs).
 HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 \
-    CMD pgrep -x liquidator || exit 1
+    CMD ["pgrep", "-x", "liquidator"]
 
 LABEL org.opencontainers.image.title="Templar Liquidator"
 LABEL org.opencontainers.image.description="Inventory-based liquidation bot for Templar Protocol lending markets on NEAR"

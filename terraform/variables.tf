@@ -35,12 +35,53 @@ variable "task_timeout_seconds" {
   description = "Cloud Run Job task timeout in seconds. MUST stay below the schedule interval so two executions never overlap — the job has max_retries = 0 by design, so the next scheduled tick is the retry, not an in-place rerun."
   type        = number
   default     = 480
+
+  validation {
+    # Enforces the no-overlap invariant above for the common "every N
+    # minutes" cron form (`*/N * * * *`) that this module's own default
+    # schedule uses. A full cron parser is out of scope for a single
+    # validation expression, so schedule shapes this regex doesn't
+    # recognize (specific hours/days, comma/range lists, step values on
+    # other fields, etc.) are NOT checked here — size task_timeout_seconds
+    # against the actual interval by hand for those, using the same
+    # "timeout < interval" rule.
+    condition = (
+      can(regex("^\\*/([0-9]+) \\* \\* \\* \\*$", var.schedule))
+      ? var.task_timeout_seconds < tonumber(regex("^\\*/([0-9]+) \\* \\* \\* \\*$", var.schedule)[0]) * 60
+      : true
+    )
+    error_message = "task_timeout_seconds must be less than the schedule interval in seconds, so a slow run can never still be executing when the next scheduled tick fires (max_retries = 0 makes that tick the retry, not a rerun). This check only recognizes the \"*/N * * * *\" (every N minutes) cron form — for any other schedule shape, verify the invariant by hand and treat this validation passing as inconclusive, not as proof."
+  }
 }
 
 variable "env" {
-  description = "Plain (non-secret) environment variables passed to the container, e.g. NEAR_NETWORK, REGISTRY_ACCOUNT_IDS, SIGNER_ACCOUNT_ID, DRY_RUN. See the upstream .env.example for the full list of variables the binary reads."
+  description = "Plain (non-secret) environment variables passed to the container, e.g. NEAR_NETWORK, REGISTRY_ACCOUNT_IDS, SIGNER_ACCOUNT_ID, DRY_RUN. See the upstream .env.example for the full list of variables the binary reads. Secret-shaped values (signer keys, RPC/swap/notification tokens) belong in secret_env instead — see its validation below."
   type        = map(string)
   default     = {}
+
+  validation {
+    # Fails closed on the documented secret-shaped variable names so an
+    # operator can't accidentally pass a real secret here: env values
+    # become plaintext container env vars in the Cloud Run Job's config
+    # (readable to anyone with read access to the job resource), instead
+    # of a Secret Manager reference resolved at container start. Extend
+    # this list if the binary starts reading another credential-shaped env
+    # var upstream.
+    condition = length([
+      for k in keys(var.env) : k
+      if contains(["SIGNER_KEY", "NEAR_RPC_API_KEY", "ONECLICK_API_TOKEN", "TELEGRAM_BOT_TOKEN"], k)
+    ]) == 0
+    error_message = "env must not contain secret-shaped keys (SIGNER_KEY, NEAR_RPC_API_KEY, ONECLICK_API_TOKEN, TELEGRAM_BOT_TOKEN). Pass these through secret_env instead, which mounts them from an existing Secret Manager secret rather than recording plaintext in the container's env config."
+  }
+
+  validation {
+    # A key present in both maps is ambiguous (which one wins depends on
+    # provider/API ordering, not anything this module controls) and, if
+    # env's copy is a real secret, defeats the check above by duplicating
+    # the value in plaintext anyway.
+    condition     = length(setintersection(keys(var.env), keys(var.secret_env))) == 0
+    error_message = "env and secret_env must not share any keys. Keep each variable name in exactly one of the two maps."
+  }
 }
 
 variable "secret_env" {

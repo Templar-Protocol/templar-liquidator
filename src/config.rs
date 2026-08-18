@@ -74,7 +74,7 @@ fn validate_retry_attempts(s: &str) -> Result<u32, String> {
 
 /// Collateral handling strategy after a liquidation, as accepted on the CLI /
 /// env var. Maps 1:1 to the domain [`CollateralStrategy`] in
-/// [`Args::parse_collateral_strategy`].
+/// `Args::parse_collateral_strategy` (private, so not linked).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum CollateralStrategyArg {
     /// Keep collateral as received (no swaps back to a borrow asset).

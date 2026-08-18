@@ -31,6 +31,7 @@ use test_utils::to_price;
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
+#[ignore = "node-backed: needs a neard sandbox and contract wasms; see docs/testing.md"]
 async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
     let harness = SandboxHarness::start().await?;
     let (market_id, configuration) = harness.deploy_market().await?;

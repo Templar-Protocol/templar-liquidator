@@ -1,0 +1,59 @@
+name: Sandbox integration
+
+# Runs the node-backed liquidation_sandbox test (`#[ignore]`d in the PR gate —
+# see docs/testing.md for why it can't run from a plain checkout, and what of
+# this workflow is verified-by-running vs. reasoned from the contracts repo's
+# own source/CI at the pinned rev).
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # THE SINGLE-REV RULE (see this repo's CLAUDE.md): must match every
+  # templar-* `rev =` pin in Cargo.toml.
+  CONTRACTS_REV: 8f8fe1d1a057756f71438abc75d7b3c688b282f0
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1 # reads rust-toolchain.toml
+
+      - name: Check out contracts at the pinned rev
+        run: |
+          git clone https://github.com/Templar-Protocol/contracts /tmp/contracts
+          git -C /tmp/contracts checkout "${CONTRACTS_REV}"
+
+      # The default (non-TEST_CONTRACTS_PREBUILT) wasm-loading path in
+      # gateway/testing/src/wasm.rs shells out to `cargo near build` per
+      # contract (market, mock-ft, mock-mt, mock-oracle) the first time each
+      # is requested.
+      - name: Install cargo-near
+        uses: Templar-Protocol/contracts/.github/actions/cargo-near@8f8fe1d1a057756f71438abc75d7b3c688b282f0
+
+      # `cargo near build` runs with its cwd inside /tmp/contracts, so rustup
+      # resolves *that* checkout's own rust-toolchain.toml (a different
+      # channel + wasm32-unknown-unknown target than this repo's). rustup
+      # auto-installs a toolchain file's toolchain and declared targets on
+      # first use; this step just makes that cost visible as its own step
+      # instead of hiding inside the test run.
+      - name: Pre-install the contracts checkout's pinned toolchain
+        working-directory: /tmp/contracts
+        run: rustup show
+
+      # SandboxHarness::start() runs in owned mode (launches its own neard
+      # via the near-sandbox crate) whenever NEAR_SANDBOX_RPC_URL is unset, so
+      # no separate node-pool setup (the monorepo's script/sandbox-up.sh) is
+      # needed for this single test. No Postgres either: this test never
+      # touches it (that's only for other packages' gateway-store tests that
+      # share the monorepo's nextest invocation).
+      - name: Run the sandbox test
+        env:
+          CARGO_WORKSPACE_DIR: /tmp/contracts/
+        run: cargo test --test liquidation_sandbox -j 1 -- --ignored --nocapture

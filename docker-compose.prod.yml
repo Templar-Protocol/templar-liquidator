@@ -1,0 +1,68 @@
+services:
+  liquidator:
+    image: templar-liquidator:latest
+    container_name: templar-liquidator
+    restart: always
+
+    # Optional /healthz + /metrics port (see src/http.rs). Inert unless the
+    # operator sets HTTP_PORT in .env: the mapping alone doesn't start
+    # anything listening, it just refuses connections until HTTP_PORT matches.
+    # Bound to loopback because the endpoint is unauthenticated, and because
+    # Docker's published-port DNAT rules are evaluated ahead of UFW's INPUT
+    # chain — a 0.0.0.0 mapping would be reachable from the internet even on a
+    # host whose firewall allows only 22/80. Change the host side deliberately
+    # if you scrape from another machine.
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-9090}:${HTTP_PORT:-9090}"
+
+    env_file:
+      - .env
+
+    environment:
+      - RUST_LOG=info,templar_liquidator=info
+      - RUST_BACKTRACE=0
+      # Bind the listener to all interfaces INSIDE the container. Docker
+      # publishes a port by DNAT to the container's own IP, so a process bound
+      # to the container's loopback is unreachable through the mapping and the
+      # endpoint would silently never answer. The exposure control is the host
+      # side of `ports:` above, which publishes to 127.0.0.1 only.
+      - HTTP_BIND_ADDR=0.0.0.0
+      # Interpolated from the project .env at `docker compose` invocation
+      # time, so .env stays authoritative in both directions (a fresh
+      # DRY_RUN=true from .env.example still simulates; an explicit
+      # DRY_RUN=false still goes live). Only an unset/blank DRY_RUN falls
+      # back to `false` — production's documented live posture — so this
+      # entry, not the code default, is what stops a prod deployment from
+      # silently becoming a simulation when .env omits DRY_RUN entirely.
+      - DRY_RUN=${DRY_RUN:-false}
+
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 3G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+        compress: "true"
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "liquidator"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp

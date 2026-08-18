@@ -1,0 +1,33 @@
+{
+  "name": "templar-liquidator",
+  // Image is pinned by digest (not just a mutable major tag) so a container
+  // rebuild can't silently pull a different image without a reviewed PR.
+  // The tag is kept alongside the digest for readability; the digest is
+  // what's actually resolved. To refresh deliberately, re-resolve with:
+  //   docker buildx imagetools inspect mcr.microsoft.com/devcontainers/rust:1-bookworm
+  // and update both the tag and the digest together.
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm@sha256:d599b1bc98c3fc53825462ebf1610f39ef9145aeab485deffb8aaef44f349fe1",
+  // Feature ids don't accept a combined tag@digest form (only one or the
+  // other), so these are pinned to the exact semantic version each moving
+  // major tag (":1") currently resolves to instead — same effect, so a
+  // rebuild can't silently execute changed feature install scripts. To
+  // refresh deliberately, re-resolve with:
+  //   docker buildx imagetools inspect ghcr.io/devcontainers/features/<name>:1
+  // and confirm the new exact version before bumping it here.
+  "features": {
+    "ghcr.io/devcontainers/features/terraform:1.5.0": {},
+    "ghcr.io/devcontainers/features/github-cli:1.1.0": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:1.0.9": {}
+  },
+  // `rustup show` reads rust-toolchain.toml and installs the pinned 1.97.0
+  // toolchain (plus rustfmt/clippy) on first open. `cargo fetch` then warms
+  // the dependency cache, including the git checkout of the pinned
+  // templar-* rev — worth doing up front since that fetch needs network and
+  // otherwise happens lazily on the first build/test/clippy invocation.
+  "postCreateCommand": "rustup show && cargo fetch",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml", "hashicorp.terraform"]
+    }
+  }
+}

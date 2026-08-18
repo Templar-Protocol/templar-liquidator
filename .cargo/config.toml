@@ -1,0 +1,6 @@
+[env]
+# https://github.com/rust-lang/cargo/issues/3946#issuecomment-973132993
+# templar-gateway-testing (dev-dependency, pulled in for the sandbox test)
+# reads this at compile time via env!() to locate this repo's root. Mirrors
+# the equivalent entry in the contracts monorepo's .cargo/config.toml.
+CARGO_WORKSPACE_DIR = { value = "", relative = true }

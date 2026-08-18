@@ -1,0 +1,283 @@
+//! Market position scanner module.
+//!
+//! Handles scanning markets for borrow positions and checking liquidation status.
+
+use near_sdk::AccountId;
+use std::collections::HashMap;
+use templar_common::{
+    borrow::{BorrowPosition, BorrowStatus},
+    oracle::pyth::OracleResponse,
+};
+use templar_gateway_client::SigningClient;
+use templar_gateway_methods_spec::{contract, market};
+use templar_gateway_types::common::Pagination;
+
+use crate::{rpc::RpcError, LiquidatorError, LiquidatorResult};
+
+/// Type alias for borrow positions map
+pub type BorrowPositions = HashMap<AccountId, BorrowPosition>;
+
+/// Market position scanner.
+///
+/// Responsible for:
+/// - Fetching all borrow positions from a market
+/// - Checking liquidation status of positions
+/// - Pagination handling for large markets
+/// - Market version compatibility checking (NEP-330)
+pub struct MarketScanner {
+    client: SigningClient,
+    market: AccountId,
+}
+
+impl MarketScanner {
+    /// Minimum supported contract version (semver).
+    /// Markets with version < 1.0.0 will be skipped.
+    pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (1, 0, 0);
+
+    /// Minimum version that supports partial liquidation (semver).
+    /// Markets with version < 1.1.0 only support full liquidation.
+    pub const MIN_PARTIAL_LIQUIDATION_VERSION: (u32, u32, u32) = (1, 1, 0);
+}
+
+impl MarketScanner {
+    /// Creates a new market scanner.
+    pub fn new(client: SigningClient, market: AccountId) -> Self {
+        Self { client, market }
+    }
+
+    /// Fetches borrow status for an account.
+    #[tracing::instrument(skip(self, oracle_response), level = "debug")]
+    pub async fn get_borrow_status(
+        &self,
+        account_id: &AccountId,
+        oracle_response: &OracleResponse,
+    ) -> Result<Option<BorrowStatus>, RpcError> {
+        let result = self
+            .client
+            .read(market::GetBorrowStatus::new(
+                self.market.clone(),
+                account_id.clone(),
+                oracle_response.clone(),
+            ))
+            .await
+            .map_err(RpcError::from)?;
+        Ok(result.status)
+    }
+
+    /// Fetches a single borrow position from the market.
+    #[tracing::instrument(skip(self), level = "debug")]
+    pub async fn get_borrow_position(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Option<BorrowPosition>, RpcError> {
+        let result = self
+            .client
+            .read(market::GetBorrowPosition::new(
+                self.market.clone(),
+                account_id.clone(),
+            ))
+            .await
+            .map_err(RpcError::from)?;
+        Ok(result.position)
+    }
+
+    /// Fetches all borrow positions from the market with pagination.
+    #[tracing::instrument(skip(self), level = "debug")]
+    pub async fn get_all_borrows(&self) -> LiquidatorResult<BorrowPositions> {
+        let mut all_positions: BorrowPositions = HashMap::new();
+        let page_size: u32 = 500;
+        let mut current_offset: u32 = 0;
+
+        loop {
+            let page = self
+                .client
+                .read(
+                    market::ListBorrowPositions::new(self.market.clone()).with_args(Pagination {
+                        offset: Some(current_offset),
+                        limit: Some(page_size),
+                    }),
+                )
+                .await
+                .map_err(|e| LiquidatorError::ListBorrowPositionsError(e.into()))?
+                .positions;
+
+            let fetched = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            if fetched == 0 {
+                break;
+            }
+
+            tracing::debug!(
+                market = %self.market,
+                offset = current_offset,
+                fetched = fetched,
+                "Fetched borrow positions page"
+            );
+
+            all_positions.extend(page);
+            current_offset += fetched;
+
+            if fetched < page_size {
+                break;
+            }
+        }
+
+        tracing::info!(
+            market = %self.market,
+            total_positions = all_positions.len(),
+            "Fetched borrow positions"
+        );
+
+        Ok(all_positions)
+    }
+
+    /// Checks if a position is liquidatable.
+    ///
+    /// Returns `Some(reason)` if the position is liquidatable with the liquidation reason,
+    /// or `None` if the position is not liquidatable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the borrow status cannot be fetched
+    pub async fn is_liquidatable(
+        &self,
+        account_id: &AccountId,
+        oracle_response: &OracleResponse,
+    ) -> LiquidatorResult<Option<String>> {
+        let status = self
+            .get_borrow_status(account_id, oracle_response)
+            .await
+            .map_err(LiquidatorError::FetchBorrowStatus)?;
+
+        match status {
+            Some(BorrowStatus::Liquidation(reason)) => Ok(Some(format!("{reason:?}"))),
+            Some(_) | None => Ok(None),
+        }
+    }
+
+    /// Fetches the contract version via NEP-330 metadata.
+    ///
+    /// Returns `None` if the contract doesn't implement NEP-330 or the read fails.
+    async fn get_contract_version(&self) -> Option<String> {
+        match self
+            .client
+            .read(contract::GetVersion::new(self.market.clone()))
+            .await
+        {
+            Ok(result) => Some(result.version_string),
+            Err(_) => None,
+        }
+    }
+
+    /// Checks market compatibility by verifying its contract version.
+    ///
+    /// Fetches the NEP-330 version once (if the contract implements it) and
+    /// checks that it's >= `Self::MIN_SUPPORTED_VERSION`. A market with no
+    /// NEP-330 metadata is assumed compatible and left for the market
+    /// contract itself to reject if it actually isn't.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the market's version is supported (or unknown).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the market reports a version below
+    /// `Self::MIN_SUPPORTED_VERSION`, or an unparseable version string.
+    #[tracing::instrument(skip(self), level = "debug")]
+    pub async fn check_market_compatibility(&self) -> LiquidatorResult<()> {
+        let Some(version_string) = self.get_contract_version().await else {
+            // No NEP-330 metadata - assume compatible and let market contract reject if incompatible
+            tracing::debug!(
+                market = %self.market,
+                "Contract missing NEP-330 metadata, assuming compatibility"
+            );
+            return Ok(());
+        };
+
+        // Parse semver (e.g., "1.2.3" or "0.1.0")
+        let parts: Vec<&str> = version_string.split('.').collect();
+        let (major, minor, patch) = if let [maj, min, pat] = parts.as_slice() {
+            let major = maj.parse::<u32>().unwrap_or(0);
+            let minor = min.parse::<u32>().unwrap_or(0);
+            let patch = pat.parse::<u32>().unwrap_or(0);
+            (major, minor, patch)
+        } else {
+            tracing::info!(
+                market = %self.market,
+                version = %version_string,
+                "Invalid semver format, skipping market"
+            );
+            return Err(LiquidatorError::StrategyError(format!(
+                "Invalid version format: {version_string}"
+            )));
+        };
+
+        // Check basic compatibility
+        let is_compatible = (major, minor, patch) >= Self::MIN_SUPPORTED_VERSION;
+        if !is_compatible {
+            let (min_major, min_minor, min_patch) = Self::MIN_SUPPORTED_VERSION;
+            tracing::info!(
+                market = %self.market,
+                version = %version_string,
+                min_version = %format!("{min_major}.{min_minor}.{min_patch}"),
+                "Skipping market - unsupported contract version"
+            );
+            return Err(LiquidatorError::StrategyError(format!(
+                "Market version {version_string} < {min_major}.{min_minor}.{min_patch}"
+            )));
+        }
+
+        tracing::debug!(
+            market = %self.market,
+            version = %version_string,
+            "Market is compatible"
+        );
+        Ok(())
+    }
+
+    /// Tests if the market is compatible by verifying its version via NEP-330.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the market version is not supported.
+    #[tracing::instrument(skip(self), level = "debug")]
+    pub async fn test_market_compatibility(&self) -> LiquidatorResult<()> {
+        self.check_market_compatibility().await
+    }
+
+    /// Gets the market version via NEP-330 contract metadata.
+    ///
+    /// Fetches the contract version and parses it as a semver tuple.
+    /// Used to enable version-specific liquidation logic (v1.0 vs v1.1+).
+    ///
+    /// # Returns
+    ///
+    /// `Some((major, minor, patch))` if version metadata is available and parseable,
+    /// `None` if the contract doesn't support NEP-330 or version format is invalid.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let version = scanner.get_market_version().await;
+    /// match version {
+    ///     Some((1, 0, 0)) => println!("v1.0 market"),
+    ///     Some((1, 1, _)) => println!("v1.1+ market"),
+    ///     None => println!("Unknown version"),
+    /// }
+    /// ```
+    #[tracing::instrument(skip(self), level = "debug")]
+    pub async fn get_market_version(&self) -> Option<(u32, u32, u32)> {
+        let version_string = self.get_contract_version().await?;
+
+        // Parse semver (e.g., "1.2.3" or "0.1.0")
+        let parts: Vec<&str> = version_string.split('.').collect();
+        if let [maj, min, pat] = parts.as_slice() {
+            let major = maj.parse::<u32>().ok()?;
+            let minor = min.parse::<u32>().ok()?;
+            let patch = pat.parse::<u32>().ok()?;
+            Some((major, minor, patch))
+        } else {
+            None
+        }
+    }
+}

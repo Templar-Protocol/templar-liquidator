@@ -1,0 +1,91 @@
+services:
+  liquidator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: templar-liquidator:latest
+    container_name: templar-liquidator
+    restart: unless-stopped
+
+    # Optional /healthz + /metrics port (see src/http.rs). Inert unless the
+    # operator sets HTTP_PORT in .env: the mapping alone doesn't start
+    # anything listening, it just refuses connections until HTTP_PORT matches.
+    # Bound to loopback because the endpoint is unauthenticated, and because
+    # Docker's published-port DNAT rules are evaluated ahead of UFW's INPUT
+    # chain — a 0.0.0.0 mapping would be reachable from the internet even on a
+    # host whose firewall allows only 22/80. Change the host side deliberately
+    # if you scrape from another machine.
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-9090}:${HTTP_PORT:-9090}"
+
+    # Environment variables from .env file
+    env_file:
+      - .env
+
+    # Additional environment variables
+    environment:
+      - RUST_LOG=${RUST_LOG:-info,templar_liquidator=debug}
+      - RUST_BACKTRACE=${RUST_BACKTRACE:-1}
+      # Bind the listener to all interfaces INSIDE the container. Docker
+      # publishes a port by DNAT to the container's own IP, so a process bound
+      # to the container's loopback is unreachable through the mapping and the
+      # endpoint would silently never answer. The exposure control is the host
+      # side of `ports:` above, which publishes to 127.0.0.1 only.
+      - HTTP_BIND_ADDR=0.0.0.0
+
+    command: [
+      "--network", "${NEAR_NETWORK:-mainnet}",
+      "--signer-account", "${SIGNER_ACCOUNT_ID}",
+      # SIGNER_KEY is deliberately NOT passed here. Process arguments are not
+      # secret: /proc/<pid>/cmdline is world-readable and the value would show
+      # up in `ps`, `docker inspect` and `docker compose config`. env_file
+      # already supplies it and clap reads it from the environment. Never move
+      # a secret into this array.
+      "--registries", "${REGISTRY_ACCOUNT_IDS:-v1.tmplr.near}",
+      "--min-profit-bps", "${MIN_PROFIT_BPS:-50}",
+      "--liquidation-scan-interval", "${LIQUIDATION_SCAN_INTERVAL:-600}",
+      "--registry-refresh-interval", "${REGISTRY_REFRESH_INTERVAL:-3600}",
+      "--concurrency", "${CONCURRENCY:-10}",
+      "--transaction-timeout", "${TRANSACTION_TIMEOUT:-60}",
+      "--collateral-strategy", "${COLLATERAL_STRATEGY:-hold}",
+      "--max-loop-iterations", "${MAX_LOOP_ITERATIONS:-10}",
+      "--redstone-gateway-url", "${REDSTONE_GATEWAY_URL:-https://oracle-gateway-1.a.redstone.vip}",
+      # Uncomment to enable loop liquidation (repeatedly liquidate until healthy):
+      # "--loop-liquidation",
+      # "--fixed-liquidation-amount-usd", "${FIXED_LIQUIDATION_AMOUNT_USD}",
+      # ONECLICK_API_TOKEN is a secret: set it in .env, never as a flag here.
+      # "--ref-contract", "${REF_CONTRACT:-v2.ref-finance.near}",
+    ]
+    # No --partial-percentage flag here on purpose: the strategy default
+    # (100% / full liquidation when neither PARTIAL_LIQUIDATION_PERCENTAGE nor
+    # FIXED_LIQUIDATION_AMOUNT_USD is set) must govern unless the operator
+    # opts into a lower percentage via .env — this compose file must not
+    # silently run a different default than what the docs promise.
+    # No --dry-run flag and no DRY_RUN override here on purpose: this is the
+    # default/safe path, so it inherits the bot's safe-by-default behavior
+    # (DRY_RUN=true) unless the operator sets DRY_RUN=false in .env.
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "liquidator"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

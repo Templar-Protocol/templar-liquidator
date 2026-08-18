@@ -1,0 +1,11 @@
+/target
+.env
+*.log
+
+# Terraform: forks must not commit state (it can contain resolved values) or
+# their own tfvars.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example

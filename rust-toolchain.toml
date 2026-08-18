@@ -1,0 +1,8 @@
+[toolchain]
+# Matches Cargo.toml's `rust-version` (the declared MSRV) and the Dockerfile
+# builder stage's pinned digest — CI, Docker, and local dev all build with
+# the exact same rustc. Bump all three together; a `channel` here newer than
+# `rust-version` would make CI/Docker succeed on syntax the declared MSRV
+# doesn't actually support.
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

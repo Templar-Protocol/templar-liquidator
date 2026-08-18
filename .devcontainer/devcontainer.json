@@ -1,0 +1,20 @@
+{
+  "name": "templar-liquidator",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/terraform:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:1": {}
+  },
+  // `rustup show` reads rust-toolchain.toml and installs the pinned 1.97.0
+  // toolchain (plus rustfmt/clippy) on first open. `cargo fetch` then warms
+  // the dependency cache, including the git checkout of the pinned
+  // templar-* rev — worth doing up front since that fetch needs network and
+  // otherwise happens lazily on the first build/test/clippy invocation.
+  "postCreateCommand": "rustup show && cargo fetch",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml", "hashicorp.terraform"]
+    }
+  }
+}

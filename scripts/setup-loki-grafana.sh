@@ -15,14 +15,24 @@
 # Usage:
 #   sudo bash setup-loki-grafana.sh
 #
-# After installation:
-#   - Grafana UI: http://YOUR_SERVER_IP:3000
+# Neither service is authenticated at the transport level (Loki runs with
+# auth_enabled: false; Grafana ships default admin/admin credentials until
+# changed), so both are bound to loopback (127.0.0.1) by default -- the same
+# posture the bot's own /healthz+/metrics port uses in docker-compose.yml.
+# Nothing is opened in the firewall for them.
+#
+# After installation (default, loopback-only):
+#   - Grafana UI: http://localhost:3000 on the server itself, or via an SSH
+#     tunnel from your workstation: ssh -L 3000:localhost:3000 <user>@<host>
 #   - Default credentials: admin / admin (change on first login)
 #   - Loki API: http://localhost:3100
 #
-# Firewall configuration:
-#   sudo ufw allow 3000/tcp  # Grafana UI
-#   sudo ufw allow 3100/tcp  # Loki API (optional, can keep localhost-only)
+# Exposing either service beyond loopback is an explicit, separate opt-in:
+# edit http_addr in /etc/grafana/grafana.ini and http_listen_address in
+# /etc/loki/config.yaml, open the relevant port in ufw, and put a real
+# authenticating reverse proxy (TLS + credentials) in front -- do not expose
+# Loki directly, and do not leave Grafana on its default admin/admin password
+# if you do this.
 #
 set -e
 
@@ -62,11 +72,34 @@ mkdir -p /var/lib/loki/{index,chunks}
 mkdir -p /etc/loki
 mkdir -p /etc/promtail
 
+# Release binaries are verified against Grafana's own published SHA256SUMS
+# for this exact pinned version (fetched from
+# https://github.com/grafana/loki/releases/tag/v3.3.2 and copied in here, not
+# re-downloaded at install time) so a compromised mirror or tampered
+# in-transit download is caught before the archive is ever extracted or its
+# binary executed as a systemd service.
+LOKI_VERSION="3.3.2"
+LOKI_ZIP_SHA256="dd2dbf4d91a607a87207ffc20ae92370c1b1e22e66688a90f723a11549e8bd69"
+PROMTAIL_ZIP_SHA256="ab5ab317c800b4804839832a9838834a23f487398671587f81e074fb561d0757"
+
+verify_checksum() {
+    local file="$1"
+    local expected="$2"
+    local actual
+    actual="$(sha256sum "$file" | awk '{print $1}')"
+    if [ "$actual" != "$expected" ]; then
+        log_error "Checksum mismatch for $file"
+        log_error "  expected: $expected"
+        log_error "  actual:   $actual"
+        exit 1
+    fi
+}
+
 # Download Loki
 log_info "Downloading Loki..."
 cd /opt/loki
-LOKI_VERSION="3.3.2"
 wget -q https://github.com/grafana/loki/releases/download/v${LOKI_VERSION}/loki-linux-amd64.zip
+verify_checksum loki-linux-amd64.zip "$LOKI_ZIP_SHA256"
 unzip -o loki-linux-amd64.zip
 chmod +x loki-linux-amd64
 rm loki-linux-amd64.zip
@@ -74,6 +107,7 @@ rm loki-linux-amd64.zip
 # Download Promtail
 log_info "Downloading Promtail..."
 wget -q https://github.com/grafana/loki/releases/download/v${LOKI_VERSION}/promtail-linux-amd64.zip
+verify_checksum promtail-linux-amd64.zip "$PROMTAIL_ZIP_SHA256"
 unzip -o promtail-linux-amd64.zip
 chmod +x promtail-linux-amd64
 rm promtail-linux-amd64.zip
@@ -84,7 +118,13 @@ cat > /etc/loki/config.yaml <<'EOF'
 auth_enabled: false
 
 server:
+  # Loki has no authentication of its own (auth_enabled: false above), so it
+  # is bound to loopback by default -- the same posture the bot's own
+  # /healthz+/metrics port uses. See the header comment for how to opt in to
+  # remote access deliberately.
+  http_listen_address: 127.0.0.1
   http_listen_port: 3100
+  grpc_listen_address: 127.0.0.1
   grpc_listen_port: 9096
 
 common:
@@ -140,6 +180,8 @@ EOF
 log_info "Creating Promtail configuration..."
 cat > /etc/promtail/config.yaml <<'EOF'
 server:
+  # Unauthenticated like Loki above; loopback-only for the same reason.
+  http_listen_address: 127.0.0.1
   http_listen_port: 9080
   grpc_listen_port: 0
 
@@ -232,6 +274,14 @@ echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stab
 apt-get update
 apt-get install -y grafana
 
+# Bind Grafana to loopback by default: it ships with default admin/admin
+# credentials until changed on first login, so leaving it reachable from
+# anywhere on a freshly-provisioned server is a real window of exposure.
+# Matches the loopback-only posture used for Loki/Promtail above and for the
+# bot's own /healthz+/metrics port. Handles both the stock commented-out
+# line and an already-set one.
+sed -i -E 's/^;?\s*http_addr\s*=.*/http_addr = 127.0.0.1/' /etc/grafana/grafana.ini
+
 # Configure Grafana datasource
 log_info "Configuring Grafana datasource..."
 mkdir -p /etc/grafana/provisioning/datasources
@@ -315,10 +365,12 @@ EOF
 
 chown -R grafana:grafana /var/lib/grafana
 
-# Configure firewall
-log_info "Configuring firewall..."
-ufw allow 3000/tcp comment 'Grafana'
-ufw allow 3100/tcp comment 'Loki'
+# No firewall rules opened for Grafana (3000) or Loki (3100) here on purpose:
+# both are bound to loopback above, so a ufw allow rule for them would just
+# be an unused hole -- and, separately, would NOT actually gate access if
+# either service were ever run in a Docker container instead, since Docker's
+# published-port DNAT is evaluated ahead of ufw's INPUT chain. Exposing
+# either service is a deliberate, separate opt-in (see the header comment).
 
 # Start services
 log_info "Starting services..."
@@ -338,7 +390,8 @@ systemctl is-active --quiet loki && log_info "✓ Loki is running" || log_error 
 systemctl is-active --quiet promtail && log_info "✓ Promtail is running" || log_error "✗ Promtail failed to start"
 systemctl is-active --quiet grafana-server && log_info "✓ Grafana is running" || log_error "✗ Grafana failed to start"
 
-# Get server IP
+# Get server IP (for the SSH tunnel hint below only -- Grafana/Loki are not
+# reachable at this address; see the loopback-binding note above)
 SERVER_IP=$(curl -s ifconfig.me)
 
 log_info ""
@@ -346,15 +399,25 @@ log_info "=========================================="
 log_info "Installation complete!"
 log_info "=========================================="
 log_info ""
-log_info "Grafana URL: http://${SERVER_IP}:3000"
+log_info "Grafana and Loki are bound to loopback (127.0.0.1) and are NOT"
+log_info "reachable from outside this server -- no firewall rule opens them."
+log_info ""
+log_info "Grafana URL (from the server itself): http://localhost:3000"
+log_info "Grafana URL (from your workstation, via SSH tunnel):"
+log_info "  ssh -L 3000:localhost:3000 root@${SERVER_IP}"
+log_info "  then open http://localhost:3000 locally"
 log_info "Default credentials:"
 log_info "  Username: admin"
 log_info "  Password: admin"
 log_info ""
-log_info "Loki endpoint: http://localhost:3100"
+log_info "Loki endpoint: http://localhost:3100 (loopback only)"
+log_info ""
+log_info "To expose either service beyond loopback, see the deliberate"
+log_info "opt-in steps in this script's header comment -- do not do this"
+log_info "without an authenticating TLS reverse proxy in front."
 log_info ""
 log_info "Next steps:"
-log_info "  1. Open Grafana in your browser"
+log_info "  1. Open Grafana (locally or via the SSH tunnel above)"
 log_info "  2. Login with admin/admin (you'll be prompted to change password)"
 log_info "  3. Go to Explore > Select 'Loki' datasource"
 log_info "  4. Query: {container=\"templar-liquidator\"}"

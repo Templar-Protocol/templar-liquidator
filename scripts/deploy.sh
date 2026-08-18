@@ -154,7 +154,12 @@ deploy_git() {
         fi
 
         echo "Building liquidator with docker compose..."
-        docker compose -f docker-compose.prod.yml build
+        # docker-compose.prod.yml has no build: section (image: only) -- it
+        # relies on the image already being built. Build against the base
+        # docker-compose.yml, which carries the build: section; both files
+        # reference the same image tag (templar-liquidator:latest), so the
+        # image this produces is what the run step picks up.
+        docker compose -f docker-compose.yml build
         
         echo "Git deployment complete"
 EOF
@@ -184,17 +189,35 @@ configure_env() {
                 echo ".env file already exists, skipping"
             fi
         fi
+
+        # Guarantee .env always carries an explicit DRY_RUN, no matter which
+        # compose file ends up active (see start_service below). A
+        # --build-local deploy runs docker-compose.prod.yml, whose
+        # DRY_RUN=\${DRY_RUN:-false} resolves a missing var to false (live):
+        # .env.example ships DRY_RUN=true, but an operator reusing an older
+        # .env that predates this var, or hand-rolling one, would otherwise
+        # go live with no warning. Setting it here once, up front, keeps
+        # every deploy path dry-run unless the operator explicitly opts into
+        # DRY_RUN=false themselves; docker-compose.prod.yml's own fallback is
+        # intentionally left alone so .env stays authoritative.
+        if ! grep -q '^DRY_RUN=' .env; then
+            echo "DRY_RUN=true" >> .env
+            echo "DRY_RUN was not set in .env -- defaulting to DRY_RUN=true (safe/simulate). Set DRY_RUN=false explicitly to go live."
+        fi
 EOF
 }
 
 start_service() {
     log_info "Starting liquidator service..."
 
-    # What an unset DRY_RUN in .env resolves to depends on which compose file
-    # ends up active on the server: --build-local ships docker-compose.prod.yml
-    # AS docker-compose.yml (its `DRY_RUN=${DRY_RUN:-false}` applies), while a
-    # git deploy runs the repo's own, untouched docker-compose.yml (no DRY_RUN
-    # override, so the binary's own safe-by-default true applies).
+    # Belt-and-suspenders only: configure_env (above) guarantees .env always
+    # carries an explicit DRY_RUN=, so this fallback should never actually
+    # trigger. It mirrors each compose file's own default in case .env was
+    # edited out-of-band between configure_env and here. --build-local ships
+    # docker-compose.prod.yml AS docker-compose.yml (its
+    # `DRY_RUN=${DRY_RUN:-false}` applies), while a git deploy runs the
+    # repo's own, untouched docker-compose.yml (no DRY_RUN override, so the
+    # binary's own safe-by-default true applies).
     if [ "$BUILD_LOCAL" = true ]; then
         DEFAULT_DRY_RUN_IF_UNSET="false"
     else
@@ -279,7 +302,7 @@ show_status() {
         
         echo ""
         echo "=== Resource Usage ==="
-        docker stats --no-stream templar-liquidator-prod 2>/dev/null || echo "Container not running"
+        docker stats --no-stream templar-liquidator 2>/dev/null || echo "Container not running"
 EOF
 }
 

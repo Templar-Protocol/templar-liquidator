@@ -72,7 +72,8 @@ PYTH_HERMES_URL="${PYTH_HERMES_URL}"
 REDSTONE_GATEWAY_URL="${REDSTONE_GATEWAY_URL:-https://oracle-gateway-1.a.redstone.vip}"
 
 # Build binary
-PROJECT_ROOT="$SCRIPT_DIR/../../.."
+# scripts/ lives directly under the repo root, so the root is scripts/..
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BINARY_PATH="$PROJECT_ROOT/target/debug/liquidator"
 
 info "Building liquidator..."

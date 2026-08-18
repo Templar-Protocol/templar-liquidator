@@ -24,9 +24,27 @@ apt update && apt upgrade -y
 
 echo "2. Installing Docker..."
 if ! command -v docker &> /dev/null; then
-    curl -fsSL https://get.docker.com -o get-docker.sh
-    sh get-docker.sh
-    rm get-docker.sh
+    # Installed from Docker's own apt repository (GPG-signed packages, apt
+    # verifies the signature itself) rather than piping the get.docker.com
+    # convenience script into root: that script is fetched over HTTPS but is
+    # otherwise unauthenticated -- nothing checks it hasn't changed between
+    # review and execution. This mirrors how setup-loki-grafana.sh installs
+    # Grafana (its own signed apt repo), so both scripts follow the same
+    # pattern.
+    apt-get update
+    apt-get install -y ca-certificates curl gnupg
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+
+    ARCH="$(dpkg --print-architecture)"
+    # shellcheck disable=SC1091
+    CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+    echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${CODENAME} stable" \
+        > /etc/apt/sources.list.d/docker.list
+    apt-get update
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
     systemctl enable docker
     systemctl start docker
 else
@@ -63,9 +81,12 @@ chown -R liquidator:liquidator /opt/templar-liquidator
 
 echo "7. Configuring firewall..."
 if command -v ufw &> /dev/null; then
-    ufw --force enable
+    # Allow rules MUST land before the firewall is enabled: ufw's default
+    # incoming policy is deny, so enabling it first -- even briefly -- drops
+    # the active SSH session and locks the operator out of the box.
     ufw allow 22/tcp
     ufw allow 80/tcp
+    ufw --force enable
     echo "Firewall configured"
 fi
 

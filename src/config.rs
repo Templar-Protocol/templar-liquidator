@@ -63,9 +63,14 @@ pub struct Args {
     #[arg(short, long, env = "REGISTRY_ACCOUNT_IDS")]
     pub registries: Vec<AccountId>,
 
-    /// Signer key to use for signing transactions
+    /// Signer key to use for signing transactions, as `ed25519:<base58>`
+    ///
+    /// Held as a string and parsed in [`Args::build_config`] rather than by
+    /// clap: clap renders the offending value in its `invalid value '…'`
+    /// error, and a mistyped key is still near-complete key material that
+    /// would land in stderr and from there into logs.
     #[arg(short = 'k', long, env = "SIGNER_KEY")]
-    pub signer_key: near_crypto::SecretKey,
+    pub signer_key: String,
 
     /// Signer account ID
     #[arg(short, long, env = "SIGNER_ACCOUNT_ID")]
@@ -418,9 +423,15 @@ impl Args {
             std::time::Duration::from_secs(self.failure_notification_cooldown_hours * 3600);
         let notifier = Arc::new(Notifier::with_cooldown(telegram_config, failure_cooldown));
 
+        // The error deliberately omits the value: a mistyped key is still
+        // near-complete key material, and this message reaches stderr.
+        let signer_key: near_crypto::SecretKey = self.signer_key.trim().parse().unwrap_or_else(|_| {
+            panic!("SIGNER_KEY is not a valid NEAR secret key (expected `ed25519:<base58>`); value withheld")
+        });
+
         ServiceConfig {
             registries: self.registries.clone(),
-            signer_key: self.signer_key.clone(),
+            signer_key,
             signer_account: self.signer_account.clone(),
             network: self.network,
             near_rpc_url: self.near_rpc_url.clone(),
@@ -492,7 +503,7 @@ mod tests {
     fn create_test_args() -> Args {
         Args {
             registries: vec!["registry.testnet".parse().unwrap()],
-            signer_key: TEST_SIGNER_KEY.parse().unwrap(),
+            signer_key: TEST_SIGNER_KEY.to_string(),
             signer_account: "liquidator.testnet".parse().unwrap(),
             network: Network::Testnet,
             near_rpc_url: None,
@@ -858,6 +869,34 @@ mod tests {
         // the test process's environment would make this assertion vacuous
         // (or fail outright) regardless of the declared default.
         assert!(parse_with(&[]).dry_run);
+    }
+
+    #[test]
+    fn a_malformed_signer_key_is_rejected_without_echoing_it() {
+        // clap renders the offending value in `invalid value '…'`, so the key
+        // is parsed in build_config instead. A typo'd key is still nearly
+        // complete key material and must never reach stderr.
+        const TYPO: &str = "ed25519:5JQFYvABVhxnvvvULXqZUSP8QtEiRBMUi5dHfkqZmJ2FLVJqMn3mEhZpF8p8qvC6SvdZLd5VDSvkeVJdyBDZfGi!";
+
+        // clap accepts it (the field is a String) — no value echoed here.
+        let mut args = parse_with(&[]);
+        args.signer_key = TYPO.to_string();
+
+        let panic = std::panic::catch_unwind(move || args.build_config())
+            .expect_err("a malformed key must be rejected");
+        // `panic!` with a literal yields a `&'static str` payload; a formatted
+        // one yields `String`. Check both so the assertion can't pass vacuously.
+        let message = panic.downcast_ref::<String>().map_or_else(
+            || (*panic.downcast_ref::<&'static str>().unwrap_or(&"")).to_string(),
+            Clone::clone,
+        );
+        assert!(!message.is_empty(), "panic payload was not a string");
+
+        assert!(message.contains("value withheld"), "got: {message}");
+        assert!(
+            !message.contains(TYPO) && !message.contains("5JQFYvAB"),
+            "key material leaked into the error: {message}"
+        );
     }
 
     #[test]

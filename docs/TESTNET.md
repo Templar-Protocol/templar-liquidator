@@ -34,6 +34,7 @@ The bot spends the **borrow asset** of whatever market you point it at (see the 
 
 ```bash
 cp .env.example .env
+chmod 600 .env   # it is about to hold a private key; cp leaves it world-readable
 ```
 
 Set at minimum:
@@ -45,12 +46,16 @@ REGISTRY_ACCOUNT_IDS=<testnet registry — see below>
 DRY_RUN=true                    # default; leave it for now
 ```
 
-Pull `SIGNER_KEY` in from the credentials file directly, rather than copy-pasting a printed key — this replaces `.env.example`'s `SIGNER_KEY=ed25519:YOUR_PRIVATE_KEY_HERE` placeholder line in place:
+Pull `SIGNER_KEY` in from the credentials file directly, rather than copy-pasting a printed key — this replaces `.env.example`'s `SIGNER_KEY=ed25519:YOUR_PRIVATE_KEY_HERE` placeholder line in place. The key is never expanded into a shell command, because process arguments are world-readable through `/proc/<pid>/cmdline`; only the file path is:
 
 ```bash
 KEY_FILE=~/.near-credentials/testnet/YOUR_NAME.testnet.json
-SIGNER_KEY_VALUE=$(sed -n 's/.*"private_key":"\([^"]*\)".*/\1/p' "$KEY_FILE")
-sed -i "s#^SIGNER_KEY=.*#SIGNER_KEY=${SIGNER_KEY_VALUE}#" .env
+python3 - "$KEY_FILE" <<'PY'
+import json, pathlib, re, sys
+key = json.load(open(sys.argv[1]))["private_key"]
+env = pathlib.Path(".env")
+env.write_text(re.sub(r"(?m)^SIGNER_KEY=.*$", "SIGNER_KEY=" + key, env.read_text()))
+PY
 ```
 
 `scripts/run-testnet.sh` defaults `REGISTRY_ACCOUNT_IDS` to `templar-registry.testnet` if unset. **Verify this before relying on it** — testnet deployments are less stable than mainnet's, and at the time of writing (2026-08-18) `templar-registry.testnet` did not resolve on testnet RPC:

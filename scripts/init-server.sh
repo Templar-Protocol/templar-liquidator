@@ -60,8 +60,11 @@ apt install -y htop vim git curl wget ncdu jq
 echo "5. Creating liquidator user..."
 if ! id -u liquidator &> /dev/null; then
     useradd -m -s /bin/bash liquidator
+    # Docker group membership is all the bot needs to run: it never invokes
+    # sudo. A blanket NOPASSWD:ALL grant would turn any compromise of this
+    # account into full root on the host, which is the wrong default to ship
+    # in a public reference deployment script.
     usermod -aG docker liquidator
-    echo "liquidator ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/liquidator
     
     # Copy SSH keys from root
     if [ -d /root/.ssh ]; then

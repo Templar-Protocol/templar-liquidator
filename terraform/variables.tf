@@ -75,6 +75,20 @@ variable "env" {
   }
 
   validation {
+    # A key name check is not enough for NEAR_RPC_URL: the documented way to
+    # authenticate an RPC endpoint is an `apiKey` query parameter on the URL
+    # itself, so a credential can ride into plaintext env config inside a
+    # variable whose name looks harmless. Pass the whole URL through
+    # secret_env when it carries a credential, or supply the key separately
+    # as the NEAR_RPC_API_KEY secret (the binary sends it as a header).
+    condition = length([
+      for k, v in var.env : k
+      if length(regexall("(?i)(apikey|api_key|token|password|secret)=", v)) > 0
+    ]) == 0
+    error_message = "env values must not embed credentials as query parameters (e.g. NEAR_RPC_URL=https://rpc...?apiKey=...). Pass the URL through secret_env, or send the key as the NEAR_RPC_API_KEY secret instead."
+  }
+
+  validation {
     # A key present in both maps is ambiguous (which one wins depends on
     # provider/API ordering, not anything this module controls) and, if
     # env's copy is a real secret, defeats the check above by duplicating

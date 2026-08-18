@@ -87,9 +87,11 @@ setup_server() {
     log_info "Setting up server environment..."
     
     ssh ${SERVER_USER}@${SERVER_IP} << 'EOF'
-        # Create app directory
-        sudo mkdir -p /opt/templar-liquidator
-        sudo chown -R liquidator:liquidator /opt/templar-liquidator
+        # No sudo anywhere in this flow: init-server.sh already created
+        # /opt/templar-liquidator and chowned it to the liquidator user, and
+        # running the bot only needs docker group membership. That is what lets
+        # the account ship without a NOPASSWD sudo grant.
+        mkdir -p /opt/templar-liquidator
         
         # Check Docker installation
         if ! command -v docker &> /dev/null; then

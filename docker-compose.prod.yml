@@ -21,6 +21,12 @@ services:
     environment:
       - RUST_LOG=info,templar_liquidator=info
       - RUST_BACKTRACE=0
+      # Bind the listener to all interfaces INSIDE the container. Docker
+      # publishes a port by DNAT to the container's own IP, so a process bound
+      # to the container's loopback is unreachable through the mapping and the
+      # endpoint would silently never answer. The exposure control is the host
+      # side of `ports:` above, which publishes to 127.0.0.1 only.
+      - HTTP_BIND_ADDR=0.0.0.0
       # Interpolated from the project .env at `docker compose` invocation
       # time, so .env stays authoritative in both directions (a fresh
       # DRY_RUN=true from .env.example still simulates; an explicit

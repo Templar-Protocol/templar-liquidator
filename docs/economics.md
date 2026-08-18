@@ -6,7 +6,7 @@ This document expands on the README's [worked example](../README.md#a-worked-exa
 
 Every Templar market defines a `liquidation_maximum_spread` (a per-market constant, e.g. 5% on `ibtc-usdc.v1.tmplr.near` at the time of writing — verify per-market via `get_configuration`). When the bot repays `D` of a position's debt, it requests collateral whose *fair* USD value (at oracle prices) is:
 
-```
+```text
 collateral_value = D / (1 - spread)
 ```
 

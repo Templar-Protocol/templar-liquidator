@@ -11,12 +11,14 @@ near account create-account sponsor-by-faucet-service YOUR_NAME.testnet \
   autogenerate-new-keypair save-to-legacy-keychain network-config testnet create
 ```
 
-This funds the new account with test NEAR (for gas and storage deposits) and writes the key to `~/.near-credentials/testnet/YOUR_NAME.testnet.json` in the legacy-keychain format — the same JSON shape `near-cli`'s original JS tool used, and the format most tooling (including reading `private_key` straight into `SIGNER_KEY`) expects. Confirm it landed:
+This funds the new account with test NEAR (for gas and storage deposits) and writes the key to `~/.near-credentials/testnet/YOUR_NAME.testnet.json` in the legacy-keychain format — the same JSON shape `near-cli`'s original JS tool used, and the format most tooling (including reading `private_key` straight into `SIGNER_KEY`) expects. Confirm it landed without printing the key itself:
 
 ```bash
 near account view-account-summary YOUR_NAME.testnet network-config testnet now
-cat ~/.near-credentials/testnet/YOUR_NAME.testnet.json   # .private_key is your SIGNER_KEY
+grep -o '"account_id"\|"public_key"\|"private_key"' ~/.near-credentials/testnet/YOUR_NAME.testnet.json | sort -u
 ```
+
+Don't `cat` this file — its `.private_key` field would print straight to your terminal, and terminal scrollback, session recordings, and support transcripts can all retain it. Step 3 below pulls the key into `.env` directly, without ever displaying it.
 
 If you're on a devcontainer that gets rebuilt, `~/.near-credentials` doesn't persist — re-run the create-account step (it's idempotent from the faucet's perspective for a *new* account name) or keep the key somewhere durable before you rebuild.
 
@@ -39,9 +41,16 @@ Set at minimum:
 ```bash
 NEAR_NETWORK=testnet
 SIGNER_ACCOUNT_ID=YOUR_NAME.testnet
-SIGNER_KEY=ed25519:...          # from the legacy-keychain JSON above
 REGISTRY_ACCOUNT_IDS=<testnet registry — see below>
 DRY_RUN=true                    # default; leave it for now
+```
+
+Pull `SIGNER_KEY` in from the credentials file directly, rather than copy-pasting a printed key — this replaces `.env.example`'s `SIGNER_KEY=ed25519:YOUR_PRIVATE_KEY_HERE` placeholder line in place:
+
+```bash
+KEY_FILE=~/.near-credentials/testnet/YOUR_NAME.testnet.json
+SIGNER_KEY_VALUE=$(sed -n 's/.*"private_key":"\([^"]*\)".*/\1/p' "$KEY_FILE")
+sed -i "s#^SIGNER_KEY=.*#SIGNER_KEY=${SIGNER_KEY_VALUE}#" .env
 ```
 
 `scripts/run-testnet.sh` defaults `REGISTRY_ACCOUNT_IDS` to `templar-registry.testnet` if unset. **Verify this before relying on it** — testnet deployments are less stable than mainnet's, and at the time of writing (2026-08-18) `templar-registry.testnet` did not resolve on testnet RPC:

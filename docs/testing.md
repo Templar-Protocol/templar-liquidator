@@ -140,15 +140,18 @@ Retry a couple of times if it still happens — it's memory pressure, not a
 correctness issue.
 
 When `-j 1` alone isn't enough, drop debug info: most of what the linker holds
-in memory is DWARF, not code.
+in memory is DWARF, not code. Keep targeting `liquidation_sandbox` specifically
+— `--lib --bins` links a different, much lighter binary and would tell you
+nothing about whether *this* link succeeds:
 
 ```bash
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --lib --bins -j 1
+CARGO_WORKSPACE_DIR=/tmp/contracts/ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --test liquidation_sandbox -j 1 -- --ignored --nocapture
 ```
 
-This links the same binaries and runs the same assertions; you only lose line
-numbers in backtraces. On the 8 GB container used to write this doc it is the
-difference between a link that never completes and one that always does.
+This links the same `liquidation_sandbox` binary and runs the same assertions
+as the plain command above; you only lose line numbers in backtraces. On the
+8 GB container used to write this doc it is the difference between a link
+that never completes and one that always does.
 
 ## What was verified vs. reasoned out
 

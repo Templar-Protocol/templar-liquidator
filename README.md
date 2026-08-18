@@ -64,13 +64,13 @@ Pyth spot prices at fetch time: BTC ≈ **$64,350**, USDC ≈ **$1.00**.
 
 Say a borrower has deposited **0.5 BTC** ($32,175) as collateral against **$28,000 USDC** of debt:
 
-```
+```text
 collateralization ratio = 32,175 / 28,000 = 1.149  (114.9%)
 ```
 
 That's below `borrow_mcr_liquidation` (120%), so the position is liquidatable. The bot decides to repay **D = $10,000 USDC** of the debt (a partial liquidation — see [`PercentageLiquidationStrategy`](src/liquidation_strategy.rs)). The collateral it requests is sized so its *fair* USD value equals `D / (1 - spread)`:
 
-```
+```text
 collateral received = (D / price) / (1 - spread)
                      = (10,000 / 64,350) / 0.95
                      = 0.163579 BTC
@@ -160,12 +160,14 @@ Full reference (every env var / CLI flag, defaults, precedence rules): [docs/con
 
 ### Metrics and health
 
-When `HTTP_PORT` is set, the bot serves (binds `0.0.0.0` — private networks / container port mappings only, never expose publicly):
+When `HTTP_PORT` is set, the bot serves:
 
 - `GET /healthz` — readiness (not liveness): `200` once at least one market has scanned cleanly recently, `503` otherwise.
 - `GET /metrics` — Prometheus text format, seven `templar_liquidator_*` series: scan/liquidation counters and a last-successful-scan timestamp gauge.
 
-Both are inert in `RUN_MODE=once` — a single-cycle run exits before anything could scrape it.
+Neither endpoint is authenticated — anyone who can reach the port can read them. `HTTP_BIND_ADDR` defaults to `127.0.0.1`, and `docker-compose.yml`/`docker-compose.prod.yml` publish the container port to `127.0.0.1` on the host too, so out of the box this surface isn't reachable from anywhere but the host itself. It is **not** inherently private, though: exposing it to another machine (a Prometheus scraper on your network, say) is a deliberate two-part opt-in — set `HTTP_BIND_ADDR=0.0.0.0` (or the specific interface you want) *and* change the Compose port mapping's host side away from `127.0.0.1` — and once you do, put it behind your own network controls (private network, VPN, reverse-proxy auth), since the bot doesn't add any of its own. See [docs/configuration.md](docs/configuration.md#observability) for both knobs and [docs/deploy-vm.md](docs/deploy-vm.md) for why a host firewall rule alone isn't a substitute for keeping the Compose binding on loopback.
+
+Both endpoints are inert in `RUN_MODE=once` — a single-cycle run exits before anything could scrape them.
 
 ## Deployment
 

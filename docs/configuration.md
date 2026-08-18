@@ -94,7 +94,8 @@ All comma-delimited (`value_delimiter = ','` in clap — repeat the flag or comm
 
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
-| `HTTP_PORT` | `--http-port` | unset (disabled) | Enables `GET /healthz` + `GET /metrics` on `0.0.0.0:<port>`. Never started in `RUN_MODE=once`. Private networks / container port mappings only — never expose publicly. |
+| `HTTP_PORT` | `--http-port` | unset (disabled) | Enables `GET /healthz` + `GET /metrics`. Never started in `RUN_MODE=once`. Both endpoints are unauthenticated. |
+| `HTTP_BIND_ADDR` | `--http-bind-addr` | `127.0.0.1` | Interface the HTTP listener binds. Loopback by default so the unauthenticated endpoints above aren't reachable off the host; the shipped Compose files also publish the container port to `127.0.0.1` on the host for the same reason. Scraping from another machine is an explicit opt-in — see [README's Metrics and health](../README.md#metrics-and-health). |
 | `RUST_LOG` | — | `info,templar_liquidator=debug` | Standard `tracing`/`env_logger`-style filter. Not a `clap` arg — read directly by `tracing_subscriber::EnvFilter`. |
 
 ## Safety: `DRY_RUN`

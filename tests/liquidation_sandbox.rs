@@ -6,8 +6,10 @@
 //! gateway plan/execute path) — not a re-implementation — against a market with
 //! an underwater borrow position, asserting it lands a successful liquidation.
 //!
-//! Node-backed: run with `just test-sandbox -p templar-liquidator` (which
-//! prebuilds the wasms and starts the neard pool).
+//! Node-backed: see [docs/testing.md](../docs/testing.md) for the full
+//! procedure. In short — point `CARGO_WORKSPACE_DIR` at a checkout of the
+//! contracts monorepo pinned to this repo's `rev`, then run
+//! `cargo test --test liquidation_sandbox -j 1 -- --ignored --nocapture`.
 
 use std::collections::HashMap;
 use std::sync::Arc;

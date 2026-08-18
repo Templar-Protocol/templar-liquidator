@@ -87,8 +87,8 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 ## Extension seams
 
-A fork that needs behavior beyond what configuration exposes implements one of three traits in-tree — see the doc comments on each for the exact contract a conforming implementation must uphold:
+A fork that needs behavior beyond what configuration exposes has three extension seams, in-tree — see the doc comments on each for the exact contract a conforming implementation must uphold. Two are traits; the third is a concrete type meant to be extended or replaced directly, not implemented against:
 
-- [`swap::SwapProvider`](../src/swap/mod.rs) — a DEX/aggregator integration, for routing through a venue other than Ref Finance or 1-Click.
-- [`liquidation_strategy::LiquidationStrategy`](../src/liquidation_strategy.rs) — the sizing policy, for logic beyond percentage-of-inventory or fixed-USD-amount (e.g. per-market caps, sizing off inventory pressure).
-- [`notifier::Notifier`](../src/notifier.rs) — currently Telegram-only with no trait in front of it; extending or replacing the type directly is today's path to another channel.
+- [`swap::SwapProvider`](../src/swap/mod.rs) — a trait: a DEX/aggregator integration, for routing through a venue other than Ref Finance or 1-Click.
+- [`liquidation_strategy::LiquidationStrategy`](../src/liquidation_strategy.rs) — a trait: the sizing policy, for logic beyond percentage-of-inventory or fixed-USD-amount (e.g. per-market caps, sizing off inventory pressure).
+- [`notifier::Notifier`](../src/notifier.rs) — a concrete struct, Telegram-only, with no trait in front of it; extending or replacing the type directly is today's path to another channel.

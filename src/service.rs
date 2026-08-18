@@ -54,7 +54,11 @@ pub struct CollateralPriceInfo {
 }
 
 /// Configuration for the liquidator service
-#[derive(Debug)]
+///
+/// `Debug` is implemented by hand rather than derived: this struct holds the
+/// signer secret key, and `near_crypto`'s own `Debug` prints an ed25519 secret
+/// in full (it redacts some other key types, so deriving here would leak the
+/// key the first time anything formatted the config).
 #[allow(clippy::struct_excessive_bools)]
 pub struct ServiceConfig {
     /// Market registries to monitor
@@ -118,6 +122,60 @@ pub struct ServiceConfig {
     /// Port for the optional `/healthz` + `/metrics` HTTP endpoint (disabled
     /// when unset). Never started in `RunMode::Once`.
     pub http_port: Option<u16>,
+}
+
+impl std::fmt::Debug for ServiceConfig {
+    /// Redacts every field that carries credentials: the signer key, the RPC
+    /// API key, the RPC URL (an authenticated endpoint embeds the key as a
+    /// query parameter) and the 1-Click token. Presence is still reported so a
+    /// dump remains useful for diagnosing configuration, without printing the
+    /// values. The Telegram token is held by the notifier, which redacts itself.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        /// Reports whether an optional secret was supplied, never its value.
+        fn shown(value: Option<&impl std::fmt::Debug>) -> &'static str {
+            if value.is_some() {
+                "<set>"
+            } else {
+                "<unset>"
+            }
+        }
+
+        f.debug_struct("ServiceConfig")
+            .field("registries", &self.registries)
+            .field("signer_key", &"<redacted>")
+            .field("signer_account", &self.signer_account)
+            .field("network", &self.network)
+            .field("near_rpc_url", &shown(self.near_rpc_url.as_ref()))
+            .field("near_rpc_api_key", &shown(self.near_rpc_api_key.as_ref()))
+            .field("transaction_timeout", &self.transaction_timeout)
+            .field("liquidation_scan_interval", &self.liquidation_scan_interval)
+            .field("registry_refresh_interval", &self.registry_refresh_interval)
+            .field("run_mode", &self.run_mode)
+            .field("concurrency", &self.concurrency)
+            .field("collateral_strategy", &self.collateral_strategy)
+            .field("dry_run", &self.dry_run)
+            .field(
+                "oneclick_api_token",
+                &shown(self.oneclick_api_token.as_ref()),
+            )
+            .field("ref_contract", &self.ref_contract)
+            .field("allowed_collateral_assets", &self.allowed_collateral_assets)
+            .field("ignored_collateral_assets", &self.ignored_collateral_assets)
+            .field("ignored_markets", &self.ignored_markets)
+            .field("loop_liquidation", &self.loop_liquidation)
+            .field("max_loop_iterations", &self.max_loop_iterations)
+            .field("hermes_url", &self.hermes_url)
+            .field("redstone_gateway_url", &self.redstone_gateway_url)
+            .field("min_swap_value_usd", &self.min_swap_value_usd)
+            .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
+            .field("swap_retry_config", &self.swap_retry_config)
+            .field(
+                "scan_failure_notify_threshold",
+                &self.scan_failure_notify_threshold,
+            )
+            .field("http_port", &self.http_port)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Liquidator service that manages the bot lifecycle

@@ -132,11 +132,15 @@ fi
 # Set log level
 export RUST_LOG="${RUST_LOG:-info,templar_liquidator=debug}"
 
+# Secrets are passed through the environment, never on argv: process arguments
+# are world-readable via /proc/<pid>/cmdline, so anything in CMD_ARGS shows up
+# in `ps` for every local user. clap reads each of these from the environment.
+export SIGNER_KEY
+
 # Build command arguments
 CMD_ARGS=(
     "--network" "$NETWORK"
     "--signer-account" "$SIGNER_ACCOUNT_ID"
-    "--signer-key" "$SIGNER_KEY"
     "--liquidation-scan-interval" "$LIQUIDATION_SCAN_INTERVAL"
     "--registry-refresh-interval" "$REGISTRY_REFRESH_INTERVAL"
     "--concurrency" "$CONCURRENCY"
@@ -178,7 +182,8 @@ fi
 
 # Add collateral strategy arguments
 CMD_ARGS+=("--collateral-strategy" "$COLLATERAL_STRATEGY")
-[ -n "$ONECLICK_API_TOKEN" ] && CMD_ARGS+=("--oneclick-api-token" "$ONECLICK_API_TOKEN")
+# ONECLICK_API_TOKEN goes via the environment, not argv (see the SIGNER_KEY note above).
+[ -n "$ONECLICK_API_TOKEN" ] && export ONECLICK_API_TOKEN
 [ -n "$REF_CONTRACT" ] && CMD_ARGS+=("--ref-contract" "$REF_CONTRACT")
 
 # Add market filtering arguments
@@ -208,7 +213,8 @@ fi
 CMD_ARGS+=("--redstone-gateway-url" "$REDSTONE_GATEWAY_URL")
 
 # Add Telegram notification arguments (use = syntax because chat IDs start with -)
-[ -n "$TELEGRAM_BOT_TOKEN" ] && CMD_ARGS+=("--telegram-bot-token=$TELEGRAM_BOT_TOKEN")
+# TELEGRAM_BOT_TOKEN goes via the environment, not argv (see the SIGNER_KEY note above).
+[ -n "$TELEGRAM_BOT_TOKEN" ] && export TELEGRAM_BOT_TOKEN
 [ -n "$TELEGRAM_CHAT_ID" ] && CMD_ARGS+=("--telegram-chat-id=$TELEGRAM_CHAT_ID")
 [ -n "$TELEGRAM_THREAD_ID" ] && CMD_ARGS+=("--telegram-thread-id=$TELEGRAM_THREAD_ID")
 

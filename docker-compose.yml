@@ -9,10 +9,14 @@ services:
 
     # Optional /healthz + /metrics port (see src/http.rs). Inert unless the
     # operator sets HTTP_PORT in .env: the mapping alone doesn't start
-    # anything listening, it just refuses connections until HTTP_PORT
-    # matches, so publishing it unconditionally is safe.
+    # anything listening, it just refuses connections until HTTP_PORT matches.
+    # Bound to loopback because the endpoint is unauthenticated, and because
+    # Docker's published-port DNAT rules are evaluated ahead of UFW's INPUT
+    # chain — a 0.0.0.0 mapping would be reachable from the internet even on a
+    # host whose firewall allows only 22/80. Change the host side deliberately
+    # if you scrape from another machine.
     ports:
-      - "${HTTP_PORT:-9090}:${HTTP_PORT:-9090}"
+      - "127.0.0.1:${HTTP_PORT:-9090}:${HTTP_PORT:-9090}"
 
     # Environment variables from .env file
     env_file:
@@ -26,7 +30,11 @@ services:
     command: [
       "--network", "${NEAR_NETWORK:-mainnet}",
       "--signer-account", "${SIGNER_ACCOUNT_ID}",
-      "--signer-key", "${SIGNER_KEY}",
+      # SIGNER_KEY is deliberately NOT passed here. Process arguments are not
+      # secret: /proc/<pid>/cmdline is world-readable and the value would show
+      # up in `ps`, `docker inspect` and `docker compose config`. env_file
+      # already supplies it and clap reads it from the environment. Never move
+      # a secret into this array.
       "--registries", "${REGISTRY_ACCOUNT_IDS:-v1.tmplr.near}",
       "--min-profit-bps", "${MIN_PROFIT_BPS:-50}",
       "--liquidation-scan-interval", "${LIQUIDATION_SCAN_INTERVAL:-600}",
@@ -39,7 +47,7 @@ services:
       # Uncomment to enable loop liquidation (repeatedly liquidate until healthy):
       # "--loop-liquidation",
       # "--fixed-liquidation-amount-usd", "${FIXED_LIQUIDATION_AMOUNT_USD}",
-      # "--oneclick-api-token", "${ONECLICK_API_TOKEN}",
+      # ONECLICK_API_TOKEN is a secret: set it in .env, never as a flag here.
       # "--ref-contract", "${REF_CONTRACT:-v2.ref-finance.near}",
     ]
     # No --partial-percentage flag here on purpose: the strategy default

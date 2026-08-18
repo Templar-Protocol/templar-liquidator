@@ -861,6 +861,33 @@ mod tests {
     }
 
     #[test]
+    fn debug_formatting_never_reveals_the_signer_key() {
+        // `near_crypto`'s own Debug prints an ed25519 secret in full, so a
+        // derived Debug on ServiceConfig would put a funded key into the logs
+        // of any fork that ever formatted its config. ServiceConfig implements
+        // Debug by hand to prevent that; this pins it.
+        let mut args = create_test_args();
+        args.near_rpc_api_key = Some("rpc-api-key-value".to_string());
+        args.oneclick_api_token = Some("oneclick-token-value".to_string());
+        let rendered = format!("{:?}", args.build_config());
+
+        let secret = TEST_SIGNER_KEY
+            .strip_prefix("ed25519:")
+            .expect("test key is ed25519");
+        assert!(
+            !rendered.contains(secret),
+            "signer key leaked into Debug output: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"));
+        for value in ["rpc-api-key-value", "oneclick-token-value"] {
+            assert!(
+                !rendered.contains(value),
+                "{value} leaked into Debug output: {rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn dry_run_accepts_bare_and_explicit_forms() {
         // Argv-only surfaces (compose `command:` arrays, Cloud Run Job args)
         // can only ever select MORE simulation unless an explicit false is

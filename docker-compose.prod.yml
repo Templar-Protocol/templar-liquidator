@@ -6,10 +6,14 @@ services:
 
     # Optional /healthz + /metrics port (see src/http.rs). Inert unless the
     # operator sets HTTP_PORT in .env: the mapping alone doesn't start
-    # anything listening, it just refuses connections until HTTP_PORT
-    # matches, so publishing it unconditionally is safe.
+    # anything listening, it just refuses connections until HTTP_PORT matches.
+    # Bound to loopback because the endpoint is unauthenticated, and because
+    # Docker's published-port DNAT rules are evaluated ahead of UFW's INPUT
+    # chain — a 0.0.0.0 mapping would be reachable from the internet even on a
+    # host whose firewall allows only 22/80. Change the host side deliberately
+    # if you scrape from another machine.
     ports:
-      - "${HTTP_PORT:-9090}:${HTTP_PORT:-9090}"
+      - "127.0.0.1:${HTTP_PORT:-9090}:${HTTP_PORT:-9090}"
 
     env_file:
       - .env

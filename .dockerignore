@@ -1,0 +1,43 @@
+# Never lifted alongside the Dockerfile from the contracts monorepo - without
+# this the build context ships target/, which is gigabytes.
+
+# Build output / VCS / CI
+target/
+.git/
+.github/
+
+# Infra and docs not needed inside the image
+terraform/
+docs/
+scripts/
+deny.toml
+
+# Secrets and local artifacts
+.env
+*.log
+
+# Editor/dev-container config
+.devcontainer/
+
+# Docs that don't affect the build
+README.md
+CHANGELOG.md
+LICENSE
+
+# Dev-only config not read by `cargo build --release --bin liquidator`
+# (see the Dockerfile comment: CARGO_WORKSPACE_DIR is only consumed by a
+# dev-dependency compiled for tests, never for a release binary build).
+.cargo/
+clippy.toml
+rust-toolchain.toml
+
+# Test-only sources - not part of the release binary build
+tests/
+
+# Not needed inside the image; used to build/run it from the host
+Makefile
+docker-compose.yml
+docker-compose.prod.yml
+
+# Kept intentionally (do NOT ignore): Cargo.toml, Cargo.lock, src/,
+# .env.example - all required by the Dockerfile's COPY instructions.

@@ -1,11 +1,18 @@
 services:
   liquidator:
     build:
-      context: ../..
-      dockerfile: service/liquidator/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     image: templar-liquidator:latest
     container_name: templar-liquidator
     restart: unless-stopped
+
+    # Optional /healthz + /metrics port (see src/http.rs). Inert unless the
+    # operator sets HTTP_PORT in .env: the mapping alone doesn't start
+    # anything listening, it just refuses connections until HTTP_PORT
+    # matches, so publishing it unconditionally is safe.
+    ports:
+      - "${HTTP_PORT:-9090}:${HTTP_PORT:-9090}"
 
     # Environment variables from .env file
     env_file:

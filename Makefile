@@ -1,6 +1,6 @@
 # Templar Liquidator Bot
 
-.PHONY: help build start start-prod stop logs clean shell
+.PHONY: help build build-clean start start-prod stop restart logs logs-tail clean shell ps stats
 
 .DEFAULT_GOAL := help
 
@@ -14,10 +14,10 @@ help: ## Show available commands
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build Docker image
-	docker build -t $(IMAGE):$(TAG) -f Dockerfile ../..
+	docker build -t $(IMAGE):$(TAG) -f Dockerfile .
 
 build-clean: ## Build without cache
-	docker build --no-cache -t $(IMAGE):$(TAG) -f Dockerfile ../..
+	docker build --no-cache -t $(IMAGE):$(TAG) -f Dockerfile .
 
 start: ## Start in dry-run mode (default; set DRY_RUN=false in .env to go live)
 	$(COMPOSE) --env-file $(ENV_FILE) up -d

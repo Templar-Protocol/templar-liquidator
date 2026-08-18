@@ -24,6 +24,12 @@ nano .env
 docker compose up
 ```
 
+`docker compose up` **builds from source** — it compiles the crate and its
+git dependencies inside the image, including an `npm install` a dependency's
+`build.rs` runs — so the first run is slow (several minutes). The `docker
+run ghcr.io/...` path above pulls a prebuilt image and is the fast way to
+get started; use Compose when you want to iterate on the code itself.
+
 Three env vars are required — the bot refuses to start without them:
 
 | Var | What it is |
@@ -168,13 +174,13 @@ Both are inert in `RUN_MODE=once` — a single-cycle run exits before anything c
 
 ## FAQ
 
-**Which RPC should I use?** Public endpoints (`free.rpc.fastnear.com`, the default) rate-limit under sustained scanning. For mainnet, get a [FastNEAR](https://fastnear.com) API key and set `NEAR_RPC_URL` + `NEAR_RPC_API_KEY` — the key is sent as an `Authorization` header (or folded into the URL as `?apiKey=`).
+**Which RPC should I use?** Public endpoints rate-limit under sustained scanning — that includes both the binary's own compiled-in default (`https://rpc.mainnet.fastnear.com` / `https://rpc.testnet.fastnear.com`, used when `NEAR_RPC_URL` is unset) and `free.rpc.fastnear.com`, the endpoint `.env.example` sets explicitly. For mainnet, get a [FastNEAR](https://fastnear.com) API key and set `NEAR_RPC_URL` + `NEAR_RPC_API_KEY` — the key is sent as an `Authorization` header (or folded into the URL as `?apiKey=`).
 
 **What inventory do I need to hold?** The **borrow assets** of every market you serve — e.g. USDC in `SIGNER_ACCOUNT_ID`'s wallet to liquidate USDC-borrow markets. The bot never buys inventory; it only spends what's already there.
 
 **How does rebalancing work?** By default (`COLLATERAL_STRATEGY=hold`) the bot keeps whatever collateral it receives — you rebalance manually. Set `COLLATERAL_STRATEGY=swap-to-borrow` to route collateral back into borrow assets automatically, immediately after each liquidation (above `MIN_SWAP_VALUE_USD`) or batched at the start of the next cycle. Full automatic inventory rebalancing (deciding *when* and *how much* to swap proactively, not just what's received) is [tracked as backlog](docs/backlog.md).
 
-**How do I pick a strategy?** `partial` (the default — spreads limited inventory across more positions per round) vs. `full` (send `PARTIAL_LIQUIDATION_PERCENTAGE=100`, fully repair each position it touches) vs. `fixed-amount` (a predictable USD cap per liquidation regardless of position size, USD-denominated borrow assets only). See [docs/economics.md](docs/economics.md).
+**How do I pick a strategy?** The percentage-of-inventory strategy is the default, and it defaults to 100% — a full liquidation of every eligible position your inventory can cover — unless you set `PARTIAL_LIQUIDATION_PERCENTAGE` below 100 to spread limited inventory across more positions per round instead. `fixed-amount` (`FIXED_LIQUIDATION_AMOUNT_USD`) is the third option: a predictable USD cap per liquidation regardless of position size, USD-denominated borrow assets only. See [docs/economics.md](docs/economics.md).
 
 ## Disclaimer
 

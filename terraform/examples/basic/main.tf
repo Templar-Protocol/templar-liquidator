@@ -24,7 +24,7 @@ variable "region" {
 }
 
 variable "image_tag" {
-  description = "templar-liquidator release tag to run, e.g. \"v0.2.0\"."
+  description = "templar-liquidator image tag to run, e.g. \"0.2.0\" (no leading \"v\" — see terraform/README.md)."
   type        = string
 }
 
@@ -77,4 +77,8 @@ output "image" {
 
 output "job_name" {
   value = module.liquidator.job_name
+}
+
+output "scheduler_job_name" {
+  value = module.liquidator.scheduler_job_name
 }

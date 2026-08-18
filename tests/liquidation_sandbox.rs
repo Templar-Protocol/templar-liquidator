@@ -1,5 +1,5 @@
-//! End-to-end sandbox acceptance test for ENG-369: the liquidator executes a
-//! real liquidation against a deployed market through the in-process gateway
+//! End-to-end sandbox acceptance test: the liquidator executes a real
+//! liquidation against a deployed market through the in-process gateway
 //! client.
 //!
 //! This drives the liquidator's own [`LiquidationExecutor`] (the migrated

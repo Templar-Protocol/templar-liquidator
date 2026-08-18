@@ -16,7 +16,7 @@ gcloud services enable \
   --project "$PROJECT_ID"
 ```
 
-(`monitoring.googleapis.com` is only needed if you plan to turn on the module's optional alert policies — see step 4.)
+(`monitoring.googleapis.com` is only needed if you plan to turn on the module's optional alert policies — `enable_alerts`, `notification_channels`, `alert_absence_hours`; see [`terraform/README.md`](../terraform/README.md#variable-reference) / [`terraform/variables.tf`](../terraform/variables.tf).)
 
 You'll also need a NEAR account, funded with the borrow-side assets of whatever markets you intend to serve, and that account's signer key. This is the same account/key you'd use for any other deployment style — nothing about it is GCP-specific.
 
@@ -44,7 +44,7 @@ cd my-liquidator-deploy
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Edit `terraform.tfvars` (`project_id`, `region`, `image_tag` — pin to a released tag like `v0.2.0`, not `latest`), and edit `main.tf`'s `env` map (network, registry account ids, signer account id, strategy knobs — `MIN_PROFIT_BPS` etc.) and `secret_env` map (point at the secret ids you actually created in step 2) for your deployment. Then:
+Edit `terraform.tfvars` (`project_id`, `region`, `image_tag` — pin to a released image tag like `0.2.0`, not `latest`; note this drops the `v` that the git release tag carries, see [`terraform/README.md`](../terraform/README.md#this-is-a-generic-module)), and edit `main.tf`'s `env` map (network, registry account ids, signer account id, strategy knobs — `MIN_PROFIT_BPS` etc.) and `secret_env` map (point at the secret ids you actually created in step 2) for your deployment. Then:
 
 ```bash
 terraform init
@@ -55,10 +55,10 @@ This provisions: the Cloud Run Job itself, a Cloud Scheduler cron trigger, an Ar
 
 ## 4. Verify the first execution
 
-Either wait for the next scheduled tick, or trigger one manually:
+Either wait for the next scheduled tick, or trigger one manually — `my-liquidator-deploy` (from step 3) exports `scheduler_job_name`, so you don't need to guess the generated name:
 
 ```bash
-gcloud scheduler jobs run <scheduler_job_name> --location <region> --project "$PROJECT_ID"
+gcloud scheduler jobs run "$(terraform output -raw scheduler_job_name)" --location <region> --project "$PROJECT_ID"
 ```
 
 Then check **Cloud Run → Jobs → your job → Executions → Logs**. The example ships `env.DRY_RUN = "true"`, so this first run — and every run until you deliberately change it — scans markets and logs what it *would* liquidate without submitting anything on-chain. Confirm:

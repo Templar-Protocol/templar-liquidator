@@ -54,9 +54,14 @@ nano .env
 
 Fill in at minimum the three required vars — `REGISTRY_ACCOUNT_IDS`, `SIGNER_ACCOUNT_ID`, `SIGNER_KEY` — plus `NEAR_NETWORK` and anything else from [docs/configuration.md](configuration.md) you want to change from its default. See `.env.example` for the full annotated list.
 
-### 5. Start in dry-run
+### 5. Start in dry-run — or verify it isn't
 
-The bot starts in dry-run automatically (`docker-compose.yml` doesn't override `DRY_RUN`, so the binary's own safe-by-default `true` applies). Watch it:
+Whether the deploy starts in dry-run depends on which path you used in step 3:
+
+- **Git deploy (default)** — the server runs the repo's own, untouched `docker-compose.yml`, which sets no `DRY_RUN` override, so the binary's own safe-by-default `true` applies. It starts in dry-run automatically.
+- **`--build-local`** — the server runs `docker-compose.prod.yml` (installed *as* `docker-compose.yml`), whose `DRY_RUN=${DRY_RUN:-false}` means **live** if `.env` omits `DRY_RUN` entirely. Set `DRY_RUN=true` explicitly in `.env` before deploying if you want this path to start simulating too.
+
+`./scripts/deploy.sh` reports which mode it actually started in at the end of its output — check that rather than assuming. Watch the logs either way:
 
 ```bash
 cd /opt/templar-liquidator/repo   # or /opt/templar-liquidator
@@ -116,11 +121,11 @@ cp .env.example .env
 nano .env   # your credentials
 
 # Build and run
-docker compose -f docker-compose.prod.yml build
-docker compose -f docker-compose.prod.yml up -d
+docker compose build                             # builds via docker-compose.yml's `build:` section, tags templar-liquidator:latest
+docker compose -f docker-compose.prod.yml up -d   # docker-compose.prod.yml has no `build:` of its own — it runs that same tag with prod-tuned settings
 
 # Monitor
-docker compose logs -f
+docker compose -f docker-compose.prod.yml logs -f
 ```
 
 ## Optional: Grafana + Loki log aggregation
@@ -129,8 +134,10 @@ docker compose logs -f
 
 ```bash
 ssh liquidator@YOUR_SERVER_IP
-sudo bash /tmp/setup-loki-grafana.sh
+curl -fsSL https://raw.githubusercontent.com/Templar-Protocol/templar-liquidator/main/scripts/setup-loki-grafana.sh | sudo bash
 ```
+
+(If you deployed via git-deploy, the script is also already on the server at `/opt/templar-liquidator/repo/scripts/setup-loki-grafana.sh`.)
 
 Grafana listens on port 3000 (`admin`/`admin` by default — change it immediately). Open the additional ports if you install it:
 
@@ -165,7 +172,7 @@ Update an existing deployment:
 cd /opt/templar-liquidator/repo
 git pull origin main
 docker compose down
-docker compose -f docker-compose.prod.yml build
+docker compose build     # docker-compose.prod.yml has no `build:` of its own; rebuild via docker-compose.yml
 docker compose up -d
 ```
 

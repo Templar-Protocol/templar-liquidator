@@ -51,7 +51,7 @@ them. Create each one before your first `terraform apply`:
 ```bash
 gcloud secrets create liquidator-signer-key --project "$PROJECT_ID"
 
-printf '%s' "$SIGNER_KEY" | gcloud secrets create liquidator-signer-key \
+printf '%s' "$SIGNER_KEY" | gcloud secrets versions add liquidator-signer-key \
   --project "$PROJECT_ID" --data-file=-
 ```
 
@@ -74,7 +74,8 @@ Do the same for any other secret you plan to reference in `secret_env`
    cp terraform.tfvars.example terraform.tfvars
    ```
 3. Edit `terraform.tfvars`: set `project_id` and `image_tag` (a released
-   tag, e.g. `v0.2.0`). Edit `main.tf`'s `secret_env` map to point at the
+   image tag, e.g. `0.2.0` — no leading `v`, see the note below). Edit
+   `main.tf`'s `secret_env` map to point at the
    secret ids you actually created, and adjust `env` (network, registry
    account ids, signer account id, strategy knobs) for your deployment.
 4. ```bash
@@ -82,7 +83,8 @@ Do the same for any other secret you plan to reference in `secret_env`
    terraform apply
    ```
 5. Wait for the next scheduled tick (or trigger one manually —
-   `gcloud scheduler jobs run <scheduler_job_name> --location <region>`) and
+   `gcloud scheduler jobs run "$(terraform output -raw scheduler_job_name)" --location <region>`,
+   using the output `examples/basic` exports) and
    check the execution in **Cloud Run → Jobs → your job → Executions →
    Logs**. `env.DRY_RUN` defaults to `"true"` in the example, so this first
    run simulates: it scans and logs what it would liquidate without
@@ -161,3 +163,10 @@ or a local path) from your own Terraform, the way `examples/basic` does.
 Pin `ref` to a release tag and move it together with `image_tag` — one
 version bump upgrades infrastructure and binary atomically, and rollback is
 the same edit backwards.
+
+**`ref` and `image_tag` are spelled differently for the same release.** The
+module `ref` is a *git tag* and keeps the `v` (`ref=v0.2.0`); `image_tag` is
+a *Docker tag* published by `docker/metadata-action`, which strips the
+leading `v` (`image_tag = "0.2.0"`). Pasting the git tag into `image_tag`
+produces an image reference that can't be pulled — that mismatch is exactly
+the bug this note exists to prevent.

@@ -21,7 +21,7 @@ variable "name" {
 }
 
 variable "image_tag" {
-  description = "templar-liquidator release tag to run, e.g. \"v0.2.0\". Matches a tag published to ghcr.io/templar-protocol/templar-liquidator."
+  description = "templar-liquidator image tag to run, e.g. \"0.2.0\" (no leading \"v\" — docker/metadata-action strips it from the git tag when publishing). Matches a tag published to ghcr.io/templar-protocol/templar-liquidator."
   type        = string
 }
 

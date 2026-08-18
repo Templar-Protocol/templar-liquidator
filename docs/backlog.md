@@ -12,6 +12,8 @@ Documented, not implemented. This is the roadmap of things a fork or a future re
 
 **Per-account cooldown after failed liquidation attempts.** A position that fails repeatedly (e.g. a persistent `OfferTooLow` or `ExcessiveLiquidation` from price drift) currently gets re-attempted every scan cycle with no backoff. A cooldown after N consecutive failures for the same account would reduce wasted RPC/gas churn.
 
+**Validate `SIGNER_KEY` before startup, don't panic on it.** A mismatched-but-well-formed key (parses as a valid `near_crypto::SecretKey` but doesn't match `SIGNER_ACCOUNT_ID` on-chain) currently panics deep in `LiquidatorService::new` (`src/service.rs`) with a raw "invalid signer secret key: ... Mismatched Keypair detected" message and a nonzero-but-unstructured exit, instead of failing with a clean, actionable error and exit code at config-parse time. Verified live against a real misconfigured key.
+
 ## Scaling
 
 **Priority-queue account tracking with adaptive refresh.** The current model scans every position in every configured market on every cycle. At meaningful scale (many markets, many positions per market) that stops being cheap; a priority queue that refreshes near-threshold positions more often than healthy ones — the pattern used by more mature liquidation bots on other chains — is the documented answer if scan-everyone ever becomes the bottleneck.
@@ -26,7 +28,7 @@ Documented, not implemented. This is the roadmap of things a fork or a future re
 
 **Per-asset wallet-balance gauges in `/metrics`.** Deferred from the initial metrics work (`metrics.rs` ships seven process-lifetime counters/gauges today, none of them balance-shaped) because it needs labelled series (one gauge per asset, not a fixed field), which the current dependency-free Prometheus renderer doesn't support yet — see [`metrics.rs`](../src/metrics.rs)'s fixed set of `templar_liquidator_*` series.
 
-**Separate `/readyz`.** `/healthz` today conflates "the process is up" with "a market scanned recently" into one endpoint. Splitting a plain liveness `/readyz` (process is running) from the existing readiness `/healthz` (recently scanned successfully) would let an orchestrator distinguish "restart me" from "I'm up but stuck," matching the distinction the module doc for [`http.rs`](../src/http.rs) already draws in prose.
+**Add a real liveness endpoint.** `/healthz` is already correctly a pure readiness check — it 503s until at least one market has scanned cleanly recently, and never reports "process is up" on its own (see the module doc for [`http.rs`](../src/http.rs)). That's exactly why it's unsafe to wire to a liveness/restart probe: a bot stuck on a persistent RPC problem would restart-loop forever without fixing anything. What's actually missing is a *separate* liveness signal an orchestrator could use for that purpose — conventionally named `/livez` (not `/readyz`, which in the usual k8s-style split names the readiness check, the role `/healthz` already fills here) — so "restart me, the process is wedged" and "I'm up but not ready" stay distinguishable.
 
 **`# HELP` lines on `/metrics`.** The current Prometheus exposition (`Metrics::render`) emits `# TYPE` but not `# HELP` for each series — cosmetic for scraping, but `# HELP` is what shows up as the metric description in most dashboards/explorers.
 
@@ -35,6 +37,8 @@ Documented, not implemented. This is the roadmap of things a fork or a future re
 ## Configuration and interface
 
 **Config-file support (`--config config.toml`).** Would complete the CLI ≡ env ≡ file trinity — right now every setting is CLI-flag-or-env-var only, with no way to check a full configuration into version control short of a `.env` file (which mixes secrets with non-secret settings).
+
+**`value_delimiter = ','` on `REGISTRY_ACCOUNT_IDS`.** Unlike `ALLOWED_COLLATERAL_ASSETS` / `IGNORED_COLLATERAL_ASSETS` / `IGNORED_MARKETS`, the `--registries` arg (`src/config.rs`) has no `value_delimiter`, so `REGISTRY_ACCOUNT_IDS=a.near,b.near` parses as one invalid `AccountId` instead of two registries — only the CLI flag's repeatable form (`--registries a.near --registries b.near`) currently expresses multiple registries. Adding the delimiter would make the env var consistent with the other list-typed settings.
 
 **`--dry-run` accepting `0`/`1`/`yes`/`no`.** The env var form is intentionally strict — only the literal strings `true`/`false` parse, anything else aborts at startup (see [docs/configuration.md](configuration.md#safety-dry_run)). That strictness is a deliberate safety property and should stay; what's open is whether the *value space* itself should widen to include a few more unambiguous truthy/falsy spellings while keeping everything else fail-closed.
 

@@ -110,7 +110,7 @@ pub struct Args {
     #[arg(short, long, env = "CONCURRENCY", default_value_t = 10)]
     pub concurrency: usize,
 
-    /// Percentage of available liquidatable collateral to liquidate (1-100)
+    /// Percentage of available borrow-asset inventory to deploy per liquidation (1-100)
     /// If not set and --fixed-liquidation-amount-usd is also not set, defaults to 100%
     /// Mutually exclusive with --fixed-liquidation-amount-usd
     #[arg(long, env = "PARTIAL_LIQUIDATION_PERCENTAGE", value_parser = validate_percentage)]

@@ -135,7 +135,7 @@ EOF
 deploy_git() {
     log_info "Deploying via git..."
     
-    BRANCH="${GIT_BRANCH:-dev}"
+    BRANCH="${GIT_BRANCH:-main}"
     
     ssh ${SERVER_USER}@${SERVER_IP} << EOF
         cd /opt/templar-liquidator
@@ -149,12 +149,10 @@ deploy_git() {
             git pull origin ${BRANCH}
         else
             echo "Cloning repository..."
-            git clone -b ${BRANCH} https://github.com/Templar-Protocol/contracts.git repo
+            git clone -b ${BRANCH} https://github.com/Templar-Protocol/templar-liquidator.git repo
             cd repo
         fi
-        
-        # Build liquidator
-        cd service/liquidator
+
         echo "Building liquidator with docker compose..."
         docker compose -f docker-compose.prod.yml build
         
@@ -177,11 +175,11 @@ configure_env() {
                 echo ".env file already exists, skipping"
             fi
         else
-            cd repo/service/liquidator
+            cd repo
             if [ ! -f .env ]; then
                 cp .env.example .env
                 echo "Created .env file from template"
-                echo "IMPORTANT: Edit ${APP_DIR}/repo/service/liquidator/.env with your credentials!"
+                echo "IMPORTANT: Edit ${APP_DIR}/repo/.env with your credentials!"
             else
                 echo ".env file already exists, skipping"
             fi
@@ -207,7 +205,7 @@ start_service() {
         if [ "$BUILD_LOCAL" = true ]; then
             cd ${APP_DIR}
         else
-            cd ${APP_DIR}/repo/service/liquidator
+            cd ${APP_DIR}/repo
         fi
 
         docker compose down 2>/dev/null || true
@@ -244,8 +242,7 @@ update_deployment() {
         if [ -d /opt/templar-liquidator/repo ]; then
             cd /opt/templar-liquidator/repo
             git pull origin main
-            cd service/liquidator
-            
+
             echo "Stopping liquidator..."
             docker compose down
             
@@ -267,8 +264,8 @@ show_status() {
     log_info "Checking deployment status..."
     
     ssh ${SERVER_USER}@${SERVER_IP} << 'EOF'
-        if [ -d /opt/templar-liquidator/repo/service/liquidator ]; then
-            cd /opt/templar-liquidator/repo/service/liquidator
+        if [ -d /opt/templar-liquidator/repo ]; then
+            cd /opt/templar-liquidator/repo
         else
             cd /opt/templar-liquidator
         fi
@@ -356,7 +353,7 @@ main() {
         if [ "$BUILD_LOCAL" = true ]; then
             echo "  cd ${APP_DIR} && docker compose logs -f"
         else
-            echo "  cd ${APP_DIR}/repo/service/liquidator && docker compose logs -f"
+            echo "  cd ${APP_DIR}/repo && docker compose logs -f"
         fi
         echo ""
         log_warn "IMPORTANT: Configure .env with your credentials before production use!"

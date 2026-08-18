@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Server initialization script for Hetzner
 # Run this once on a fresh Ubuntu 24.04 server
-# Usage: bash <(curl -s https://raw.githubusercontent.com/.../init-server.sh)
+# Usage: bash <(curl -s https://raw.githubusercontent.com/Templar-Protocol/templar-liquidator/main/scripts/init-server.sh)
 
 set -e
 
@@ -107,8 +107,8 @@ cat > /opt/templar-liquidator/monitor.sh << 'EOF'
 APP_DIR="/opt/templar-liquidator"
 LOG_FILE="/var/log/liquidator-monitor.log"
 
-if [ -d "$APP_DIR/repo/service/liquidator" ]; then
-    cd "$APP_DIR/repo/service/liquidator"
+if [ -d "$APP_DIR/repo" ]; then
+    cd "$APP_DIR/repo"
 else
     cd "$APP_DIR"
 fi

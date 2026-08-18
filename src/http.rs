@@ -1,8 +1,10 @@
 //! Optional operational HTTP surface: `GET /healthz`, `GET /metrics`.
 //!
 //! Started only when `HTTP_PORT` is configured; never started in
-//! `--run-mode once`. Binds 0.0.0.0 — meant for private networks / container
-//! port mappings, not public exposure.
+//! `--run-mode once`. Binds `HTTP_BIND_ADDR`, which defaults to loopback:
+//! the endpoints expose no secrets, but binding every interface would make
+//! "don't publish this" depend entirely on an external firewall / port
+//! mapping rather than the bot itself.
 //!
 //! `/healthz` is a **readiness** signal (can this process currently do its
 //! job?), not a liveness one. Wiring it to a liveness probe would
@@ -38,26 +40,41 @@ fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Spawns the HTTP listener as a background task.
-pub fn spawn(port: u16, metrics: Arc<Metrics>, unhealthy_after_secs: u64) {
+/// Binds the listener and spawns the HTTP server as a background task.
+///
+/// The bind happens before this function returns, so a failure to bind is
+/// reported to the caller rather than swallowed inside the spawned task —
+/// see the module-level caller in `service.rs::run`. Once bound, the serve
+/// loop itself still runs to completion in the background: an accepted
+/// connection later failing shouldn't take the bot down either.
+///
+/// # Errors
+///
+/// Returns the bind error if `bind_addr:port` couldn't be bound (e.g. the
+/// port is already in use). The caller decides how to handle it; this
+/// endpoint is observability-only, so a bind failure must not be treated as
+/// fatal for an otherwise-healthy bot — but it must be logged prominently,
+/// since a scraper then seeing connection-refused is easy to misread as
+/// "the bot is down" while it keeps trading.
+pub async fn spawn(
+    bind_addr: std::net::IpAddr,
+    port: u16,
+    metrics: Arc<Metrics>,
+    unhealthy_after_secs: u64,
+) -> std::io::Result<()> {
     let state = AppState {
         metrics,
         unhealthy_after_secs,
     };
+    let listener = tokio::net::TcpListener::bind((bind_addr, port)).await?;
+    tracing::info!(%bind_addr, port, "metrics/health endpoint listening");
     tokio::spawn(async move {
         let app = router(state);
-        let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!(error = %e, port, "metrics listener failed to bind");
-                return;
-            }
-        };
-        tracing::info!(port, "metrics/health endpoint listening");
         if let Err(e) = axum::serve(listener, app).await {
             tracing::error!(error = %e, "metrics server exited");
         }
     });
+    Ok(())
 }
 
 async fn healthz(State(s): State<AppState>) -> (StatusCode, &'static str) {

@@ -122,6 +122,8 @@ pub struct ServiceConfig {
     /// Port for the optional `/healthz` + `/metrics` HTTP endpoint (disabled
     /// when unset). Never started in `RunMode::Once`.
     pub http_port: Option<u16>,
+    /// Bind address for the optional HTTP endpoint. Defaults to loopback.
+    pub http_bind_addr: std::net::IpAddr,
 }
 
 impl std::fmt::Debug for ServiceConfig {
@@ -174,6 +176,7 @@ impl std::fmt::Debug for ServiceConfig {
                 &self.scan_failure_notify_threshold,
             )
             .field("http_port", &self.http_port)
+            .field("http_bind_addr", &self.http_bind_addr)
             .finish_non_exhaustive()
     }
 }
@@ -359,13 +362,27 @@ impl LiquidatorService {
     /// Run the service event loop
     pub async fn run(mut self) {
         // Optional operational HTTP surface. Loop mode only: a `run_once`
-        // process exits before anything could scrape it.
+        // process exits before anything could scrape it. A bind failure is
+        // logged loudly but does not abort the bot — trading continues
+        // without a health/metrics endpoint rather than being taken down by
+        // a failure in an observability-only surface.
         if let Some(port) = self.config.http_port {
-            crate::http::spawn(
+            if let Err(e) = crate::http::spawn(
+                self.config.http_bind_addr,
                 port,
                 Arc::clone(&self.metrics),
                 self.config.liquidation_scan_interval.saturating_mul(3),
-            );
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %e,
+                    bind_addr = %self.config.http_bind_addr,
+                    port,
+                    "metrics/health endpoint FAILED TO START — bot continues WITHOUT /healthz or /metrics; \
+                     a scraper will see connection-refused, not bot failure"
+                );
+            }
         }
 
         // Create intervals for periodic tasks

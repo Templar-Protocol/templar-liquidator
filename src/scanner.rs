@@ -168,24 +168,21 @@ impl MarketScanner {
         }
     }
 
-    /// Checks market compatibility and feature support in a single call.
+    /// Checks market compatibility by verifying its contract version.
     ///
-    /// This method fetches the version once and checks:
-    /// 1. Basic compatibility (version >= 1.0.0)
-    /// 2. Partial liquidation support (version >= 1.1.0) if required by strategy
-    ///
-    /// # Arguments
-    ///
-    /// * `requires_partial_liquidation` - Whether the strategy requires partial liquidation support
+    /// Fetches the NEP-330 version once (if the contract implements it) and
+    /// checks that it's >= `Self::MIN_SUPPORTED_VERSION`. A market with no
+    /// NEP-330 metadata is assumed compatible and left for the market
+    /// contract itself to reject if it actually isn't.
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the market is compatible with the strategy requirements.
+    /// `Ok(())` if the market's version is supported (or unknown).
     ///
     /// # Errors
     ///
-    /// Returns an error if the market version is not supported or doesn't support
-    /// required features.
+    /// Returns an error if the market reports a version below
+    /// `Self::MIN_SUPPORTED_VERSION`, or an unparseable version string.
     #[tracing::instrument(skip(self), level = "debug")]
     pub async fn check_market_compatibility(&self) -> LiquidatorResult<()> {
         let Some(version_string) = self.get_contract_version().await else {

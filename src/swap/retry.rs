@@ -19,7 +19,8 @@ pub enum SwapErrorKind {
     #[error("Amount too low: {message}")]
     AmountTooLow { message: String },
 
-    /// Generic quote failure — may be transient (retryable)
+    /// Quote failure — treated as a permanent "no route for this asset
+    /// pair" condition, not retried. See `is_retryable()`.
     #[error("Quote failed: {message}")]
     QuoteFailed { message: String },
 

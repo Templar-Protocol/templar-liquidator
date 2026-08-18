@@ -150,7 +150,10 @@ Bump every `rev =` together in one change, never one alone.
   `.cargo/config.toml` in this repo points at this repo's own root, not a
   contracts checkout) and cannot run from a plain `cargo test`. See
   `docs/testing.md` for how to run it. Linking the test binary is
-  memory-hungry — pass `-j 1` on constrained machines.
+  memory-hungry — pass `-j 1` on constrained machines, and if the link still
+  dies with `signal 9`, add `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`
+  (most of the linker's memory is debug info, and dropping it costs only
+  backtrace line numbers).
 
 ## Workflow
 

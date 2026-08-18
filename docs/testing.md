@@ -139,6 +139,17 @@ enough headroom on a very constrained host, but it's the cheapest mitigation.
 Retry a couple of times if it still happens — it's memory pressure, not a
 correctness issue.
 
+When `-j 1` alone isn't enough, drop debug info: most of what the linker holds
+in memory is DWARF, not code.
+
+```bash
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --lib --bins -j 1
+```
+
+This links the same binaries and runs the same assertions; you only lose line
+numbers in backtraces. On the 8 GB container used to write this doc it is the
+difference between a link that never completes and one that always does.
+
 ## What was verified vs. reasoned out
 
 This procedure was assembled by reading the pinned contracts monorepo's

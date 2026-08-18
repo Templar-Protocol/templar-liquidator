@@ -90,30 +90,64 @@ pub(crate) fn collateral_to_borrow(
         .to_u128_ceil()
 }
 
-/// Core trait for liquidation strategies.
+/// Core trait for liquidation strategies: the sizing policy for how much of a
+/// liquidatable position to repay.
 ///
-/// Implementations of this trait define how liquidation amounts are calculated
-/// and whether liquidations should proceed based on profitability and risk criteria.
+/// A strategy does not decide *whether* a position is liquidatable — the scanner
+/// and [`crate::Liquidator::liquidate`] establish that beforehand and only call
+/// into the strategy once a position is already known to be eligible. The
+/// strategy's job is narrower: given the position and the bot's current
+/// inventory, decide how big a repayment to attempt this round, and afterward
+/// whether that repayment is worth making at all. This is the extension seam for
+/// a custom sizing policy (e.g. per-market caps, sizing off inventory pressure)
+/// beyond the two built-ins in this module.
 pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
-    /// Calculates the optimal liquidation amount for a position.
+    /// Calculates the repay amount to attempt and the collateral to request for it.
+    ///
+    /// # Units
+    ///
+    /// Every amount here is raw on-chain units, not human-decimal. `available_balance`
+    /// and the first element of the returned tuple are in the market's borrow-asset
+    /// units; the second element is in collateral-asset units.
+    ///
+    /// # Returns
+    ///
+    /// `Some((repay_amount, collateral_amount))` to attempt a liquidation, or
+    /// `None` to skip this position for this round — e.g. inventory too low,
+    /// below the contract's minimum borrow amount, or the buffered eligibility
+    /// cap rounds down to nothing for a dust-sized position. `None` is the
+    /// *only* "don't liquidate" signal this trait defines: the caller does not
+    /// separately check the returned amounts for zero before submitting a
+    /// liquidation transaction, so an implementation must never return
+    /// `Some((U128(0), _))` — that would attempt an on-chain liquidation for a
+    /// zero repay amount instead of skipping cleanly.
+    ///
+    /// # Caller trust — no re-clamping
+    ///
+    /// [`crate::Liquidator::liquidate`] passes the returned amounts to the
+    /// liquidation transaction essentially unmodified (only wrapped into typed
+    /// amounts); it does not independently re-check them against
+    /// `available_balance` or the position's on-chain eligibility cap. Any
+    /// safety margin — headroom against price drift between scan and execution,
+    /// or staying under the contract's liquidatable-collateral cap — must be
+    /// built into the returned amount by the strategy itself. Both built-in
+    /// strategies do this via the module-level `SAFETY_BUFFER_BPS` and
+    /// `LIQUIDATABLE_CAP_BUFFER_BPS` constants (see `apply_liquidatable_cap_buffer`
+    /// and `min_with_cap_buffer`); a new strategy is free to use a different
+    /// margin, but needs one.
     ///
     /// # Arguments
     ///
-    /// * `position` - The borrow position to liquidate
+    /// * `position` - The borrow position to liquidate. For markets that
+    ///   support partial liquidation, the caller has already narrowed
+    ///   `position.collateral_asset_deposit` down to the liquidatable portion —
+    ///   see the note on v1.0.0 markets in the built-in strategies below.
     /// * `oracle_response` - Current price oracle data
     /// * `configuration` - Market configuration
-    /// * `available_balance` - Available balance in the liquidation asset
-    /// * `market_version` - Market contract version (e.g., (1, 0, 0) for v1.0.0)
-    ///
-    /// # Returns
-    ///
-    /// The optimal liquidation amount in borrow asset units and collateral amount,
-    /// or `None` if the position should not be liquidated.
-    ///
-    /// # Returns
-    /// Returns `Some((liquidation_amount, collateral_amount))` where:
-    /// - `liquidation_amount`: Amount of borrow asset to send
-    /// - `collateral_amount`: Amount of collateral to request
+    /// * `available_balance` - Available inventory balance in the borrow asset
+    /// * `market_version` - Market contract version (e.g., `Some((1, 0, 0))`).
+    ///   `None` when the market exposes no NEP-330 metadata; treat that the same
+    ///   as the oldest supported version rather than assuming partial support.
     ///
     /// # Errors
     /// Returns an error if price pair retrieval fails or position calculations fail.
@@ -126,12 +160,14 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
         market_version: Option<(u32, u32, u32)>,
     ) -> LiquidatorResult<Option<(U128, U128)>>;
 
-    /// Determines if a liquidation should proceed based on profitability.
+    /// Determines whether a sized liquidation is still worth submitting.
     ///
-    /// In the inventory-based model, we liquidate using available inventory,
-    /// so there's no swap cost. Profitability is based purely on:
-    /// - Expected collateral value vs liquidation amount
-    /// - Gas cost
+    /// Called after [`calculate_liquidation_amount`](Self::calculate_liquidation_amount)
+    /// has already produced a candidate `liquidation_amount`; this is the final
+    /// go/no-go gate before a transaction is submitted. In the inventory-based
+    /// model there is no swap cost to factor in here — the bot already holds the
+    /// borrow asset — so profitability reduces to expected collateral value versus
+    /// liquidation amount plus gas.
     ///
     /// # Arguments
     ///
@@ -141,7 +177,12 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     ///
     /// # Returns
     ///
-    /// `true` if the liquidation should proceed, `false` otherwise.
+    /// `true` if the liquidation should proceed, `false` otherwise. A `false`
+    /// here produces [`crate::LiquidationOutcome::Unprofitable`], distinct from
+    /// the `None` returned by `calculate_liquidation_amount` — both stop the
+    /// liquidation, but only this one implies the position genuinely isn't
+    /// worth repaying at current prices/gas, rather than "we lack the inventory
+    /// or eligibility to attempt it."
     ///
     /// # Errors
     /// Returns an error if profitability calculations fail.
@@ -155,7 +196,9 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     /// Returns the strategy name for logging and debugging.
     fn strategy_name(&self) -> &'static str;
 
-    /// Returns the maximum liquidation percentage (0-100).
+    /// Returns the maximum liquidation percentage (0-100) this strategy will
+    /// ever request, used for logging only — it is not enforced against the
+    /// value returned by [`calculate_liquidation_amount`](Self::calculate_liquidation_amount).
     ///
     /// # Default
     ///
@@ -165,10 +208,37 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// Partial liquidation strategy.
+/// Percentage-of-inventory liquidation strategy — also the **full-liquidation
+/// strategy** when configured at 100%. There is no separate "full liquidation"
+/// type: sending `target_percentage: 100` *is* full liquidation, and is the
+/// crate's default when no strategy flag is set at all.
 ///
-/// This strategy uses a configured percentage of available funds to minimize
-/// capital deployment while still profiting from liquidations.
+/// Sizes each liquidation as `target_percentage` of the bot's available borrow-
+/// asset inventory (after the strategy's own safety buffer), then converts that
+/// borrow amount to the equivalent collateral request via the market's price
+/// pair and liquidation spread, clamped to the position's liquidatable
+/// collateral.
+///
+/// # Configuration
+///
+/// Selected by default, or explicitly via `--partial-percentage <1-100>`
+/// (env `PARTIAL_LIQUIDATION_PERCENTAGE`) — see
+/// [`Args::partial_percentage`](crate::config::Args::partial_percentage). Mutually
+/// exclusive with [`FixedAmountLiquidationStrategy`]'s flag; [`Args::create_strategy`](crate::config::Args::create_strategy)
+/// panics at startup if both are set. `target_percentage` picks the fraction of
+/// inventory to deploy per liquidation; `min_profit_margin_bps` (shared with
+/// `--min-profit-bps` / `MIN_PROFIT_BPS`) sets the minimum margin
+/// [`should_liquidate`](LiquidationStrategy::should_liquidate) requires.
+///
+/// # When to reach for this
+///
+/// The default choice. Use 100% (the default) to fully liquidate every eligible
+/// position your inventory can cover. Use a lower percentage to spread limited
+/// inventory across more positions in a round, accept smaller/faster
+/// transactions, and reduce single-position exposure — at the cost of not
+/// fully repairing any one position in a single pass (loop liquidation, see
+/// `LOOP_LIQUIDATION`, can compensate by repeating this strategy across
+/// several iterations against the same position).
 ///
 /// # Benefits
 ///
@@ -384,7 +454,28 @@ fn usd_to_raw_units(usd_amount: f64, decimals: i32) -> u128 {
 ///
 /// Uses a fixed USD amount per liquidation, automatically converting to raw units
 /// based on each market's borrow asset decimals. Assumes all borrow assets are
-/// USD-based stablecoins.
+/// USD-based stablecoins (the conversion in `usd_to_raw_units` scales the USD
+/// figure by `10^decimals` with no price lookup, so it is wrong for a non-USD
+/// borrow asset).
+///
+/// # Configuration
+///
+/// Selected via `--fixed-liquidation-amount-usd <USD>` (env
+/// `FIXED_LIQUIDATION_AMOUNT_USD`) — see
+/// [`Args::fixed_liquidation_amount_usd`](crate::config::Args::fixed_liquidation_amount_usd).
+/// Mutually exclusive with [`PercentageLiquidationStrategy`]'s flag (startup
+/// panic if both are set, same as above). `fixed_amount_usd` sets the USD cap
+/// per liquidation; `min_profit_margin_bps` is the same knob and default as
+/// [`PercentageLiquidationStrategy`]'s.
+///
+/// # When to reach for this
+///
+/// Reach for this over the percentage strategy when the operator wants a
+/// predictable, position-size-independent capital cap per liquidation —
+/// e.g. "never risk more than $100 in a single liquidation, regardless of
+/// how large the underwater position is or which market's decimals apply."
+/// The percentage strategy's cap moves with inventory size and position size;
+/// this one doesn't.
 #[derive(Debug, Clone, Copy)]
 pub struct FixedAmountLiquidationStrategy {
     /// Fixed USD amount to use per liquidation (e.g., 100.0 for $100 USD)

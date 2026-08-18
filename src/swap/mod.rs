@@ -52,7 +52,9 @@ use crate::rpc::AppResult;
 /// Core trait for swap provider implementations.
 ///
 /// This trait defines the interface that all swap providers must implement,
-/// enabling polymorphic usage of different DEX protocols.
+/// enabling polymorphic usage of different DEX protocols. It is the extension
+/// seam for adding a venue beyond the two shipped implementations
+/// ([`OneClickSwap`], [`RefSwap`]).
 ///
 /// # Type Safety
 ///
@@ -61,21 +63,34 @@ use crate::rpc::AppResult;
 ///
 /// # Object Safety
 ///
-/// This trait is object-safe, allowing for dynamic dispatch via `Box<dyn SwapProvider>`.
+/// Because [`quote`](Self::quote), [`swap`](Self::swap), [`supports_assets`](Self::supports_assets)
+/// and [`ensure_storage_registration`](Self::ensure_storage_registration) are all
+/// generic over `F`/`T`, this trait itself is **not** object-safe — it cannot be
+/// used as `Box<dyn SwapProvider>` or `Arc<dyn SwapProvider>`. Callers that need
+/// dynamic dispatch go through the concrete [`SwapProviderImpl`] enum instead,
+/// which forwards to whichever provider it wraps.
 #[async_trait::async_trait]
 pub trait SwapProvider: Send + Sync {
-    /// Quotes the input amount needed to obtain a specific output amount.
+    /// Quotes the `from_asset` amount required to receive `output_amount` of
+    /// `to_asset` — an **exact-output** quote.
     ///
-    /// # Arguments
+    /// This is the single easiest thing to misread in this trait: the caller
+    /// supplies the amount it wants to *end up with* (in the target asset `T`),
+    /// and gets back how much of the *source* asset `F` that will cost. It is
+    /// the inverse of [`swap`](Self::swap), whose `amount` parameter is the
+    /// amount to spend, not to receive.
     ///
-    /// * `from_asset` - The asset to swap from
-    /// * `to_asset` - The asset to swap to
-    /// * `output_amount` - The desired output amount
-    ///
-    /// # Returns
-    ///
-    /// The input amount required to obtain the desired output amount,
-    /// including slippage and fees.
+    /// A conforming implementation must fold in slippage and fees so the
+    /// returned amount is directly usable as the `amount` to pass to
+    /// [`swap`](Self::swap) — the caller should not need to add its own margin
+    /// on top. Neither shipped provider currently implements a working quote:
+    /// [`OneClickSwap::quote`] and [`RefSwap::quote`] both return `Err`
+    /// unconditionally (1-Click's API only prices exact-input swaps; Ref's
+    /// implementation was left as "call `swap()` directly" instead). Nothing in
+    /// the liquidation pipeline calls `quote()` today — position sizing goes
+    /// through [`crate::liquidation_strategy`], which sizes off oracle prices,
+    /// not a swap quote. A new provider that wants this method exercised needs
+    /// its own caller as well as its own implementation.
     ///
     /// # Errors
     ///
@@ -90,17 +105,33 @@ pub trait SwapProvider: Send + Sync {
         output_amount: FungibleAssetAmount<T>,
     ) -> AppResult<FungibleAssetAmount<F>>;
 
-    /// Executes a swap operation.
+    /// Swaps exactly `amount` of `from_asset` for `to_asset`, blocking until the
+    /// outcome is known.
     ///
-    /// # Arguments
+    /// Unlike [`quote`](Self::quote), `amount` here is the amount to *spend*
+    /// (an exact-input swap): the caller does not know or control how much
+    /// `to_asset` it will receive.
     ///
-    /// * `from_asset` - The asset to swap from
-    /// * `to_asset` - The asset to swap to
-    /// * `amount` - The input amount to swap
+    /// A conforming implementation must not return `Ok(())` on the strength of
+    /// a NEAR transaction merely reaching the chain — on NEAR a top-level
+    /// transaction can report success while an inner receipt (the actual swap
+    /// logic, or a callback it depends on) fails and the tokens are refunded.
+    /// Both shipped providers guard against this at the cost of `swap()`
+    /// blocking for the full settlement window rather than returning as soon as
+    /// a transaction hash exists:
+    /// - [`RefSwap::swap`] inspects the transaction's receipts after the
+    ///   `ft_transfer_call` lands and errors if any of them failed.
+    /// - [`OneClickSwap::swap`] deposits, then polls the 1-Click status
+    ///   endpoint until a terminal state; only [`oneclick::SwapStatus::Success`]
+    ///   maps to `Ok(())`. `Failed`, `Refunded`, and `IncompleteDeposit` (1-Click
+    ///   received less than the full deposit — a genuine partial fill) are all
+    ///   surfaced as `Err`, never as a partial `Ok(())`.
     ///
-    /// # Returns
-    ///
-    /// `Ok(())` once the swap transaction has completed successfully.
+    /// A new implementation must uphold the same guarantee: callers treat
+    /// `Ok(())` as "the entire requested `amount` was swapped and settled,"
+    /// full stop — there is no partial-success return value in this API, so a
+    /// partial fill must be reported as an error, not folded into a smaller
+    /// `Ok`.
     ///
     /// # Errors
     ///
@@ -108,6 +139,8 @@ pub trait SwapProvider: Send + Sync {
     /// - The transaction fails to execute
     /// - The slippage exceeds acceptable limits
     /// - The deadline is exceeded
+    /// - The swap settles as anything other than a full fill (refund, partial
+    ///   deposit, or on-chain failure)
     async fn swap<F: AssetClass, T: AssetClass>(
         &self,
         from_asset: &FungibleAsset<F>,
@@ -123,7 +156,25 @@ pub trait SwapProvider: Send + Sync {
         self.provider_name().to_string()
     }
 
-    /// Checks if the provider supports a given asset pair.
+    /// Reports whether this provider can route a swap between `from_asset` and
+    /// `to_asset` at all — a cheap, synchronous capability check, not a
+    /// liquidity or pricing check.
+    ///
+    /// Must return `false` for any pair the provider structurally cannot
+    /// service: [`RefSwap`] requires both legs to be NEP-141 tokens;
+    /// [`OneClickSwap`] requires at least one leg to be NEP-245
+    /// (`intents.near`-wrapped) and, once its supported-token cache is
+    /// populated, both asset ids to appear in it.
+    ///
+    /// This is called before a swap is attempted, so returning `true` for a
+    /// pair the provider cannot actually route doesn't fail closed — it defers
+    /// the failure to [`swap`](Self::swap), which in the executor's JIT-swap
+    /// path runs only *after* the liquidation transaction has already landed
+    /// and the collateral has already been received. At that point the only
+    /// remaining options are holding the collateral or retrying the swap; the
+    /// clean "unsupported, hold collateral" outcome this check exists to
+    /// provide is no longer available. Prefer a false negative (declining a
+    /// pair the provider could actually handle) over a false positive.
     ///
     /// # Default Implementation
     ///
@@ -137,15 +188,19 @@ pub trait SwapProvider: Send + Sync {
         true
     }
 
-    /// Ensures an account is registered with a token contract's storage.
+    /// Ensures `account_id` is registered with `token_contract`'s NEP-145
+    /// storage, registering it if necessary.
     ///
-    /// This method calls `storage_deposit` on the token contract to register
-    /// the account before it can receive tokens. This is required by NEP-141.
-    ///
-    /// # Arguments
-    ///
-    /// * `token_contract` - The token contract to register with
-    /// * `account_id` - The account to register
+    /// NEP-141 fungible-token contracts bill each holder's balance entry to
+    /// that holder's own on-contract storage deposit (NEP-145) rather than
+    /// paying for it out of contract funds. An account with no storage deposit
+    /// has nowhere on the contract to record a balance, so `ft_transfer` /
+    /// `ft_transfer_call` into an unregistered account panics in the receiver
+    /// and the transfer is refunded — silently, from the sender's point of
+    /// view, unless the caller specifically checks for it. Any swap path that
+    /// ends with tokens landing in a new account (a deposit address, an
+    /// intermediate hop, the caller's own account for a token it has never
+    /// held before) must call this first.
     ///
     /// # Returns
     ///

@@ -1,13 +1,74 @@
 //! Notification system for the liquidator bot.
 //!
-//! Sends alerts to Telegram when significant events occur:
-//! - Successful liquidations
-//! - Failed or skipped swaps (unsupported assets, errors)
+//! [`Notifier`] is the notification extension seam: it currently sends
+//! HTML-formatted Telegram messages and nothing else, with no trait in front of
+//! it. A fork that needs a different channel (another chat platform, a paging
+//! system, a metrics sink) extends or replaces this type directly — see the
+//! crate-level docs for how this fits alongside the other two extension seams.
+//!
+//! # What triggers each notification
+//!
+//! - [`notify_liquidation`](Notifier::notify_liquidation) — a liquidation
+//!   transaction landed (or, in dry-run, would have), sent from
+//!   [`crate::Liquidator::liquidate`].
+//! - [`notify_liquidation_failed`](Notifier::notify_liquidation_failed) — a
+//!   liquidation reached the execution phase and failed there (not a scan or
+//!   pre-submission failure — see [`crate::ErrorPhase`]), sent from
+//!   [`crate::Liquidator::run_liquidations`].
+//! - [`notify_swap_failed`](Notifier::notify_swap_failed) /
+//!   [`notify_swap_unsupported`](Notifier::notify_swap_unsupported) — the
+//!   post-liquidation JIT collateral swap errored, or was skipped because
+//!   [`crate::swap::SwapProvider::supports_assets`] returned `false`. The
+//!   underlying `SwapIssue` is produced inside
+//!   [`crate::executor`]'s collateral handling, but — like
+//!   [`notify_liquidation`](Notifier::notify_liquidation) — is reported by
+//!   [`crate::Liquidator::liquidate`] only after the liquidation itself has
+//!   already succeeded, so a swap notification never implies the liquidation
+//!   failed too.
+//! - [`notify_scan_failures`](Notifier::notify_scan_failures) /
+//!   [`notify_scan_recovered`](Notifier::notify_scan_recovered) — see below.
+//!
+//! # Scan-failure threshold
+//!
+//! Unlike the other notifications, consecutive-scan-failure tracking is not
+//! owned by this module: [`crate::service::LiquidatorService`] counts
+//! consecutive scan failures per market and calls
+//! [`notify_scan_failures`](Notifier::notify_scan_failures) exactly once, the
+//! round the count first *reaches* `SCAN_FAILURE_NOTIFY_THRESHOLD` — not on
+//! every failure thereafter, so an outage produces one alert, not a flood. A
+//! later successful scan for that market calls
+//! [`notify_scan_recovered`](Notifier::notify_scan_recovered) once and resets
+//! the count, but only if the threshold had actually been crossed (so a market
+//! that fails once and recovers before ever alerting stays silent). Setting the
+//! threshold to `0` disables both notifications entirely.
+//!
+//! # Failure-notification cooldown (dedup)
+//!
+//! This module *does* own deduplication for
+//! [`notify_liquidation_failed`](Notifier::notify_liquidation_failed):
+//! repeated failures for the same `(market, borrower, error_kind)` triple are
+//! suppressed for `FAILURE_NOTIFICATION_COOLDOWN_HOURS`
+//! ([`DEFAULT_FAILURE_NOTIFY_COOLDOWN_HOURS`] hours by default) so a position
+//! stuck failing the same way doesn't page every round. A successful
+//! liquidation, or the position becoming healthy, clears the dedup state for
+//! that borrower immediately via
+//! [`clear_failure_dedup_for`](Notifier::clear_failure_dedup_for) — the next
+//! failure of any kind fires right away rather than waiting out the cooldown.
+//!
+//! # Fire-and-forget delivery
 //!
 //! All `notify_*` methods are truly fire-and-forget: they spawn the HTTP
 //! request on a background task and return immediately, so they never
-//! block liquidation operations. A bounded semaphore limits in-flight
-//! notifications to prevent unbounded task growth.
+//! block liquidation operations. A bounded semaphore
+//! (`MAX_INFLIGHT_NOTIFICATIONS`) limits in-flight notifications to prevent
+//! unbounded task growth; once it's full, new notifications are dropped (and
+//! logged) rather than queued. Because sends are detached background tasks,
+//! nothing keeps them alive if the async runtime shuts down first — that is
+//! exactly the case a single-cycle (`--run-mode once`) run hits at the end of
+//! `main`, which is why [`drain`](Notifier::drain) exists: call it before
+//! exiting to block until every in-flight send has actually completed. A
+//! long-running (`loop` mode) process never needs this, since the runtime
+//! keeps running past any individual round.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

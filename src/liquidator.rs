@@ -1,20 +1,72 @@
-//! Liquidator bot with modular architecture.
+//! Inventory-based liquidator for Templar Protocol lending markets on NEAR.
 //!
-//! Provides inventory-based liquidation with:
-//! - Modular component architecture
-//! - Pluggable liquidation strategies
-//! - Error handling
-//! - Gas cost estimation and profitability analysis
+//! The bot holds an inventory of borrow-asset tokens, repays the debt of underwater
+//! positions directly from that inventory, and receives their collateral at a
+//! discount in return. Received collateral can optionally be swapped back into
+//! borrow assets so the same inventory is available for the next round. This crate
+//! is published as a **public reference implementation**: the expected way to adapt
+//! it is to fork the repository, configure it via CLI flags / env vars (see
+//! [`config::Args`]), and — for behavior configuration can't express — implement one
+//! of the three extension seams below directly in the fork.
 //!
-//! Components:
-//! - `service`: Bot lifecycle management
-//! - `scanner`: Market position scanning
-//! - `executor`: Transaction execution
-//! - `oracle`: Price fetching
-//! - `profitability`: Cost/profit calculations
-//! - `inventory`: Asset balance tracking
-//! - `strategy`: Liquidation amount calculations
-//! - `swap`: Swap provider implementations
+//! # Pipeline
+//!
+//! Each liquidation round moves through the following stages in order. Every stage
+//! is owned by a single module, so a fork that only needs to change one piece of
+//! behavior can read (or replace) just that module rather than the whole crate:
+//!
+//! 1. **Registry refresh** — discover deployed markets across the configured
+//!    registries and validate them ([`crate::service`]).
+//! 2. **Position scan** — read borrow positions for each market and check which
+//!    ones are currently liquidatable ([`crate::scanner`]).
+//! 3. **Strategy sizing** — decide how much of a liquidatable position to repay
+//!    given available inventory ([`crate::liquidation_strategy`]).
+//! 4. **Profitability gate** — reject the sizing decision unless the discounted
+//!    collateral received is expected to cover the repay amount plus gas, with the
+//!    configured margin ([`crate::profitability`]).
+//! 5. **Execution** — submit the liquidation transaction and confirm every receipt
+//!    in it actually succeeded ([`crate::executor`]).
+//! 6. **Collateral handling** — hold the received collateral, or swap it back to
+//!    the borrow asset through a [`crate::swap::SwapProvider`]
+//!    ([`crate::executor`], [`crate::swap`]).
+//! 7. **Notification** — report the round's outcome, or any failure along the way,
+//!    to the configured channel ([`crate::notifier`]).
+//!
+//! # Extension seams
+//!
+//! A fork that needs behavior beyond what configuration exposes implements one of
+//! these three, in-tree:
+//!
+//! - [`crate::swap::SwapProvider`] — a DEX/aggregator integration for converting
+//!   collateral back into borrow assets. Reach for this when the bot needs to route
+//!   through a venue other than the built-in Ref Finance or 1-Click providers.
+//! - [`crate::liquidation_strategy::LiquidationStrategy`] — the policy for how much
+//!   of a position to repay each round. Reach for this when the built-in
+//!   percentage-of-inventory and fixed-USD-amount strategies don't match the sizing
+//!   policy you want (e.g. per-market caps, sizing off inventory pressure).
+//! - [`crate::notifier::Notifier`] — currently sends Telegram messages only, with
+//!   no trait boundary in front of it. Reach for this when alerts need to go
+//!   somewhere Telegram can't (another chat platform, a paging system, a metrics
+//!   sink), which today means extending or replacing this type directly.
+//!
+//! # Run modes
+//!
+//! [`config::RunMode`] selects how the bot drives the pipeline above:
+//!
+//! - `loop` (the default) — runs indefinitely, alternating registry refreshes and
+//!   liquidation rounds on independent timers.
+//! - `--run-mode once` (equivalently `--once`) — performs exactly one registry
+//!   refresh and one liquidation round, then exits. Intended for cron-style
+//!   schedulers (Cloud Run Jobs, Kubernetes CronJobs) rather than a long-lived
+//!   process.
+//!
+//! # Dry-run is the default
+//!
+//! The bot **simulates unless told otherwise**: `DRY_RUN` defaults to `true`, so a
+//! fresh checkout scans markets and logs what it would do without submitting any
+//! transaction. Live trading requires explicitly setting `DRY_RUN=false` — there is
+//! no other way to opt in. This is deliberate: the bot moves real inventory and is
+//! run unsupervised by operators who may not have read every line of it first.
 
 use std::sync::Arc;
 

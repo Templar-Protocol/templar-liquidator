@@ -44,3 +44,49 @@ jobs:
       - run: terraform -chdir=terraform fmt -check -recursive
       - run: terraform -chdir=terraform init -backend=false
       - run: terraform -chdir=terraform validate
+
+  # ── CI Summary ──────────────────────────────────────
+  # Aggregate gate: the single required status check on main. Requiring this
+  # rather than each job by name means adding or renaming a job never needs a
+  # matching ruleset edit — only the `needs` list below.
+  #
+  # Unlike the backend's equivalent, `skipped` is treated as a failure here.
+  # Nothing in this workflow is path-filtered or conditionally gated, so a
+  # skipped job means a condition regressed rather than that work was
+  # legitimately avoided — which is precisely how a green summary once hid a
+  # pipeline that ran no tests at all.
+  ci-summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - lint-test
+      - deny
+      - docker
+      - terraform
+    steps:
+      - name: Check all jobs
+        run: |
+          declare -A results=(
+            [lint-test]="${{ needs.lint-test.result }}"
+            [deny]="${{ needs.deny.result }}"
+            [docker]="${{ needs.docker.result }}"
+            [terraform]="${{ needs.terraform.result }}"
+          )
+
+          echo "CI pipeline status:"
+          fail=0
+          for job in "${!results[@]}"; do
+            printf "  %-12s %s\n" "$job" "${results[$job]}"
+            if [ "${results[$job]}" != "success" ]; then
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo
+            echo "At least one job did not succeed."
+            exit 1
+          fi
+          echo
+          echo "All jobs succeeded."

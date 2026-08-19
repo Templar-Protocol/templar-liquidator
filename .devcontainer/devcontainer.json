@@ -6,28 +6,75 @@
   // what's actually resolved. To refresh deliberately, re-resolve with:
   //   docker buildx imagetools inspect mcr.microsoft.com/devcontainers/rust:1-bookworm
   // and update both the tag and the digest together.
+  //
+  // Stays on bookworm to match the production build: Dockerfile's builder
+  // stage is rust:1.97.0-bookworm, so dev and release compile against the
+  // same glibc (2.36). That parity has a cost worth knowing about — prebuilt
+  // Linux binaries published by upstream projects are increasingly built on
+  // Ubuntu 24.04 and need GLIBC_2.39, so they will not run here (near-cli-rs
+  // is the case this repo actually hit; see docs/TESTNET.md).
   "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm@sha256:d599b1bc98c3fc53825462ebf1610f39ef9145aeab485deffb8aaef44f349fe1",
   // Feature ids don't accept a combined tag@digest form (only one or the
-  // other), so these are pinned to the exact semantic version each moving
-  // major tag (":1") currently resolves to instead — same effect, so a
-  // rebuild can't silently execute changed feature install scripts. To
-  // refresh deliberately, re-resolve with:
-  //   docker buildx imagetools inspect ghcr.io/devcontainers/features/<name>:1
+  // other), so these are pinned to the exact semantic version each feature's
+  // current major tag resolves to — same effect, so a rebuild can't silently
+  // execute changed feature install scripts.
+  //
+  // The current major differs per feature: terraform and github-cli are on
+  // 1.x, docker-in-docker is on 4.x. Don't assume ":1" is current — resolve
+  // each one. To refresh deliberately:
+  //   docker buildx imagetools inspect ghcr.io/devcontainers/features/<name>:<major>
   // and confirm the new exact version before bumping it here.
+  //
+  // docker-in-docker must stay on 2.x or newer. 1.0.9 unconditionally
+  // installed Compose v1, and on any non-x86_64 host that path ran
+  // `pip3 install --user pipx` against the system Python — which bookworm
+  // refuses with PEP 668's "externally-managed-environment", failing the
+  // whole build. It broke arm64 (Apple Silicon) only, so amd64 hosts never
+  // saw it. 4.x installs a standalone Compose v2 binary and never touches
+  // system Python.
+  //
+  // github-cli is pinned to the same exact version terraform's own
+  // `dependsOn: github-cli:1` resolves to, so the feature is installed once
+  // rather than twice per build.
+  //
+  // node exists only to run the Claude Code CLI (installed in
+  // post-create.sh) — nothing in the crate's own build or test path needs it.
+  // Pinned to 22 to match templar-backend's devcontainer; Node 20 went
+  // end-of-life in April 2026.
   "features": {
     "ghcr.io/devcontainers/features/terraform:1.5.0": {},
-    "ghcr.io/devcontainers/features/github-cli:1.1.0": {},
-    "ghcr.io/devcontainers/features/docker-in-docker:1.0.9": {}
+    "ghcr.io/devcontainers/features/github-cli:1.1.1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:4.0.0": {},
+    "ghcr.io/devcontainers/features/node:2.1.0": { "version": "22" }
   },
-  // `rustup show` reads rust-toolchain.toml and installs the pinned 1.97.0
-  // toolchain (plus rustfmt/clippy) on first open. `cargo fetch` then warms
-  // the dependency cache, including the git checkout of the pinned
-  // templar-* rev — worth doing up front since that fetch needs network and
-  // otherwise happens lazily on the first build/test/clippy invocation.
-  "postCreateCommand": "rustup show && cargo fetch",
+  // Claude Code keeps its session transcripts, config and credentials under
+  // ~/.claude (plus ~/.claude.json, which post-create.sh symlinks into the
+  // same volume). Without a volume both are lost on every rebuild, and this
+  // container gets rebuilt often. Named rather than anonymous so it survives
+  // `--remove-existing-container` and can be inspected with `docker volume`.
+  //
+  // Transcripts are keyed by workspace path, so history recorded on the host
+  // lives under a different key than history recorded in here
+  // (-workspaces-templar-liquidator) and the two do not merge on their own.
+  //
+  // NOTE: this volume holds credentials. It is not covered by the repo's
+  // .gitignore or by anything in .dockerignore — it lives in Docker's volume
+  // store on the host. `docker volume rm` it if you hand this machine over.
+  "mounts": [
+    "source=templar-liquidator-claude-code,target=/home/vscode/.claude,type=volume"
+  ],
+  // Toolchain install, near-cli-rs, and the cargo cache warm-up. Kept in a
+  // script rather than inlined here so each step can carry the reasoning for
+  // why it exists and be non-fatal on its own — see .devcontainer/post-create.sh.
+  "postCreateCommand": "${containerWorkspaceFolder}/.devcontainer/post-create.sh",
   "customizations": {
     "vscode": {
-      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml", "hashicorp.terraform"]
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "hashicorp.terraform",
+        "anthropic.claude-code"
+      ]
     }
   }
 }

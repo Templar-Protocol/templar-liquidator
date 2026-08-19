@@ -66,11 +66,22 @@ fi
 echo "==> Setting up Claude Code"
 sudo chown -R "$(id -u):$(id -g)" "${HOME}/.claude" || warn "could not chown ${HOME}/.claude"
 
+#
+#    Each step below warns rather than aborting. The chown above is the one
+#    most likely to fail (a volume the daemon hands over root-owned), and it
+#    only warns — so leaving these unguarded under `set -e` would turn that
+#    warning into a failed create two lines later, which is exactly the
+#    outcome the non-fatal contract at the top of this file promises not to.
 if [ -f "${HOME}/.claude.json" ] && [ ! -L "${HOME}/.claude.json" ]; then
-	mv "${HOME}/.claude.json" "${HOME}/.claude/.claude.json"
+	mv "${HOME}/.claude.json" "${HOME}/.claude/.claude.json" ||
+		warn "could not migrate ${HOME}/.claude.json into the volume; it will not persist across rebuilds"
 fi
-[ -e "${HOME}/.claude/.claude.json" ] || echo '{}' > "${HOME}/.claude/.claude.json"
-ln -sfn "${HOME}/.claude/.claude.json" "${HOME}/.claude.json"
+if [ ! -e "${HOME}/.claude/.claude.json" ]; then
+	echo '{}' > "${HOME}/.claude/.claude.json" ||
+		warn "could not seed ${HOME}/.claude/.claude.json"
+fi
+ln -sfn "${HOME}/.claude/.claude.json" "${HOME}/.claude.json" ||
+	warn "could not link ${HOME}/.claude.json into the volume; config will not persist across rebuilds"
 
 #    Installed WITHOUT sudo, deliberately. The node feature puts node/npm under
 #    /usr/local/share/nvm, which is writable by this user but is not on root's

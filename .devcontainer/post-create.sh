@@ -9,6 +9,56 @@ set -euo pipefail
 
 warn() { echo "!!  $*" >&2; }
 
+# Memory available to THIS container, in kB.
+#
+# Prefers the cgroup limit over /proc/meminfo, which is not cgroup-aware: run
+# with an explicit `docker --memory`, /proc/meminfo still reports the host or
+# VM figure and we would size the build for memory the container cannot have.
+# When no limit is set — the Docker Desktop default, where memory.max reads
+# "max" — the VM itself is the constraint and /proc/meminfo is the right
+# number.
+#
+# Every read is guarded and the function always prints a plain integer. This
+# whole step is non-fatal by contract, so an unreadable /proc or cgroup must
+# degrade to "assume nothing available" (and therefore one job) rather than
+# abort the script under `set -e`.
+available_kb() {
+	local limit="" current=0 avail=""
+
+	if [ -r /sys/fs/cgroup/memory.max ]; then
+		limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)
+		[ "${limit}" = "max" ] && limit=""
+		if [ -n "${limit}" ]; then
+			current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 0)
+		fi
+	elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+		limit=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || true)
+		# cgroup v1 reports a near-INT64_MAX sentinel when unlimited.
+		case "${limit}" in
+		'' | *[!0-9]*) limit="" ;;
+		*) [ "${#limit}" -ge 19 ] && limit="" ;;
+		esac
+		if [ -n "${limit}" ]; then
+			current=$(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo 0)
+		fi
+	fi
+
+	case "${limit}:${current}" in
+	*[!0-9:]*) limit=""; current=0 ;;
+	esac
+
+	if [ -n "${limit}" ]; then
+		avail=$(( (limit - current) / 1024 ))
+	else
+		avail=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null || true)
+	fi
+
+	case "${avail}" in
+	'' | *[!0-9]*) echo 0 ;;
+	*) echo "${avail}" ;;
+	esac
+}
+
 # Bump deliberately. `cargo install --locked --version` is what stops a
 # rebuild from silently picking up a different CLI — same reasoning as the
 # image digest and feature version pins in devcontainer.json.
@@ -58,22 +108,27 @@ else
 #    number, so a roomy machine still builds fast and a squeezed one still
 #    finishes. CARGO_BUILD_JOBS in the environment wins if you set it.
 	echo "==> Installing near-cli-rs ${NEAR_CLI_RS_VERSION} (compiles from source; slow)"
+	avail_kb=$(available_kb)
 	if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
-		avail_kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
 		CARGO_BUILD_JOBS=$(( avail_kb / 1500000 ))
 		[ "${CARGO_BUILD_JOBS}" -lt 1 ] && CARGO_BUILD_JOBS=1
 		[ "${CARGO_BUILD_JOBS}" -gt "$(nproc)" ] && CARGO_BUILD_JOBS=$(nproc)
 	fi
 	export CARGO_BUILD_JOBS
-	echo "    using ${CARGO_BUILD_JOBS} build job(s) ($(( $(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo) / 1024 )) MB available, $(nproc) cores)"
+	echo "    using ${CARGO_BUILD_JOBS} build job(s) ($(( avail_kb / 1024 )) MB available, $(nproc) cores)"
 
 	if sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libudev-dev; then
 		# debug=0 drops debuginfo generation, which is most of rustc's peak
 		# memory here; near-cli-rs already strips it at link, so this costs
 		# nothing but backtrace line numbers in a tool we only run by hand.
+		#
+		# RELEASE, not DEV/TEST: `cargo install` builds in the release profile,
+		# so the dev/test knobs used for `cargo test` do nothing here. The retry
+		# hint below carries both settings for the same reason — a retry without
+		# them just reproduces the original OOM.
 		CARGO_PROFILE_RELEASE_DEBUG=0 \
 			cargo install near-cli-rs --locked --version "${NEAR_CLI_RS_VERSION}" || warn \
-			"near-cli-rs install failed. Nothing in the build depends on it — only the docs/TESTNET.md walkthrough does. Retry with: CARGO_BUILD_JOBS=1 cargo install near-cli-rs --locked --version ${NEAR_CLI_RS_VERSION}"
+			"near-cli-rs install failed. Nothing in the build depends on it — only the docs/TESTNET.md walkthrough does. Retry with: CARGO_BUILD_JOBS=1 CARGO_PROFILE_RELEASE_DEBUG=0 cargo install near-cli-rs --locked --version ${NEAR_CLI_RS_VERSION}"
 	else
 		warn "Could not install libudev-dev; skipping near-cli-rs. See docs/TESTNET.md."
 	fi

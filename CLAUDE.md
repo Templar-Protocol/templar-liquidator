@@ -147,12 +147,21 @@ Bump every `rev =` together in one change, never one alone.
 - The dev container is memory-constrained by whatever Docker Desktop is given
   (commonly ~8 GB), and `nproc` reports the host's full core count — so cargo
   fans out far more parallel jobs than there is RAM for. Both `cargo test
-  --lib --bins` and `cargo install` die with `signal: 9` / `collect2: fatal
-  error: ld terminated with signal 9` there under defaults. Same remedy as the
-  sandbox test below: cap jobs (`CARGO_BUILD_JOBS=1`) and drop debug info
-  (`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`). Raising Docker's
-  memory limit is the better fix; `.devcontainer/post-create.sh` sizes its own
-  job count from `MemAvailable` for this reason.
+  --lib --bins` and `cargo install` die there under defaults, with `signal: 9`
+  or `collect2: fatal error: ld terminated with signal 9`. Capping jobs with
+  `CARGO_BUILD_JOBS=1` helps both, but the debug-info knob is **per profile**,
+  so the two cases need different variables:
+
+  ```bash
+  # dev/test profiles — cargo test, cargo build, cargo clippy
+  CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --lib --bins
+  # release profile — cargo install builds here, so the dev/test knobs do nothing
+  CARGO_BUILD_JOBS=1 CARGO_PROFILE_RELEASE_DEBUG=0 cargo install <crate>
+  ```
+
+  Raising Docker's memory limit is the better fix; `.devcontainer/post-create.sh`
+  sizes its own job count from the cgroup limit (falling back to
+  `MemAvailable`) for this reason.
 - The sandbox integration test (`tests/liquidation_sandbox.rs`) is
   `#[ignore]`d — it needs a `neard` sandbox plus prebuilt contract wasms
   (resolved at compile time through `CARGO_WORKSPACE_DIR`, which

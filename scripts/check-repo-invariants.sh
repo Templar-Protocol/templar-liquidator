@@ -17,19 +17,27 @@ note() { printf '  %s\n' "$*"; }
 bad() { printf '::error::%s\n' "$*"; fail=1; }
 
 # ── 1. THE SINGLE-REV RULE ───────────────────────────
-# Every templar-* git dependency must be pinned to the SAME rev, and
-# sandbox.yml's CONTRACTS_REV must match it — that workflow clones the
-# contracts repo at that rev to build the wasms the sandbox test loads.
+# Every dependency on the Templar contracts repo must be pinned to the SAME
+# rev, and sandbox.yml's CONTRACTS_REV must match it — that workflow clones
+# the contracts repo at that rev to build the wasms the sandbox test loads.
+#
+# Matched by the repository URL rather than by crate name, on purpose. Naming
+# the repo is what the rule is actually about (two checkouts of the SAME
+# upstream repo are what fail to unify), it picks up `test-utils` which does
+# not carry the templar- prefix, and it leaves an unrelated git dependency
+# with its own independent rev alone instead of failing CI over it.
 echo "THE SINGLE-REV RULE"
-mapfile -t revs < <(grep -oE 'rev = "[0-9a-f]{7,40}"' Cargo.toml | grep -oE '[0-9a-f]{7,40}' | sort -u)
+CONTRACTS_REPO="github.com/Templar-Protocol/contracts"
+mapfile -t revs < <(grep -F "${CONTRACTS_REPO}" Cargo.toml |
+	grep -oE 'rev = "[0-9a-f]{7,40}"' | grep -oE '[0-9a-f]{7,40}' | sort -u)
 
 if [ "${#revs[@]}" -eq 0 ]; then
-	bad "no 'rev = \"...\"' pins found in Cargo.toml — has the dependency style changed?"
+	bad "no rev pins found for ${CONTRACTS_REPO} in Cargo.toml — has the dependency style changed?"
 elif [ "${#revs[@]}" -gt 1 ]; then
-	bad "templar-* dependencies are pinned to ${#revs[@]} different revs; they must all match:"
+	bad "${CONTRACTS_REPO} dependencies are pinned to ${#revs[@]} different revs; they must all match:"
 	printf '    %s\n' "${revs[@]}"
 else
-	note "all templar-* deps pinned to ${revs[0]}"
+	note "all ${CONTRACTS_REPO} deps pinned to ${revs[0]}"
 
 	sandbox_rev=$(grep -oE '^\s*CONTRACTS_REV:\s*[0-9a-f]{7,40}' .github/workflows/sandbox.yml |
 		grep -oE '[0-9a-f]{7,40}' || true)

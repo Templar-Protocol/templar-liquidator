@@ -46,10 +46,34 @@ rustup show
 if [ "$(near --version 2>/dev/null | awk '{ print $2 }')" = "${NEAR_CLI_RS_VERSION}" ]; then
 	echo "==> near-cli-rs ${NEAR_CLI_RS_VERSION} already installed"
 else
+#    Build parallelism is capped on purpose. cargo defaults to one rustc job
+#    per core (14 on an M-series host), and near-primitives alone peaks well
+#    past a gigabyte, so the default fans out to far more memory than a
+#    Docker Desktop VM has: the build dies with `signal: 9, SIGKILL` from the
+#    OOM killer and — because this step is non-fatal — leaves you with a
+#    container that came up fine but has no `near`. Same failure mode and same
+#    remedy as the sandbox test's link step (see CLAUDE.md's Gotchas).
+#
+#    Budget ~1.5 GB per job against MemAvailable rather than hardcoding a
+#    number, so a roomy machine still builds fast and a squeezed one still
+#    finishes. CARGO_BUILD_JOBS in the environment wins if you set it.
 	echo "==> Installing near-cli-rs ${NEAR_CLI_RS_VERSION} (compiles from source; slow)"
+	if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+		avail_kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+		CARGO_BUILD_JOBS=$(( avail_kb / 1500000 ))
+		[ "${CARGO_BUILD_JOBS}" -lt 1 ] && CARGO_BUILD_JOBS=1
+		[ "${CARGO_BUILD_JOBS}" -gt "$(nproc)" ] && CARGO_BUILD_JOBS=$(nproc)
+	fi
+	export CARGO_BUILD_JOBS
+	echo "    using ${CARGO_BUILD_JOBS} build job(s) ($(( $(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo) / 1024 )) MB available, $(nproc) cores)"
+
 	if sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libudev-dev; then
-		cargo install near-cli-rs --locked --version "${NEAR_CLI_RS_VERSION}" || warn \
-			"near-cli-rs install failed. Nothing in the build depends on it — only the docs/TESTNET.md walkthrough does. Retry with: cargo install near-cli-rs --locked --version ${NEAR_CLI_RS_VERSION}"
+		# debug=0 drops debuginfo generation, which is most of rustc's peak
+		# memory here; near-cli-rs already strips it at link, so this costs
+		# nothing but backtrace line numbers in a tool we only run by hand.
+		CARGO_PROFILE_RELEASE_DEBUG=0 \
+			cargo install near-cli-rs --locked --version "${NEAR_CLI_RS_VERSION}" || warn \
+			"near-cli-rs install failed. Nothing in the build depends on it — only the docs/TESTNET.md walkthrough does. Retry with: CARGO_BUILD_JOBS=1 cargo install near-cli-rs --locked --version ${NEAR_CLI_RS_VERSION}"
 	else
 		warn "Could not install libudev-dev; skipping near-cli-rs. See docs/TESTNET.md."
 	fi

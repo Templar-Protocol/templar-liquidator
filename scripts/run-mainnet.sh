@@ -58,9 +58,8 @@ export DRY_RUN
 # Collateral strategy configuration
 COLLATERAL_STRATEGY="${COLLATERAL_STRATEGY:-hold}"
 
-# Swap provider configuration (both providers will be initialized automatically)
+# Swap provider configuration (1-Click; initialized automatically when needed)
 ONECLICK_API_TOKEN="${ONECLICK_API_TOKEN}"
-REF_CONTRACT="${REF_CONTRACT:-v2.ref-finance.near}"  # Mainnet default
 
 # Market filtering configuration
 ALLOWED_COLLATERAL_ASSETS="${ALLOWED_COLLATERAL_ASSETS}"
@@ -184,7 +183,6 @@ fi
 CMD_ARGS+=("--collateral-strategy" "$COLLATERAL_STRATEGY")
 # ONECLICK_API_TOKEN goes via the environment, not argv (see the SIGNER_KEY note above).
 [ -n "$ONECLICK_API_TOKEN" ] && export ONECLICK_API_TOKEN
-[ -n "$REF_CONTRACT" ] && CMD_ARGS+=("--ref-contract" "$REF_CONTRACT")
 
 # Add market filtering arguments
 if [ -n "$ALLOWED_COLLATERAL_ASSETS" ]; then

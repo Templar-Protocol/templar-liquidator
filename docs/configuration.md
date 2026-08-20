@@ -56,7 +56,6 @@ The bot refuses to start without these three:
 |---|---|---|---|
 | `COLLATERAL_STRATEGY` | `--collateral-strategy` | `hold` | `hold` (keep collateral as received) or `swap-to-borrow` (route back to the market's borrow asset). |
 | `ONECLICK_API_TOKEN` | `--oneclick-api-token` | unset | 1-Click API auth token. Optional but avoids a 0.1% fee; unauthenticated calls still work. |
-| `REF_CONTRACT` | `--ref-contract` | unset | Ref Finance contract account, e.g. `v2.ref-finance.near` (mainnet). Required for `swap-to-borrow` swaps that route through Ref. |
 | `MIN_SWAP_VALUE_USD` | `--min-swap-value-usd` | `10.0` | Minimum USD value to attempt a swap (just-in-time or batch); smaller amounts are deferred to the next batch cycle. |
 | `BATCH_SWAP_ON_CYCLE_START` | `--batch-swap-on-cycle-start` | `true` | Swap all accumulated collateral above the threshold at the start of each liquidation round. |
 | `SWAP_RETRY_ATTEMPTS` | `--swap-retry-attempts` | `3` | Retry attempts for transient swap errors (includes the first attempt). |

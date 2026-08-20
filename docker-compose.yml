@@ -55,7 +55,6 @@ services:
       # "--loop-liquidation",
       # "--fixed-liquidation-amount-usd", "${FIXED_LIQUIDATION_AMOUNT_USD}",
       # ONECLICK_API_TOKEN is a secret: set it in .env, never as a flag here.
-      # "--ref-contract", "${REF_CONTRACT:-v2.ref-finance.near}",
     ]
     # No --partial-percentage flag here on purpose: the strategy default
     # (100% / full liquidation when neither PARTIAL_LIQUIDATION_PERCENTAGE nor

@@ -211,10 +211,6 @@ pub struct Args {
     #[arg(long, env = "ONECLICK_API_TOKEN")]
     pub oneclick_api_token: Option<String>,
 
-    /// Ref Finance contract address
-    #[arg(long, env = "REF_CONTRACT")]
-    pub ref_contract: Option<String>,
-
     /// Collateral asset allowlist for market filtering
     #[arg(long, env = "ALLOWED_COLLATERAL_ASSETS", value_delimiter = ',')]
     pub allowed_collateral_assets: Vec<String>,
@@ -372,7 +368,6 @@ impl std::fmt::Debug for Args {
                 "oneclick_api_token",
                 &shown(self.oneclick_api_token.as_ref()),
             )
-            .field("ref_contract", &self.ref_contract)
             .field("allowed_collateral_assets", &self.allowed_collateral_assets)
             .field("ignored_collateral_assets", &self.ignored_collateral_assets)
             .field("ignored_markets", &self.ignored_markets)
@@ -641,7 +636,6 @@ impl Args {
             collateral_strategy,
             dry_run: self.dry_run,
             oneclick_api_token: self.oneclick_api_token.clone(),
-            ref_contract: self.ref_contract.clone(),
             allowed_collateral_assets,
             ignored_collateral_assets,
             ignored_markets,
@@ -718,7 +712,6 @@ mod tests {
             dry_run: true,
             collateral_strategy: CollateralStrategyArg::Hold,
             oneclick_api_token: None,
-            ref_contract: None,
             allowed_collateral_assets: vec![],
             ignored_collateral_assets: vec![],
             ignored_markets: vec![],
@@ -936,7 +929,6 @@ mod tests {
         // live mode (dry_run = false) propagating through to the config.
         args.dry_run = false;
         args.oneclick_api_token = Some("test_token".to_string());
-        args.ref_contract = Some("ref.testnet".to_string());
         args.allowed_collateral_assets = vec!["nep141:usdc.testnet".to_string()];
         args.ignored_collateral_assets = vec!["nep141:scam.testnet".to_string()];
 

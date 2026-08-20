@@ -97,7 +97,7 @@ fair value of that collateral = 0.163579 × 64,350 = $10,526.32
 gross markup           = $10,526.32 − $10,000 = $526.32   (≈ 5.26% of D)
 ```
 
-That 5.26% is `spread / (1 - spread)` — the exact fraction the [`borrow_to_collateral`/`collateral_to_borrow`](src/liquidation_strategy.rs) conversion bakes in for this market's 5% spread. Subtract gas (`ProfitabilityCalculator::DEFAULT_GAS_COST_USD` ≈ $0.05, negligible on NEAR) and the liquidation clears **≈$526/10,000 = 526 bps** of profit — comfortably above the default `MIN_PROFIT_BPS=50` (0.5%) gate. Holding the collateral (`COLLATERAL_STRATEGY=hold`) banks the full $526.27; routing it back through Ref Finance or 1-Click (`swap-to-borrow`) nets slightly less after that venue's fee/slippage.
+That 5.26% is `spread / (1 - spread)` — the exact fraction the [`borrow_to_collateral`/`collateral_to_borrow`](src/liquidation_strategy.rs) conversion bakes in for this market's 5% spread. Subtract gas (`ProfitabilityCalculator::DEFAULT_GAS_COST_USD` ≈ $0.05, negligible on NEAR) and the liquidation clears **≈$526/10,000 = 526 bps** of profit — comfortably above the default `MIN_PROFIT_BPS=50` (0.5%) gate. Holding the collateral (`COLLATERAL_STRATEGY=hold`) banks the full $526.27; routing it back through 1-Click (`swap-to-borrow`) nets slightly less after that venue's fee/slippage.
 
 Verify it yourself against live chain state:
 
@@ -124,7 +124,7 @@ Each liquidation round moves through these stages in order — every stage is ow
 3. **Strategy sizing** — decide how much of a liquidatable position to repay, given available inventory ([`src/liquidation_strategy.rs`](src/liquidation_strategy.rs)).
 4. **Profitability gate** — reject the sizing decision unless the discounted collateral is expected to cover the repay amount plus gas, with the configured `MIN_PROFIT_BPS` margin ([`src/profitability.rs`](src/profitability.rs)).
 5. **Execution** — submit the liquidation transaction and confirm every receipt in it actually succeeded, not just the top-level transaction ([`src/executor.rs`](src/executor.rs)).
-6. **Collateral handling** — hold the received collateral, or swap it back to the borrow asset via [Ref Finance](src/swap/ref.rs) or [1-Click](src/swap/oneclick.rs) ([`src/executor.rs`](src/executor.rs), [`src/swap/`](src/swap/)).
+6. **Collateral handling** — hold the received collateral, or swap it back to the borrow asset via [1-Click](src/swap/oneclick.rs) ([`src/executor.rs`](src/executor.rs), [`src/swap/`](src/swap/)).
 7. **Notification** — report the round's outcome, or any failure along the way, to Telegram ([`src/notifier.rs`](src/notifier.rs)).
 
 Prices for steps 2–4 come from [`src/oracle.rs`](src/oracle.rs) (Pyth Hermes, RedStone, and proxy/LST feeds); available balances for steps 3 and 5 come from [`src/inventory.rs`](src/inventory.rs).
@@ -143,7 +143,7 @@ flowchart LR
         Strategy --> Profitability["profitability.rs<br/>profit gate"]
         Profitability -->|profitable| Executor["executor.rs<br/>submit tx"]
         Executor --> Inventory
-        Executor -->|swap-to-borrow| Swap["swap/ref.rs<br/>swap/oneclick.rs"]
+        Executor -->|swap-to-borrow| Swap["swap/oneclick.rs<br/>1-Click"]
         Executor --> Notifier["notifier.rs<br/>Telegram"]
         Metrics["metrics.rs + http.rs<br/>/healthz /metrics"]
     end

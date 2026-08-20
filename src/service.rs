@@ -94,8 +94,6 @@ pub struct ServiceConfig {
     pub dry_run: bool,
     /// `OneClick` API token for swap authentication
     pub oneclick_api_token: Option<String>,
-    /// Ref Finance contract address for NEP-141 swaps
-    pub ref_contract: Option<String>,
     /// Collateral asset allowlist for market filtering
     pub allowed_collateral_assets:
         Vec<templar_common::asset::FungibleAsset<templar_common::asset::CollateralAsset>>,
@@ -164,7 +162,6 @@ impl std::fmt::Debug for ServiceConfig {
                 "oneclick_api_token",
                 &shown(self.oneclick_api_token.as_ref()),
             )
-            .field("ref_contract", &self.ref_contract)
             .field("allowed_collateral_assets", &self.allowed_collateral_assets)
             .field("ignored_collateral_assets", &self.ignored_collateral_assets)
             .field("ignored_markets", &self.ignored_markets)
@@ -267,7 +264,7 @@ impl LiquidatorService {
         )));
 
         // Create swap provider for executor
-        let (_, oneclick_provider) = Self::create_swap_providers(&config, &client);
+        let oneclick_provider = Self::create_swap_provider(&config, &client);
 
         // Create oracle fetcher for batch swap price checks
         let oracle_fetcher = crate::OracleFetcher::new(
@@ -301,66 +298,29 @@ impl LiquidatorService {
         }
     }
 
-    /// Creates swap providers for collateral rebalancing
-    fn create_swap_providers(
+    /// Creates the swap provider for collateral rebalancing (`None` for the
+    /// Hold strategy, which never swaps).
+    fn create_swap_provider(
         config: &ServiceConfig,
         client: &SigningClient,
-    ) -> (
-        Option<crate::swap::SwapProviderImpl>,
-        Option<crate::swap::SwapProviderImpl>,
-    ) {
-        use crate::swap::{OneClickSwap, RefSwap, SwapProviderImpl};
+    ) -> Option<crate::swap::SwapProviderImpl> {
+        use crate::swap::{OneClickSwap, SwapProviderImpl};
 
-        // No swap providers needed for Hold strategy
+        // No swap provider needed for Hold strategy
         if matches!(config.collateral_strategy, CollateralStrategy::Hold) {
-            tracing::info!("Collateral strategy is Hold, no swap providers needed");
-            return (None, None);
+            tracing::info!("Collateral strategy is Hold, no swap provider needed");
+            return None;
         }
 
-        tracing::info!("Creating swap providers for collateral rebalancing");
-
-        // Initialize Ref Finance provider for NEP-141 tokens
-        let ref_provider = if let Some(ref contract_str) = config.ref_contract {
-            match contract_str.parse::<AccountId>() {
-                Ok(contract) => {
-                    let ref_swap = RefSwap::new(contract.clone(), client.clone());
-                    tracing::info!(
-                        contract = %contract,
-                        "Ref Finance provider initialized"
-                    );
-                    Some(SwapProviderImpl::ref_finance(ref_swap))
-                }
-                Err(e) => {
-                    tracing::error!(
-                        contract = %contract_str,
-                        error = ?e,
-                        "Invalid REF_CONTRACT address"
-                    );
-                    None
-                }
-            }
+        let oneclick = OneClickSwap::new(client.clone(), None, config.oneclick_api_token.clone());
+        if config.oneclick_api_token.is_some() {
+            tracing::info!("1-Click API provider initialized with authentication");
         } else {
             tracing::warn!(
-                "REF_CONTRACT not configured - set to v2.ref-finance.near (mainnet) or ref-finance-101.testnet"
+                "1-Click API provider initialized without authentication (0.1% fee applies)"
             );
-            None
-        };
-
-        // Initialize OneClick provider for NEP-245 and NEP-141 tokens
-        let oneclick_provider = {
-            let oneclick =
-                OneClickSwap::new(client.clone(), None, config.oneclick_api_token.clone());
-            if config.oneclick_api_token.is_some() {
-                tracing::info!("1-Click API provider initialized with authentication");
-            } else {
-                tracing::warn!(
-                    "1-Click API provider initialized without authentication (0.1% fee applies)"
-                );
-            }
-            Some(SwapProviderImpl::oneclick(oneclick))
-        };
-
-        (ref_provider, oneclick_provider)
+        }
+        Some(SwapProviderImpl::oneclick(oneclick))
     }
 
     /// Run the service event loop

@@ -1,8 +1,10 @@
 //! Swap provider implementations for liquidation operations.
 //!
 //! This module provides a flexible, extensible architecture for integrating
-//! different swap/exchange protocols (Ref Finance, 1-Click API, etc.) used
-//! during liquidation operations.
+//! swap/exchange venues used during liquidation operations. One provider
+//! ships — the 1-Click API ([`OneClickSwap`]) — and the seam is deliberately
+//! multi-provider so a fork can add its own venue: implement [`SwapProvider`]
+//! for a new type and add a variant to [`SwapProviderImpl`].
 //!
 //! # Architecture
 //!
@@ -12,36 +14,20 @@
 //! - Testability through mock implementations
 //! - Type-safe asset handling across different token standards (NEP-141, NEP-245)
 //!
-//! # Example
-//!
-//! ```ignore
-//! use templar_liquidator::swap::{SwapProvider, RefSwap};
-//! use templar_gateway_client::SigningClient;
-//!
-//! # async fn example(client: SigningClient) -> Result<(), Box<dyn std::error::Error>> {
-//! let swap_provider = RefSwap::new(
-//!     "v2.ref-finance.near".parse()?,
-//!     client,
-//! );
-//!
-//! // Get quote
-//! let quote = swap_provider.quote(&from_asset, &to_asset, output_amount).await?;
-//!
-//! // Execute swap
-//! let result = swap_provider.swap(&from_asset, &to_asset, quote).await?;
-//! # Ok(())
-//! # }
-//! ```
+//! A Ref Finance provider used to live here and was removed rather than
+//! wired in: its `min_amount_out` was derived from the *input* amount with no
+//! price or decimals conversion, i.e. no effective slippage protection for
+//! any non-1:1 pair. A fork resurrecting an AMM provider must compute the
+//! expected output (venue quote or oracle price, decimals-converted) and
+//! apply its slippage bound to *that* — on every hop of a multi-hop route.
 
 pub mod oneclick;
 pub mod provider;
-pub mod r#ref;
 pub mod retry;
 
 // Re-export for convenience
 pub use oneclick::OneClickSwap;
 pub use provider::SwapProviderImpl;
-pub use r#ref::RefSwap;
 pub use retry::{SwapError, SwapErrorKind, SwapRetryConfig};
 
 use near_sdk::AccountId;
@@ -53,8 +39,8 @@ use crate::rpc::AppResult;
 ///
 /// This trait defines the interface that all swap providers must implement,
 /// enabling polymorphic usage of different DEX protocols. It is the extension
-/// seam for adding a venue beyond the two shipped implementations
-/// ([`OneClickSwap`], [`RefSwap`]).
+/// seam for adding a venue beyond the shipped implementation
+/// ([`OneClickSwap`]).
 ///
 /// # Type Safety
 ///
@@ -83,10 +69,9 @@ pub trait SwapProvider: Send + Sync {
     /// A conforming implementation must fold in slippage and fees so the
     /// returned amount is directly usable as the `amount` to pass to
     /// [`swap`](Self::swap) — the caller should not need to add its own margin
-    /// on top. Neither shipped provider currently implements a working quote:
-    /// [`OneClickSwap::quote`] and [`RefSwap::quote`] both return `Err`
-    /// unconditionally (1-Click's API only prices exact-input swaps; Ref's
-    /// implementation was left as "call `swap()` directly" instead). Nothing in
+    /// on top. The shipped provider does not implement a working quote:
+    /// [`OneClickSwap::quote`] returns `Err` unconditionally (1-Click's API
+    /// only prices exact-input swaps). Nothing in
     /// the liquidation pipeline calls `quote()` today — position sizing goes
     /// through [`crate::liquidation_strategy`], which sizes off oracle prices,
     /// not a swap quote. A new provider that wants this method exercised needs
@@ -116,11 +101,9 @@ pub trait SwapProvider: Send + Sync {
     /// a NEAR transaction merely reaching the chain — on NEAR a top-level
     /// transaction can report success while an inner receipt (the actual swap
     /// logic, or a callback it depends on) fails and the tokens are refunded.
-    /// Both shipped providers guard against this at the cost of `swap()`
+    /// The shipped provider guards against this at the cost of `swap()`
     /// blocking for the full settlement window rather than returning as soon as
     /// a transaction hash exists:
-    /// - [`RefSwap::swap`] inspects the transaction's receipts after the
-    ///   `ft_transfer_call` lands and errors if any of them failed.
     /// - [`OneClickSwap::swap`] deposits, then polls the 1-Click status
     ///   endpoint until a terminal state; only [`oneclick::SwapStatus::Success`]
     ///   maps to `Ok(())`. `Failed`, `Refunded`, and `IncompleteDeposit` (1-Click
@@ -161,8 +144,7 @@ pub trait SwapProvider: Send + Sync {
     /// liquidity or pricing check.
     ///
     /// Must return `false` for any pair the provider structurally cannot
-    /// service: [`RefSwap`] requires both legs to be NEP-141 tokens;
-    /// [`OneClickSwap`] requires at least one leg to be NEP-245
+    /// service: [`OneClickSwap`] requires at least one leg to be NEP-245
     /// (`intents.near`-wrapped) and, once its supported-token cache is
     /// populated, both asset ids to appear in it.
     ///

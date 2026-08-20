@@ -30,10 +30,8 @@ flowchart TD
     Executor --> Rpc["rpc.rs<br/>RpcError / AppError taxonomy"]
     Executor -->|swap-to-borrow| SwapMod["swap/mod.rs<br/>SwapProvider trait"]
     SwapMod --> SwapImpl["swap/provider.rs<br/>SwapProviderImpl enum"]
-    SwapImpl --> Ref["swap/ref.rs<br/>Ref Finance"]
     SwapImpl --> OneClick["swap/oneclick.rs<br/>1-Click API"]
-    Ref --> Retry["swap/retry.rs<br/>classify + retry"]
-    OneClick --> Retry
+    OneClick --> Retry["swap/retry.rs<br/>classify + retry"]
 
     Executor --> Notifier["notifier.rs<br/>Telegram"]
     Liquidator --> Notifier
@@ -43,7 +41,7 @@ flowchart TD
     Executor -.formats logs via.-> Format
 ```
 
-External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market, token contracts) go through the in-process `templar-gateway-client` dependency that every module above ultimately calls into; Pyth Hermes is a plain HTTPS call made from `oracle.rs`, and the RedStone public price API (`api.redstone.finance`) a plain HTTPS call made from `redstone.rs`; Ref Finance and 1-Click are NEAR contract calls and an HTTPS API respectively, both from `swap/`.
+External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market, token contracts) go through the in-process `templar-gateway-client` dependency that every module above ultimately calls into; Pyth Hermes is a plain HTTPS call made from `oracle.rs`, and the RedStone public price API (`api.redstone.finance`) a plain HTTPS call made from `redstone.rs`; 1-Click is an HTTPS API plus NEAR token transfers, from `swap/`.
 
 ## Module responsibilities
 
@@ -71,11 +69,9 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`swap/mod.rs`** — the `SwapProvider` trait: the swap-provider extension seam. Not object-safe (its methods are generic over asset class), so dynamic dispatch goes through `swap/provider.rs`'s `SwapProviderImpl` enum instead.
 
-**`swap/ref.rs`** — Ref Finance AMM provider for NEP-141 tokens, with automatic wNEAR routing for pairs without a direct pool.
-
 **`swap/oneclick.rs`** — 1-Click API provider for NEAR Intents (NEP-245) cross-chain swaps: quote → deposit → poll to a terminal status.
 
-**`swap/retry.rs`** — shared error classification (retryable network/server/rate-limit errors vs. permanent validation errors) and the generic retry wrapper both providers run swaps through.
+**`swap/retry.rs`** — shared error classification (retryable network/server/rate-limit errors vs. permanent validation errors) and the generic retry wrapper swaps run through.
 
 **`notifier.rs`** — Telegram notifications; the notification extension seam (no trait boundary yet — a fork wanting another channel extends or replaces this type directly). Also owns consecutive-scan-failure threshold tracking and per-(market, borrower, error-class) failure-notification dedup/cooldown.
 
@@ -91,6 +87,6 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 A fork that needs behavior beyond what configuration exposes has three extension seams, in-tree — see the doc comments on each for the exact contract a conforming implementation must uphold. Two are traits; the third is a concrete type meant to be extended or replaced directly, not implemented against:
 
-- [`swap::SwapProvider`](../src/swap/mod.rs) — a trait: a DEX/aggregator integration, for routing through a venue other than Ref Finance or 1-Click.
+- [`swap::SwapProvider`](../src/swap/mod.rs) — a trait: a DEX/aggregator integration, for routing through a venue other than 1-Click. Implement it for a new type and add a variant to `SwapProviderImpl` (the enum is the dynamic-dispatch point; see `swap/mod.rs` on the slippage bar any AMM provider must clear).
 - [`liquidation_strategy::LiquidationStrategy`](../src/liquidation_strategy.rs) — a trait: the sizing policy, for logic beyond percentage-of-inventory or fixed-USD-amount (e.g. per-market caps, sizing off inventory pressure).
 - [`notifier::Notifier`](../src/notifier.rs) — a concrete struct, Telegram-only, with no trait in front of it; extending or replacing the type directly is today's path to another channel.

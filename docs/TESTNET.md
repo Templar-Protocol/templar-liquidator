@@ -68,12 +68,6 @@ curl -s https://rpc.testnet.fastnear.com -H 'Content-Type: application/json' \
 
 If it doesn't exist when you try this, get the current testnet registry account id from the project (issues/community channels), or stand up your own test market by following the [contracts repo](https://github.com/Templar-Protocol/contracts)'s own deployment tooling, and set `REGISTRY_ACCOUNT_IDS` to that instead.
 
-Also relevant for testnet:
-
-```bash
-REF_CONTRACT=v2.ref-dev.testnet   # only if you plan to test COLLATERAL_STRATEGY=swap-to-borrow
-```
-
 ## 4. Find or create a borrow position **[procedure]**
 
 Once `REGISTRY_ACCOUNT_IDS` points at a real testnet registry, enumerate its markets and check for existing borrow positions the same way the README's mainnet worked example does, substituting the testnet RPC endpoint:

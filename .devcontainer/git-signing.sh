@@ -57,9 +57,16 @@ if [ -n "${signing_key}" ] && [ ! -f "${signing_key}" ]; then
 		exit 0
 	fi
 
+	# `ssh-add -L` exits non-zero when the agent holds no identities (2 when
+	# the socket is unusable), so it must be captured separately with `|| true`
+	# rather than piped directly: under `set -euo pipefail` a pipeline whose
+	# first stage fails takes the whole script down, and this one promises
+	# never to be fatal.
+	agent_keys="$(ssh-add -L 2>/dev/null || true)"
+
 	# Match on the key COMMENT equal to user.email. Comments can contain
 	# spaces, so rebuild the tail of the line rather than taking $3.
-	match="$(ssh-add -L 2>/dev/null |
+	match="$(printf '%s\n' "${agent_keys}" |
 		awk -v e="${email}" '{ c = ""; for (i = 3; i <= NF; i++) c = c (i > 3 ? " " : "") $i; if (c == e) { print $1 " " $2 " " c; exit } }')"
 
 	if [ -z "${match}" ]; then

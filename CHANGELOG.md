@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-08-18
+## [0.2.0] - 2026-08-20
 
 ### Added
 
@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - *(liquidator)* [**breaking**] `DRY_RUN` now defaults to `true`. Every previous deployment ran live by default; anyone relying on that must now set `DRY_RUN=false` explicitly. The env var also tightened to accept only the literal strings `true`/`false` — any other value aborts startup instead of silently falling back to either mode.
+
+### Security
+
+- Cleared both advisories that `deny.toml` previously had to ignore, by moving off `reqwest` 0.11:
+  - **RUSTSEC-2026-0258** — `h2` 0.3.27, unbounded empty DATA frames. Reached only through `reqwest` 0.11.27 → `hyper` 0.14.
+  - **RUSTSEC-2025-0134** — `rustls-pemfile` 1.0.4, unmaintained. This one compiled into the release binary.
+
+  Both crates are now absent from `Cargo.lock` entirely, so the ignore entries were removed rather than left to rot as `advisory-not-detected` warnings.
+
+### Dependencies
+
+- `reqwest` 0.11.27 → **0.13.4**, switched to `default-features = false` with an explicit feature set (`json`, `query`, `native-tls`, `charset`, `http2`, `system-proxy`). Note `query` is now a feature gate rather than always-on, and `RequestBuilder::query` — used for the Pyth Hermes call in `oracle.rs` — is unavailable without it.
+- `near-crypto` 0.34.7 → **0.37.3**
+- `near-jsonrpc-client` 0.20.0 → **0.22.0**
+
+  Net effect on the dependency graph: 894 → 884 packages.
 
 ## [0.1.4](https://github.com/Templar-Protocol/contracts/compare/templar-liquidator-v0.1.3...templar-liquidator-v0.1.4) - 2026-08-07
 

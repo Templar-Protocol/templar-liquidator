@@ -20,15 +20,31 @@ bad() { printf '::error::%s\n' "$*"; fail=1; }
 echo "Release preflight for ${tag}"
 
 # 1. The tag itself must be v + semver. The release workflow triggers on "v*",
-#    which would happily accept `vfoo` and hand a nonsense tag to the registry.
-if ! printf '%s' "${version}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
-	bad "tag '${tag}' is not v<semver> (expected vX.Y.Z, optionally -prerelease)"
+#    which would happily accept `vfoo` and hand a nonsense reference to the
+#    registry.
+#
+#    Checked on the TAG, not on the stripped version: `${tag#v}` leaves a tag
+#    like `0.2.0` untouched, so validating the stripped form would accept a tag
+#    the workflow never fires on — passing locally and then never releasing.
+#
+#    SemVer build metadata (`+build.1`) is rejected rather than accepted. It is
+#    valid SemVer but `+` is not a legal character in an OCI tag, so the image
+#    reference derived from it cannot be pushed as-is.
+if ! printf '%s' "${tag}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+	if printf '%s' "${tag}" | grep -qE '\+'; then
+		bad "tag '${tag}' carries SemVer build metadata; '+' is not a valid character in an OCI image tag"
+	else
+		bad "tag '${tag}' is not v<semver> (expected vX.Y.Z, optionally -prerelease)"
+	fi
 fi
 
 # 2. Cargo.toml must agree. Otherwise the image is LABELLED with the tag while
 #    the binary inside reports the old version — the mismatch survives into
 #    every deployment and is invisible until someone checks.
-cargo_version=$(grep -m1 -oE '^version = "[^"]+"' Cargo.toml | grep -oE '[0-9][^"]*' || true)
+# Read from the [package] stanza specifically. A bare first-match grep would
+# take whichever `version = ` line came first, which is the crate's today only
+# because [package] happens to be the first table in the file.
+cargo_version=$(awk '/^\[package\]/ { in_pkg = 1; next } /^\[/ { in_pkg = 0 } in_pkg && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' Cargo.toml || true)
 if [ -z "${cargo_version}" ]; then
 	bad "could not read version from Cargo.toml"
 elif [ "${cargo_version}" != "${version}" ]; then
@@ -52,7 +68,9 @@ fi
 # 4. CHANGELOG must carry a section for this version. The release notes are
 #    generated from commit history, so a missing entry is not otherwise
 #    noticed — the release just quietly ships without the curated summary.
-if grep -qE "^## \[${version}\]" CHANGELOG.md; then
+# Fixed-string match on the whole header prefix. With `grep -E` the dots in a
+# version are wildcards, so `## [0x2y0]` satisfied a search for 0.2.0.
+if grep -qF "## [${version}]" CHANGELOG.md; then
 	note "CHANGELOG.md has a section for ${version}"
 else
 	bad "CHANGELOG.md has no '## [${version}]' section — add one before tagging"

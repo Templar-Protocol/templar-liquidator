@@ -55,18 +55,27 @@ Releases are tags (`vX.Y.Z`). Pushing one triggers [`.github/workflows/release.y
 To cut one:
 
 ```bash
-# 1. Bump the version and regenerate the lock
+# 1. Bump the version and refresh the lock
 #    (edit Cargo.toml's `version`, then:)
 cargo update -p templar-liquidator
 
 # 2. Move CHANGELOG.md's [Unreleased] content into a `## [X.Y.Z] - YYYY-MM-DD` section
 
-# 3. Check it all agrees BEFORE tagging — this is what CI will run
+# 3. Check the working tree agrees before going further
 ./scripts/check-release.sh vX.Y.Z
 
-# 4. Tag and push
+# 4. COMMIT the bump and land it on main through a PR — the tag must point at a
+#    merged commit, not at an uncommitted working tree
+git switch -c release/vX.Y.Z && git commit -am "chore(release): vX.Y.Z"
+#    ...open the PR, get it green, merge it...
+
+# 5. Tag the MERGED commit and push
+git switch main && git pull --ff-only
+./scripts/check-release.sh vX.Y.Z   # re-check: this is now the tree CI will see
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
+
+Step 4 is not optional bookkeeping. `check-release.sh` reads the **working tree**, while the `preflight` job reads the **tagged commit** — so bumping the files without committing them lets step 3 pass locally and `preflight` fail afterwards, once `vX.Y.Z` is already on origin and has to be deleted remotely before you can retry. Tagging a merged commit also keeps the release reachable from `main`; `git push origin vX.Y.Z` pushes the tag *plus its objects*, so an unmerged commit would publish fine and then be unreachable from any branch.
 
 The `preflight` job runs `check-release.sh` again and blocks the release if the tag, `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` disagree — each of those mismatches otherwise fails silently, producing an image labelled with a version its binary does not report.
 

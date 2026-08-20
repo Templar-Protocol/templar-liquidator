@@ -37,8 +37,14 @@
   // `dependsOn: github-cli:1` resolves to, so the feature is installed once
   // rather than twice per build.
   //
-  // node exists only to run the Claude Code CLI (installed in
-  // post-create.sh) — nothing in the crate's own build or test path needs it.
+  // node is REQUIRED to build this crate, not just to run the Claude Code CLI
+  // installed in post-create.sh. templar-gateway-oracle-updates-dispatch (a
+  // direct dependency) pulls in templar-redstone-bridge, whose build.rs
+  // unconditionally shells out to npm install/build/bundle — the same reason
+  // the production Dockerfile's builder stage installs nodejs and npm. Without
+  // it `cargo test --lib --bins`, the first command in CLAUDE.md's orientation
+  // list, fails in the container.
+  //
   // Pinned to 22 to match templar-backend's devcontainer; Node 20 went
   // end-of-life in April 2026.
   "features": {

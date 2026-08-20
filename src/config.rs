@@ -148,9 +148,18 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub once: bool,
 
-    /// Concurrency for liquidations
+    /// Concurrency for registry deployment listing
     #[arg(short, long, env = "CONCURRENCY", default_value_t = 10)]
     pub concurrency: usize,
+
+    /// Maximum positions evaluated/liquidated concurrently within one market's
+    /// round. Defaults to 1: fully sequential with a 1-second pause between
+    /// positions, which is what free public RPC endpoints tolerate. Raising it
+    /// drops the pause and fans position evaluation out — the scale lever for
+    /// operators with a dedicated RPC endpoint; expect each in-flight position
+    /// to cost several RPC reads (and in live mode, possibly an oracle push).
+    #[arg(long, env = "POSITION_CONCURRENCY", default_value_t = 1)]
+    pub position_concurrency: usize,
 
     /// Percentage of available borrow-asset inventory to deploy per liquidation (1-100)
     /// If not set and --fixed-liquidation-amount-usd is also not set, defaults to 100%
@@ -336,6 +345,7 @@ impl std::fmt::Debug for Args {
             .field("run_mode", &self.run_mode)
             .field("once", &self.once)
             .field("concurrency", &self.concurrency)
+            .field("position_concurrency", &self.position_concurrency)
             .field("partial_percentage", &self.partial_percentage)
             .field(
                 "fixed_liquidation_amount_usd",
@@ -579,7 +589,17 @@ impl Args {
         };
         let failure_cooldown =
             std::time::Duration::from_secs(self.failure_notification_cooldown_hours * 3600);
-        let notifier = Arc::new(Notifier::with_cooldown(telegram_config, failure_cooldown));
+        // A concurrent round can fire up to two notifications per in-flight
+        // position (liquidation + swap issue). Scale the notifier's in-flight
+        // cap with the knob — at the default cap the busiest rounds would
+        // silently drop alerts once the inter-position pause is gone.
+        let notification_capacity = crate::notifier::MAX_INFLIGHT_NOTIFICATIONS
+            .max(self.position_concurrency.max(1).saturating_mul(2));
+        let notifier = Arc::new(Notifier::with_limits(
+            telegram_config,
+            failure_cooldown,
+            notification_capacity,
+        ));
 
         // The error deliberately omits the value: a mistyped key is still
         // near-complete key material, and this message reaches stderr.
@@ -599,8 +619,9 @@ impl Args {
             registry_refresh_interval: self.registry_refresh_interval,
             run_mode: self.effective_run_mode(),
             // `0` would make `buffer_unordered` hang forever; a refresh/scan with
-            // no concurrency makes no sense, so floor it at 1.
+            // no concurrency makes no sense, so floor both knobs at 1.
             concurrency: self.concurrency.max(1),
+            position_concurrency: self.position_concurrency.max(1),
             strategy,
             collateral_strategy,
             dry_run: self.dry_run,
@@ -673,6 +694,7 @@ mod tests {
             run_mode: RunMode::Loop,
             once: false,
             concurrency: 10,
+            position_concurrency: 1,
             partial_percentage: Some(50),
             fixed_liquidation_amount_usd: None,
             min_profit_bps: 100,
@@ -1114,6 +1136,43 @@ mod tests {
             args.build_config().http_bind_addr,
             IpAddr::V4(Ipv4Addr::UNSPECIFIED)
         );
+    }
+
+    /// Position-level parallelism must default to 1 — the sequential, gently
+    /// paced behavior small operators on public RPC endpoints rely on. Scale
+    /// is an explicit opt-in, not a changed default.
+    #[test]
+    fn position_concurrency_defaults_to_sequential() {
+        assert_eq!(declared_default("position_concurrency"), ["1"]);
+        assert_eq!(create_test_args().build_config().position_concurrency, 1);
+    }
+
+    #[test]
+    fn position_concurrency_reaches_config_and_is_floored_at_one() {
+        let args = parse_with(&["--position-concurrency", "8"]);
+        assert_eq!(args.build_config().position_concurrency, 8);
+
+        // `0` would make `buffer_unordered` hang forever — floor it at 1,
+        // same as the registry-listing `concurrency` knob.
+        let mut args = create_test_args();
+        args.position_concurrency = 0;
+        assert_eq!(args.build_config().position_concurrency, 1);
+    }
+
+    /// A concurrent round can fire up to two notifications per in-flight
+    /// position (liquidation + swap issue); the notifier's in-flight cap must
+    /// scale with the knob or the busiest rounds silently drop alerts.
+    #[test]
+    fn notifier_inflight_capacity_scales_with_position_concurrency() {
+        let default_cfg = create_test_args().build_config();
+        assert_eq!(
+            default_cfg.notifier.max_inflight(),
+            crate::notifier::MAX_INFLIGHT_NOTIFICATIONS,
+        );
+
+        let mut args = create_test_args();
+        args.position_concurrency = 32;
+        assert!(args.build_config().notifier.max_inflight() >= 64);
     }
 
     #[test]

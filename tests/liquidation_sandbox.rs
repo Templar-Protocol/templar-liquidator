@@ -253,7 +253,23 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
         SwapRetryConfig::default(),
         0.0, // min swap value (unused for Hold)
         oracle_cfg.collateral_asset_decimals,
+        oracle_cfg.borrow_asset_decimals,
     );
+
+    // Live-mode contract: the caller reserves before executing (the service
+    // does this before its oracle push); the executor consumes on success.
+    let (total_before, available_before) = {
+        let inv = executor.inventory().read().await;
+        (
+            inv.get_total_balance(&borrow_asset).0,
+            inv.get_available_balance(&borrow_asset).0,
+        )
+    };
+    executor
+        .inventory()
+        .write()
+        .await
+        .reserve(&borrow_asset, liquidation_amount)?;
 
     // Execute the liquidation through the liquidator's own gateway path.
     let (outcome, swap_issue) = executor
@@ -269,6 +285,30 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
 
     assert_eq!(outcome, LiquidationOutcome::Liquidated);
     assert!(swap_issue.is_none(), "Hold strategy should not swap");
+
+    // The executor must have *consumed* the reservation: tracked total and
+    // available balances both drop by the spent amount and nothing stays
+    // reserved. (A bare release here would leave total/available unchanged —
+    // the stale-inventory bug this PR fixes.)
+    {
+        let inv = executor.inventory().read().await;
+        let spent = u128::from(liquidation_amount);
+        assert_eq!(
+            inv.get_total_balance(&borrow_asset).0,
+            total_before - spent,
+            "total balance must be debited by the liquidation amount"
+        );
+        assert_eq!(
+            inv.get_available_balance(&borrow_asset).0,
+            available_before - spent,
+            "available balance must be debited by the liquidation amount"
+        );
+        assert_eq!(
+            inv.get_reserved_balance(&borrow_asset).0,
+            0,
+            "no reservation may outlive the execution"
+        );
+    }
 
     Ok(())
 }

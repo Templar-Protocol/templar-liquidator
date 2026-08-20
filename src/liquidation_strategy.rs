@@ -186,12 +186,40 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     ///
     /// # Errors
     /// Returns an error if profitability calculations fail.
+    ///
+    /// # Default
+    ///
+    /// The provided implementation requires expected revenue to clear
+    /// `liquidation_amount + gas` by at least
+    /// [`min_profit_margin_bps`](Self::min_profit_margin_bps). Override it
+    /// only for a genuinely different go/no-go policy; overriding the margin
+    /// alone means implementing just `min_profit_margin_bps`.
     fn should_liquidate(
         &self,
         liquidation_amount: U128,
         expected_collateral_value: U128,
         gas_cost_estimate: U128,
-    ) -> LiquidatorResult<bool>;
+    ) -> LiquidatorResult<bool> {
+        let total_cost = u128::from(liquidation_amount).saturating_add(gas_cost_estimate.into());
+        // Ceiling division: the exact requirement is fractional in raw units
+        // and the gate must never accept a value strictly below it. Overflow
+        // in the bps scaling fails closed — a cost that large is never worth
+        // guessing about.
+        let Some(scaled) =
+            total_cost.checked_mul(10_000 + u128::from(self.min_profit_margin_bps()))
+        else {
+            return Ok(false);
+        };
+        let min_revenue = scaled.div_ceil(10_000);
+        Ok(u128::from(expected_collateral_value) >= min_revenue)
+    }
+
+    /// The minimum profit margin, in basis points, that
+    /// [`should_liquidate`](Self::should_liquidate)'s provided implementation
+    /// gates on. Also surfaced in the caller's "not profitable" log line, so
+    /// keep it truthful even when overriding `should_liquidate` with a policy
+    /// that uses no single margin — report the closest scalar summary.
+    fn min_profit_margin_bps(&self) -> u32;
 
     /// Returns the strategy name for logging and debugging.
     fn strategy_name(&self) -> &'static str;
@@ -406,24 +434,8 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
         Ok(Some((U128(final_amount), U128(target_collateral))))
     }
 
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn should_liquidate(
-        &self,
-        liquidation_amount: U128,
-        expected_collateral_value: U128,
-        gas_cost_estimate: U128,
-    ) -> LiquidatorResult<bool> {
-        let liquidation_u128: u128 = liquidation_amount.into();
-        let gas_cost_u128: u128 = gas_cost_estimate.into();
-        let total_cost = liquidation_u128.saturating_add(gas_cost_u128);
-
-        let profit_margin_multiplier = 10_000 + self.min_profit_margin_bps;
-        let min_revenue = (total_cost * u128::from(profit_margin_multiplier)) / 10_000;
-
-        let collateral_value_u128: u128 = expected_collateral_value.into();
-        let is_profitable = collateral_value_u128 >= min_revenue;
-
-        Ok(is_profitable)
+    fn min_profit_margin_bps(&self) -> u32 {
+        self.min_profit_margin_bps
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -593,24 +605,8 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
         Ok(Some((U128(final_amount), U128(target_collateral))))
     }
 
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn should_liquidate(
-        &self,
-        liquidation_amount: U128,
-        expected_collateral_value: U128,
-        gas_cost_estimate: U128,
-    ) -> LiquidatorResult<bool> {
-        let liquidation_u128: u128 = liquidation_amount.into();
-        let gas_cost_u128: u128 = gas_cost_estimate.into();
-
-        let total_cost = liquidation_u128.saturating_add(gas_cost_u128);
-        let profit_margin_multiplier = 10_000 + self.min_profit_margin_bps;
-        let min_revenue = (total_cost * u128::from(profit_margin_multiplier)) / 10_000;
-
-        let collateral_value_u128: u128 = expected_collateral_value.into();
-        let is_profitable = collateral_value_u128 >= min_revenue;
-
-        Ok(is_profitable)
+    fn min_profit_margin_bps(&self) -> u32 {
+        self.min_profit_margin_bps
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -668,6 +664,66 @@ mod tests {
             )
             .unwrap();
         assert!(!is_not_profitable, "Should not be profitable");
+    }
+
+    /// Both built-ins must report the margin they actually gate on, so the
+    /// caller's "not profitable" log can show the real configured threshold
+    /// instead of a hardcoded 50-bps default that lies whenever
+    /// MIN_PROFIT_BPS is set to anything else.
+    #[test]
+    fn min_profit_margin_bps_reports_the_configured_margin() {
+        let pct = PercentageLiquidationStrategy::new(50, 75);
+        assert_eq!(pct.min_profit_margin_bps(), 75);
+
+        let fixed = FixedAmountLiquidationStrategy::new(100.0, 200);
+        assert_eq!(fixed.min_profit_margin_bps(), 200);
+    }
+
+    /// The fixed-amount strategy shares the exact profitability gate with the
+    /// percentage strategy (same formula, provided by the trait) — pinned here
+    /// so the two can't silently drift apart again.
+    #[test]
+    fn fixed_amount_profitability_gate_matches_percentage_gate() {
+        let pct = PercentageLiquidationStrategy::new(50, 50);
+        let fixed = FixedAmountLiquidationStrategy::new(100.0, 50);
+        for (liq, coll, gas) in [
+            (1000u128, 1110u128, 100u128),
+            (1000, 1100, 100),
+            (1000, 1105, 100),
+        ] {
+            assert_eq!(
+                pct.should_liquidate(U128(liq), U128(coll), U128(gas))
+                    .unwrap(),
+                fixed
+                    .should_liquidate(U128(liq), U128(coll), U128(gas))
+                    .unwrap(),
+            );
+        }
+    }
+
+    /// The minimum-revenue threshold must round *up*: at total cost 1100 and
+    /// a 50-bps margin the exact requirement is 1105.5, so 1105 must fail and
+    /// 1106 must pass. Floor division accepted 1105 — a sub-margin trade.
+    #[test]
+    fn min_revenue_requirement_rounds_up() {
+        let strategy = PercentageLiquidationStrategy::new(50, 50);
+        assert!(!strategy
+            .should_liquidate(U128(1000), U128(1105), U128(100))
+            .unwrap());
+        assert!(strategy
+            .should_liquidate(U128(1000), U128(1106), U128(100))
+            .unwrap());
+    }
+
+    /// A total cost large enough to overflow the bps multiplication must fail
+    /// closed (not profitable), never wrap into an arbitrary decision or
+    /// panic in debug builds.
+    #[test]
+    fn min_revenue_overflow_fails_closed() {
+        let strategy = PercentageLiquidationStrategy::new(50, 50);
+        assert!(!strategy
+            .should_liquidate(U128(u128::MAX), U128(u128::MAX), U128(u128::MAX))
+            .unwrap());
     }
 
     #[test]

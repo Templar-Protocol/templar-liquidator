@@ -112,8 +112,12 @@ pub struct TelegramConfig {
 /// Shared notifier handle.
 pub type SharedNotifier = Arc<Notifier>;
 
-/// Maximum number of in-flight Telegram notifications.
-const MAX_INFLIGHT_NOTIFICATIONS: usize = 10;
+/// Default maximum number of in-flight Telegram notifications. A concurrent
+/// liquidation round can exceed it (each in-flight position may fire a
+/// liquidation notification plus a swap-issue one), so the service scales the
+/// actual capacity with `POSITION_CONCURRENCY` via [`Notifier::with_limits`];
+/// this constant is the floor.
+pub const MAX_INFLIGHT_NOTIFICATIONS: usize = 10;
 
 /// Default cooldown (in hours) for repeated identical failure notifications.
 /// Shared source of truth used by both the runtime default and the CLI/env default.
@@ -139,6 +143,10 @@ pub struct Notifier {
     telegram: Option<TelegramConfig>,
     client: Client,
     semaphore: Arc<Semaphore>,
+    /// The semaphore's total permit count — what [`drain`](Notifier::drain)
+    /// must reacquire in full. Kept alongside the semaphore because tokio's
+    /// `Semaphore` reports only *available* permits, not the initial total.
+    max_inflight: usize,
     /// Last-sent time for each (market, borrower, `error_kind`) — suppresses
     /// repeat alerts within `failure_cooldown`. Cleared per-borrower when a
     /// liquidation succeeds.
@@ -281,13 +289,35 @@ impl Notifier {
 
     /// Creates a notifier with a custom failure-notification cooldown.
     pub fn with_cooldown(telegram: Option<TelegramConfig>, failure_cooldown: Duration) -> Self {
+        Self::with_limits(telegram, failure_cooldown, MAX_INFLIGHT_NOTIFICATIONS)
+    }
+
+    /// Creates a notifier with a custom cooldown and in-flight capacity.
+    ///
+    /// Callers running concurrent liquidation rounds must size `max_inflight`
+    /// to the round's burst (≈ two notifications per in-flight position) —
+    /// once the semaphore is full, further notifications are dropped, not
+    /// queued. A `max_inflight` of zero is floored at 1 so the notifier can
+    /// never be constructed permanently unable to send.
+    pub fn with_limits(
+        telegram: Option<TelegramConfig>,
+        failure_cooldown: Duration,
+        max_inflight: usize,
+    ) -> Self {
+        let max_inflight = max_inflight.max(1);
         Self {
             telegram,
             client: Client::new(),
-            semaphore: Arc::new(Semaphore::new(MAX_INFLIGHT_NOTIFICATIONS)),
+            semaphore: Arc::new(Semaphore::new(max_inflight)),
+            max_inflight,
             failure_dedup: Mutex::new(HashMap::new()),
             failure_cooldown,
         }
+    }
+
+    /// The in-flight notification capacity this notifier was built with.
+    pub fn max_inflight(&self) -> usize {
+        self.max_inflight
     }
 
     /// Returns `true` if Telegram notifications are enabled.
@@ -308,7 +338,7 @@ impl Notifier {
         if self.telegram.is_none() {
             return;
         }
-        let all_permits = u32::try_from(MAX_INFLIGHT_NOTIFICATIONS).unwrap_or(u32::MAX);
+        let all_permits = u32::try_from(self.max_inflight).unwrap_or(u32::MAX);
         if tokio::time::timeout(timeout, self.semaphore.acquire_many(all_permits))
             .await
             .is_err()
@@ -538,6 +568,39 @@ impl Notifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The in-flight cap must scale with position-level concurrency: at the
+    /// default cap of 10, a concurrent round can fire more notifications than
+    /// the semaphore admits and the overflow is silently dropped.
+    #[test]
+    fn with_limits_sets_the_inflight_capacity() {
+        let notifier = Notifier::with_limits(None, Duration::from_secs(60), 32);
+        assert_eq!(notifier.max_inflight(), 32);
+        // The plain constructors keep the historical default.
+        assert_eq!(
+            Notifier::new(None).max_inflight(),
+            MAX_INFLIGHT_NOTIFICATIONS
+        );
+    }
+
+    /// `drain` must acquire the *instance's* capacity, not the compile-time
+    /// default — acquiring 10 permits from a smaller semaphore would block
+    /// until the timeout every single run.
+    #[tokio::test]
+    async fn drain_uses_the_instance_capacity() {
+        let config = TelegramConfig {
+            bot_token: "123:ABC".to_string().into(),
+            chat_id: "-100123".to_string(),
+            thread_id: None,
+        };
+        let notifier = Notifier::with_limits(Some(config), Duration::from_secs(60), 2);
+        let started = std::time::Instant::now();
+        notifier.drain(Duration::from_millis(500)).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "drain blocked past its idle capacity — it is acquiring more permits than the semaphore holds"
+        );
+    }
 
     #[test]
     fn test_notifier_disabled_by_default() {

@@ -23,6 +23,15 @@ impl ProfitabilityCalculator {
     /// ~$0.05 USD for a liquidation transaction (conservative estimate for 0.01 NEAR at ~$5)
     pub const DEFAULT_GAS_COST_USD: f64 = 0.05;
 
+    /// Treats a raw borrow-asset amount as a USD figure by scaling out the
+    /// asset's decimals. This is a *proxy*, valid only to the extent the
+    /// borrow asset is a USD stablecoin — used for the JIT-swap USD threshold
+    /// check, never for on-chain amounts.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn borrow_units_to_usd(value: u128, borrow_decimals: i32) -> f64 {
+        (value as f64) / 10f64.powi(borrow_decimals)
+    }
+
     /// Converts USD gas cost estimate to borrow asset units using oracle prices.
     ///
     /// Formula: `gas_cost_borrow_asset = gas_cost_usd / borrow_asset_usd_price * 10^borrow_decimals`
@@ -176,6 +185,24 @@ mod tests {
     use near_sdk::json_types::U128;
 
     use super::ProfitabilityCalculator;
+
+    /// The JIT-swap USD threshold treats a borrow-asset value as a USD proxy.
+    /// That proxy must scale by the market's actual borrow-asset decimals —
+    /// the pre-fix hardcoded `/ 1_000_000.0` was only correct for 6-decimal
+    /// assets and off by 10^12 for an 18-decimal one.
+    #[test]
+    fn test_borrow_units_to_usd_scales_by_decimals() {
+        // 6 decimals (USDC): 5_000_000 raw = $5
+        assert!((ProfitabilityCalculator::borrow_units_to_usd(5_000_000, 6) - 5.0).abs() < 1e-9);
+        // 18 decimals (DAI): 5 * 10^18 raw = $5
+        assert!(
+            (ProfitabilityCalculator::borrow_units_to_usd(5_000_000_000_000_000_000, 18) - 5.0)
+                .abs()
+                < 1e-9
+        );
+        // 0 decimals: raw units are whole dollars
+        assert!((ProfitabilityCalculator::borrow_units_to_usd(5, 0) - 5.0).abs() < 1e-9);
+    }
 
     #[test]
     fn test_calculate_profit_metrics_basic() {

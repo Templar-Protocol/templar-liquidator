@@ -81,8 +81,11 @@ pub struct ServiceConfig {
     pub registry_refresh_interval: u64,
     /// Execution mode: continuous loop or single cycle
     pub run_mode: crate::config::RunMode,
-    /// Concurrency for liquidations
+    /// Concurrency for registry deployment listing
     pub concurrency: usize,
+    /// Maximum positions evaluated/liquidated concurrently within one
+    /// market's round (1 = sequential with pacing; see `config::Args`)
+    pub position_concurrency: usize,
     /// Liquidation strategy
     pub strategy: Arc<dyn LiquidationStrategy>,
     /// Collateral strategy
@@ -154,6 +157,7 @@ impl std::fmt::Debug for ServiceConfig {
             .field("registry_refresh_interval", &self.registry_refresh_interval)
             .field("run_mode", &self.run_mode)
             .field("concurrency", &self.concurrency)
+            .field("position_concurrency", &self.position_concurrency)
             .field("collateral_strategy", &self.collateral_strategy)
             .field("dry_run", &self.dry_run)
             .field(
@@ -545,6 +549,22 @@ impl LiquidatorService {
         &self,
         config: &templar_common::market::MarketConfiguration,
     ) -> (bool, Option<String>) {
+        // Reject markets whose configured asset decimals can't be used safely
+        // in conversions — see `decimals_are_sane`.
+        let oracle_cfg = &config.price_oracle_configuration;
+        if !decimals_are_sane(
+            oracle_cfg.borrow_asset_decimals,
+            oracle_cfg.collateral_asset_decimals,
+        ) {
+            return (
+                false,
+                Some(format!(
+                    "asset decimals out of sane range [0, 38]: borrow={}, collateral={}",
+                    oracle_cfg.borrow_asset_decimals, oracle_cfg.collateral_asset_decimals
+                )),
+            );
+        }
+
         let collateral_asset = &config.collateral_asset;
 
         // Check ignored collateral assets list
@@ -1096,7 +1116,9 @@ impl LiquidatorService {
 
                 let result = async {
                     tracing::info!(market = %market, "Scanning market for liquidations");
-                    liquidator.run_liquidations(self.config.concurrency).await
+                    liquidator
+                        .run_liquidations(self.config.position_concurrency)
+                        .await
                 }
                 .instrument(market_span)
                 .await;
@@ -1235,10 +1257,44 @@ fn is_usdc_asset(asset: &FungibleAsset<BorrowAsset>) -> bool {
     // Stellar USDC
 }
 
+/// Reports whether a market's configured asset decimals are usable.
+///
+/// Decimals arrive from on-chain market configs and are not validated
+/// upstream (`MarketConfiguration::validate()` in the pinned templar-common
+/// doesn't check them), yet they feed `10f64.powi` in every USD/amount
+/// conversion — a negative or extreme value silently turns those into zero or
+/// infinity. 38 is the ceiling under which `10^d` still fits a `u128`; real
+/// tokens use 0–24.
+fn decimals_are_sane(borrow_decimals: i32, collateral_decimals: i32) -> bool {
+    const SANE: std::ops::RangeInclusive<i32> = 0..=38;
+    SANE.contains(&borrow_decimals) && SANE.contains(&collateral_decimals)
+}
+
 /// Check if an error is a rate limit error
 fn is_rate_limit_error(error: &LiquidatorError) -> bool {
     let error_msg = error.to_string();
     error_msg.contains("TooManyRequests")
         || error_msg.contains("429")
         || error_msg.contains("rate limit")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asset decimals arrive from on-chain market configs and are not
+    /// validated upstream (`MarketConfiguration::validate()` in the pinned
+    /// templar-common doesn't check them). Out-of-range values would flow
+    /// into `10f64.powi` and silently corrupt every conversion — reject the
+    /// market at registration instead.
+    #[test]
+    fn decimals_sanity_bounds() {
+        assert!(decimals_are_sane(6, 8));
+        assert!(decimals_are_sane(0, 0));
+        assert!(decimals_are_sane(38, 38));
+        assert!(!decimals_are_sane(-1, 8));
+        assert!(!decimals_are_sane(6, -1));
+        assert!(!decimals_are_sane(39, 8));
+        assert!(!decimals_are_sane(6, 39));
+    }
 }

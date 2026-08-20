@@ -54,6 +54,9 @@ pub struct LiquidationExecutor {
     swap_retry_config: crate::swap::SwapRetryConfig,
     min_swap_value_usd: f64,
     collateral_decimals: i32,
+    /// Borrow-asset decimals, for treating borrow-denominated values as a USD
+    /// proxy in the JIT-swap threshold check.
+    borrow_decimals: i32,
 }
 
 impl LiquidationExecutor {
@@ -69,6 +72,7 @@ impl LiquidationExecutor {
         swap_retry_config: crate::swap::SwapRetryConfig,
         min_swap_value_usd: f64,
         collateral_decimals: i32,
+        borrow_decimals: i32,
     ) -> Self {
         Self {
             client,
@@ -80,6 +84,7 @@ impl LiquidationExecutor {
             swap_retry_config,
             min_swap_value_usd,
             collateral_decimals,
+            borrow_decimals,
         }
     }
 
@@ -95,11 +100,21 @@ impl LiquidationExecutor {
 
     /// Executes a liquidation transaction.
     ///
+    /// # Reservation contract
+    ///
+    /// In live mode the caller must have **already reserved**
+    /// `liquidation_amount` of `borrow_asset` in the shared inventory before
+    /// calling. [`crate::Liquidator::liquidate`] reserves before its on-chain
+    /// oracle push so a position that loses an inventory race under
+    /// `POSITION_CONCURRENCY` fails before spending gas, not after. This
+    /// method still owns the reservation's end of life: it releases on every
+    /// failure path and consumes (debits) on success. Dry-run touches no
+    /// inventory on either side.
+    ///
     /// # Flow
-    /// 1. Reserve inventory
-    /// 2. Create and submit transaction
-    /// 3. Handle collateral based on strategy
-    /// 4. Release inventory on failure
+    /// 1. Create and submit transaction (caller holds the reservation)
+    /// 2. Handle collateral based on strategy
+    /// 3. Consume the reservation on success, release it on failure
     #[tracing::instrument(skip(self, borrow_asset, collateral_asset), level = "info")]
     #[allow(clippy::too_many_lines)]
     pub async fn execute_liquidation(
@@ -118,8 +133,11 @@ impl LiquidationExecutor {
                 && self.swap_provider.is_some()
                 && collateral_asset.to_string() != borrow_asset.to_string()
             {
-                #[allow(clippy::cast_precision_loss)]
-                let usd_estimate = u128::from(expected_collateral_value) as f64 / 1_000_000.0;
+                let usd_estimate =
+                    crate::profitability::ProfitabilityCalculator::borrow_units_to_usd(
+                        u128::from(expected_collateral_value),
+                        self.borrow_decimals,
+                    );
 
                 if usd_estimate >= self.min_swap_value_usd {
                     tracing::info!(
@@ -143,19 +161,6 @@ impl LiquidationExecutor {
             }
             return Ok((LiquidationOutcome::Liquidated, None));
         }
-
-        // Reserve inventory for this liquidation
-        self.inventory
-            .write()
-            .await
-            .reserve(borrow_asset, liquidation_amount)?;
-
-        tracing::info!(
-            borrower = %borrow_account,
-            liquidation_amount = %u128::from(liquidation_amount),
-            borrow_asset = %borrow_asset,
-            "Reserved inventory for liquidation"
-        );
 
         // Execute liquidation transaction through the gateway. The driver signs,
         // submits, and polls to finality; a reverted on-chain transaction comes
@@ -197,7 +202,8 @@ impl LiquidationExecutor {
                             match self.first_failed_receipt(&operation_result).await {
                                 Ok(failed_receipt) => failed_receipt,
                                 Err(error) => {
-                                    // Inventory was reserved above; release it before
+                                    // Inventory was reserved by the caller (see the
+                                    // reservation contract above); release it before
                                     // surfacing the inspection error, like the other
                                     // failure paths.
                                     self.inventory
@@ -237,11 +243,17 @@ impl LiquidationExecutor {
                             "Liquidation executed successfully (all receipts succeeded)"
                         );
 
-                        // Release the reservation — tokens have left our account
+                        // Tokens have left our account: debit the tracked
+                        // balance and clear the reservation together. A bare
+                        // `release` here would put the spent amount back into
+                        // "available" until the next RPC refresh, so later
+                        // positions in the same round would size against
+                        // inventory that no longer exists and submit
+                        // transactions doomed to fail on-chain.
                         self.inventory
                             .write()
                             .await
-                            .release(borrow_asset, liquidation_amount);
+                            .consume(borrow_asset, liquidation_amount);
 
                         // Handle collateral based on strategy
                         let (swap_succeeded, swap_issue) = match &self.collateral_strategy {
@@ -249,10 +261,13 @@ impl LiquidationExecutor {
                             CollateralStrategy::SwapToBorrow => {
                                 // Estimate USD value for threshold check.
                                 // The expected_collateral_value is denominated in borrow asset
-                                // (often USDC), so it serves as a rough USD proxy.
-                                #[allow(clippy::cast_precision_loss)]
+                                // (often a USD stablecoin), so it serves as a rough USD proxy
+                                // once the asset's decimals are scaled out.
                                 let usd_estimate = Some(
-                                    u128::from(expected_collateral_value) as f64 / 1_000_000.0,
+                                    crate::profitability::ProfitabilityCalculator::borrow_units_to_usd(
+                                        u128::from(expected_collateral_value),
+                                        self.borrow_decimals,
+                                    ),
                                 );
                                 // Immediately swap collateral back to borrow asset
                                 self.swap_collateral_to_borrow(

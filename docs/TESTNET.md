@@ -91,12 +91,6 @@ or directly:
 docker run --env-file .env ghcr.io/templar-protocol/templar-liquidator:latest
 ```
 
-> This pull currently fails for anyone outside the organization — the GHCR
-> package is private and cannot yet be made public
-> ([#24](https://github.com/Templar-Protocol/templar-liquidator/issues/24)).
-> Use `docker compose up` instead, which builds from source and needs no
-> registry access. See the note in the [README quickstart](../README.md#quickstart).
-
 With `DRY_RUN=true` (the default — leave it), the bot scans, logs what it finds, and logs what it *would* do for any liquidatable position it finds — repay amount, collateral it would request, and the profitability verdict — without submitting anything. This is also where you'll discover configuration mistakes (wrong registry, no inventory, RPC issues) cheaply.
 
 ## 6. Go live **[procedure]**

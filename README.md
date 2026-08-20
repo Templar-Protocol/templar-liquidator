@@ -190,7 +190,7 @@ Both endpoints are inert in `RUN_MODE=once` — a single-cycle run exits before 
 ## Deployment
 
 - **Any VM (Docker Compose)**: [docs/deploy-vm.md](docs/deploy-vm.md).
-- **Cron-style schedulers** (Cloud Run Jobs, Kubernetes CronJobs, plain cron): run the container with `RUN_MODE=once` on an interval and alert on non-zero exits — see [Run modes](#run-modes) and [docs/configuration.md](docs/configuration.md). A ready-made GCP Terraform module used to live in this repo and was moved out to keep the reference implementation platform-generic; forks that want it can recover the module and its walkthrough from git history at [`v0.2.0`](https://github.com/Templar-Protocol/templar-liquidator/tree/v0.2.0/terraform).
+- **Cron-style schedulers** (Cloud Run Jobs, Kubernetes CronJobs, plain cron): run the container with `RUN_MODE=once` on an interval and alert on non-zero exits — see [Run modes](#run-modes) and [docs/configuration.md](docs/configuration.md). A ready-made GCP Terraform module and its walkthrough are preserved in git history at [`v0.2.0`](https://github.com/Templar-Protocol/templar-liquidator/tree/v0.2.0/terraform) for forks that want them.
 
 ## FAQ
 

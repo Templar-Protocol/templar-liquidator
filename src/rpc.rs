@@ -1,9 +1,8 @@
 //! Error taxonomy for the liquidator.
 //!
-//! The blockchain plumbing that used to live here (view/send_tx/nonce tracking)
-//! has been replaced by the in-process gateway client
-//! ([`templar_gateway_client`]). What remains is the error taxonomy that the rest
-//! of the crate — and its notification-classification tests — depend on:
+//! The low-level blockchain plumbing lives in the in-process gateway client
+//! ([`templar_gateway_client`]); this module holds the error taxonomy the
+//! rest of the crate — and its notification-classification tests — depend on:
 //!
 //! - [`RpcError`] — low-level error kinds, including the timeout/wrong-response
 //!   variants the notifier classifies on.

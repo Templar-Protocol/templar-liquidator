@@ -1219,12 +1219,10 @@ fn is_usdc_asset(asset: &FungibleAsset<BorrowAsset>) -> bool {
 
 /// Reports whether a market's configured asset decimals are usable.
 ///
-/// Decimals arrive from on-chain market configs and are not validated
-/// upstream (`MarketConfiguration::validate()` in the pinned templar-common
-/// doesn't check them), yet they feed `10f64.powi` in every USD/amount
-/// conversion — a negative or extreme value silently turns those into zero or
-/// infinity. 38 is the ceiling under which `10^d` still fits a `u128`; real
-/// tokens use 0–24.
+/// Decimals arrive from on-chain configs unvalidated and feed `10f64::powi`
+/// in every conversion — out-of-range values silently become zero or
+/// infinity. 38 is the ceiling under which `10^d` fits a `u128`; real tokens
+/// use 0–24.
 fn decimals_are_sane(borrow_decimals: i32, collateral_decimals: i32) -> bool {
     const SANE: std::ops::RangeInclusive<i32> = 0..=38;
     SANE.contains(&borrow_decimals) && SANE.contains(&collateral_decimals)
@@ -1242,11 +1240,8 @@ fn is_rate_limit_error(error: &LiquidatorError) -> bool {
 mod tests {
     use super::*;
 
-    /// Asset decimals arrive from on-chain market configs and are not
-    /// validated upstream (`MarketConfiguration::validate()` in the pinned
-    /// templar-common doesn't check them). Out-of-range values would flow
-    /// into `10f64.powi` and silently corrupt every conversion — reject the
-    /// market at registration instead.
+    /// Out-of-range decimals would silently corrupt every conversion —
+    /// reject the market at registration instead.
     #[test]
     fn decimals_sanity_bounds() {
         assert!(decimals_are_sane(6, 8));

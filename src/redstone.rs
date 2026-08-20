@@ -7,9 +7,8 @@
 //! [`crate::oracle::OracleFetcher::update_onchain_prices`], so nothing here
 //! can bypass on-chain freshness or circuit-breaker state where funds move.
 //!
-//! The multi-symbol form (`/prices?symbols=A,B&provider=redstone`) is the only
-//! one used: the single-symbol form serves a frozen quote upstream (verified
-//! against the live API, 2026-08-15) and must not be reintroduced.
+//! Only the multi-symbol form (`/prices?symbols=A,B&provider=redstone`) is
+//! used: the single-symbol form serves a frozen quote upstream — never use it.
 
 use std::collections::HashMap;
 

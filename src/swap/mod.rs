@@ -6,20 +6,10 @@
 //! multi-provider so a fork can add its own venue: implement [`SwapProvider`]
 //! for a new type and add a variant to [`SwapProviderImpl`].
 //!
-//! # Architecture
-//!
-//! The module follows the Strategy pattern to allow runtime selection of swap
-//! providers while maintaining a consistent interface. This enables:
-//! - Easy addition of new swap providers without modifying existing code
-//! - Testability through mock implementations
-//! - Type-safe asset handling across different token standards (NEP-141, NEP-245)
-//!
-//! A Ref Finance provider used to live here and was removed rather than
-//! wired in: its `min_amount_out` was derived from the *input* amount with no
-//! price or decimals conversion, i.e. no effective slippage protection for
-//! any non-1:1 pair. A fork resurrecting an AMM provider must compute the
-//! expected output (venue quote or oracle price, decimals-converted) and
-//! apply its slippage bound to *that* — on every hop of a multi-hop route.
+//! An AMM provider must compute its expected output (venue quote or oracle
+//! price, decimals-converted) and apply its slippage bound to *that*, on
+//! every hop — a bound derived from the input amount protects nothing on a
+//! non-1:1 pair.
 
 pub mod oneclick;
 pub mod provider;

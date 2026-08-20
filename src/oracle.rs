@@ -88,15 +88,10 @@ pub(crate) enum OffchainPriceSource {
 
 /// Reports whether a quote's publish time is usable under the market's
 /// freshness bound: no older than `max_age_secs`, and no further ahead of
-/// `now_secs` than ordinary clock skew explains (the same allowance
-/// [`crate::redstone::MAX_FUTURE_SKEW_MS`] gives RedStone entries — a
-/// future-dated quote has negative age and would pass every staleness bound
-/// there is).
-///
-/// Composed proxy prices must pass this bot-side because the on-chain read
-/// they replace (`ListEmaPricesNoOlderThan { age }`) enforced it on-chain —
-/// a composed feed that skipped the check would price positions off stale
-/// data the fail-closed design promises to reject.
+/// `now_secs` than clock skew explains ([`crate::redstone::MAX_FUTURE_SKEW_MS`];
+/// a future-dated quote has negative age and passes every staleness bound).
+/// Composed proxy prices must pass this bot-side — the on-chain read they
+/// replace enforces the same bound on-chain.
 fn publish_time_is_fresh(publish_time_secs: i64, now_secs: i64, max_age_secs: u32) -> bool {
     let age_secs = now_secs - publish_time_secs;
     age_secs <= i64::from(max_age_secs) && age_secs >= -(crate::redstone::MAX_FUTURE_SKEW_MS / 1000)
@@ -649,10 +644,9 @@ impl OracleFetcher {
             if missing.is_empty() {
                 return Ok(response);
             }
-            // Propagated on error, exactly like the pre-composition behavior:
-            // a partial response would make every position's status check
-            // panic with "Missing price", which is noisier than skipping the
-            // market once.
+            // Propagate the error: a partial response would make every
+            // position's status check panic with "Missing price", noisier
+            // than skipping the market once.
             let cached = self.get_proxy_oracle_prices(oracle, &missing, age).await?;
             response.extend(cached);
             return Ok(response);
@@ -918,11 +912,9 @@ impl OracleFetcher {
                 } => (request, Some((call, action))),
             };
             let underlying = match &request {
-                // Hermes copies the publisher's timestamp through verbatim, so
-                // the market's freshness bound is enforced here — a stale entry
-                // is treated as unpriced and falls through to the on-chain
-                // cache read, which enforces the same bound on-chain. (The
-                // RedStone leg applies the equivalent guards in its client.)
+                // Freshness enforced here (the RedStone leg's client applies
+                // the same guards): a stale entry is unpriced and falls
+                // through to the on-chain cache read.
                 OffchainRequest::Pyth(id) => {
                     pyth_prices.get(id).cloned().flatten().filter(|price| {
                         let fresh = publish_time_is_fresh(

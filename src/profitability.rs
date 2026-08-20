@@ -186,10 +186,8 @@ mod tests {
 
     use super::ProfitabilityCalculator;
 
-    /// The JIT-swap USD threshold treats a borrow-asset value as a USD proxy.
-    /// That proxy must scale by the market's actual borrow-asset decimals —
-    /// the pre-fix hardcoded `/ 1_000_000.0` was only correct for 6-decimal
-    /// assets and off by 10^12 for an 18-decimal one.
+    /// The JIT-swap USD proxy must scale by the market's actual borrow-asset
+    /// decimals — a hardcoded 10^6 is off by 10^12 for an 18-decimal asset.
     #[test]
     fn test_borrow_units_to_usd_scales_by_decimals() {
         // 6 decimals (USDC): 5_000_000 raw = $5

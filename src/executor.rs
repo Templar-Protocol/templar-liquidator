@@ -103,13 +103,12 @@ impl LiquidationExecutor {
     /// # Reservation contract
     ///
     /// In live mode the caller must have **already reserved**
-    /// `liquidation_amount` of `borrow_asset` in the shared inventory before
-    /// calling. [`crate::Liquidator::liquidate`] reserves before its on-chain
-    /// oracle push so a position that loses an inventory race under
-    /// `POSITION_CONCURRENCY` fails before spending gas, not after. This
-    /// method still owns the reservation's end of life: it releases on every
-    /// failure path and consumes (debits) on success. Dry-run touches no
-    /// inventory on either side.
+    /// `liquidation_amount` of `borrow_asset` before calling
+    /// ([`crate::Liquidator::liquidate`] reserves ahead of its paid oracle
+    /// push, so an inventory-race loser fails before spending gas). This
+    /// method owns the reservation's end of life: released on every failure
+    /// path, consumed (debited) on success. Dry-run touches no inventory on
+    /// either side.
     ///
     /// # Flow
     /// 1. Create and submit transaction (caller holds the reservation)
@@ -243,13 +242,10 @@ impl LiquidationExecutor {
                             "Liquidation executed successfully (all receipts succeeded)"
                         );
 
-                        // Tokens have left our account: debit the tracked
-                        // balance and clear the reservation together. A bare
-                        // `release` here would put the spent amount back into
-                        // "available" until the next RPC refresh, so later
-                        // positions in the same round would size against
-                        // inventory that no longer exists and submit
-                        // transactions doomed to fail on-chain.
+                        // Tokens have left our account: consume (debit +
+                        // un-reserve), never release — a bare release would
+                        // count the spent amount as available until the next
+                        // RPC refresh.
                         self.inventory
                             .write()
                             .await

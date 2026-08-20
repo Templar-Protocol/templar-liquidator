@@ -680,8 +680,8 @@ mod tests {
     }
 
     /// The fixed-amount strategy shares the exact profitability gate with the
-    /// percentage strategy (same formula, provided by the trait) — pinned here
-    /// so the two can't silently drift apart again.
+    /// percentage strategy (provided by the trait) — pinned so the two can't
+    /// silently drift apart.
     #[test]
     fn fixed_amount_profitability_gate_matches_percentage_gate() {
         let pct = PercentageLiquidationStrategy::new(50, 50);
@@ -703,7 +703,7 @@ mod tests {
 
     /// The minimum-revenue threshold must round *up*: at total cost 1100 and
     /// a 50-bps margin the exact requirement is 1105.5, so 1105 must fail and
-    /// 1106 must pass. Floor division accepted 1105 — a sub-margin trade.
+    /// 1106 must pass.
     #[test]
     fn min_revenue_requirement_rounds_up() {
         let strategy = PercentageLiquidationStrategy::new(50, 50);

@@ -1,6 +1,0 @@
-# Copy to terraform.tfvars and fill in real values. terraform.tfvars is
-# gitignored by convention — don't commit it.
-
-project_id = "my-gcp-project"
-region     = "us-central1"
-image_tag  = "0.2.0"

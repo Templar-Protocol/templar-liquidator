@@ -174,7 +174,7 @@ Full reference (every env var / CLI flag, defaults, precedence rules): [docs/con
 ## Run modes
 
 - **`loop`** (default) — runs indefinitely: registry refresh and liquidation rounds each tick on their own interval (`REGISTRY_REFRESH_INTERVAL`, `LIQUIDATION_SCAN_INTERVAL`). This is what `docker compose up` runs.
-- **`--run-mode once`** (equivalently `--once`, or `RUN_MODE=once`) — performs exactly one registry refresh and one liquidation round, then exits. Exits **non-zero** on failure, including a registry that yields zero supported markets. This is what the Terraform Cloud Run Job runs on a cron schedule (see [Deployment](#deployment)).
+- **`--run-mode once`** (equivalently `--once`, or `RUN_MODE=once`) — performs exactly one registry refresh and one liquidation round, then exits. Exits **non-zero** on failure, including a registry that yields zero supported markets. Built for cron-style schedulers — Cloud Run Jobs, Kubernetes CronJobs, plain cron — anything that can run a container on an interval and alert on a non-zero exit.
 
 ### Metrics and health
 
@@ -189,8 +189,8 @@ Both endpoints are inert in `RUN_MODE=once` — a single-cycle run exits before 
 
 ## Deployment
 
-- **GCP (Cloud Run Job + Scheduler)**: [docs/deploy-gcp.md](docs/deploy-gcp.md), backed by the generic Terraform module in [`terraform/`](terraform/README.md).
 - **Any VM (Docker Compose)**: [docs/deploy-vm.md](docs/deploy-vm.md).
+- **Cron-style schedulers** (Cloud Run Jobs, Kubernetes CronJobs, plain cron): run the container with `RUN_MODE=once` on an interval and alert on non-zero exits — see [Run modes](#run-modes) and [docs/configuration.md](docs/configuration.md). A ready-made GCP Terraform module used to live in this repo and was moved out to keep the reference implementation platform-generic (Templar runs it from a private infra repo); forks that want it can recover the module and its walkthrough from git history at [`v0.2.0`](https://github.com/Templar-Protocol/templar-liquidator/tree/v0.2.0/terraform).
 
 ## FAQ
 

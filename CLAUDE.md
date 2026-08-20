@@ -183,7 +183,7 @@ Bump every `rev =` together in one change, never one alone.
 
 1. Branch → PR against `main`.
 2. CI must be green: fmt, clippy, unit tests, docs, `cargo-deny`, Docker
-   build, `terraform validate`.
+   build.
 3. Releases are tags `vX.Y.Z`, which publish a GHCR image and a GitHub
    Release.
 
@@ -191,7 +191,5 @@ Bump every `rev =` together in one change, never one alone.
 
 - `src/` — the crate (binary `liquidator`, lib root `src/liquidator.rs`).
 - `tests/` — integration tests, including the sandbox test (see Gotchas).
-- `terraform/` — generic, variable-driven GCP module (Cloud Run Job +
-  Scheduler); no Templar-specific values baked in.
 - `docs/` — architecture, configuration, deployment, and testing reference.
 - `.github/workflows/` — CI and release automation.

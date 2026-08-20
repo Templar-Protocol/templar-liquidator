@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The GCP deployment (the `terraform/` Cloud Run Job + Scheduler module and `docs/deploy-gcp.md`), moved to a private Templar infra repo to keep this reference implementation platform-generic. `RUN_MODE=once` and its cron-style-scheduler guidance stay — they are platform-neutral. Forks that want the module can recover it and its walkthrough from git history at `v0.2.0` (`terraform/`, `docs/deploy-gcp.md`); the CI `terraform` job and the Terraform Dependabot ecosystem went with it.
 - [**breaking**] The Ref Finance swap provider (`swap/ref.rs`, `RefSwap`) and its `REF_CONTRACT` / `--ref-contract` knob. Two reasons: it was dead wiring (the service constructed it and immediately discarded it — only 1-Click was ever used for JIT and batch swaps), and it was unsafe to wire in as-is: its `min_amount_out` was derived from the *input* amount with no price or decimals conversion, giving no effective slippage protection for any non-1:1 pair (a BTC→USDC swap would have accepted nearly any execution price). Passing `--ref-contract` now fails at startup as an unknown flag; the `REF_CONTRACT` env var is simply ignored. The multi-provider architecture stays: `SwapProvider` (trait) + `SwapProviderImpl` (dispatch enum) are the seam — a fork adds a venue by implementing the trait and adding a variant, and `swap/mod.rs` documents the slippage bar any AMM provider must clear.
 
 ### Added

@@ -23,13 +23,13 @@ warn() { echo "!!  $*" >&2; }
 # degrade to "assume nothing available" (and therefore one job) rather than
 # abort the script under `set -e`.
 available_kb() {
-	local limit="" current=0 avail=""
+	local limit="" current="" avail=""
 
 	if [ -r /sys/fs/cgroup/memory.max ]; then
 		limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)
 		[ "${limit}" = "max" ] && limit=""
 		if [ -n "${limit}" ]; then
-			current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 0)
+			current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || true)
 		fi
 	elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
 		limit=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || true)
@@ -39,16 +39,22 @@ available_kb() {
 		*) [ "${#limit}" -ge 19 ] && limit="" ;;
 		esac
 		if [ -n "${limit}" ]; then
-			current=$(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo 0)
+			current=$(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || true)
 		fi
 	fi
 
-	case "${limit}:${current}" in
-	*[!0-9:]*) limit=""; current=0 ;;
-	esac
-
 	if [ -n "${limit}" ]; then
+		# A limit is in force. Usage must be readable and numeric to say
+		# anything about free memory — treating an unreadable usage as 0 would
+		# hand back the WHOLE limit as available and license exactly the
+		# over-parallel build this function exists to prevent. /proc/meminfo is
+		# not a safe fallback here either: under a limit it reports host
+		# memory, which is worse. Report nothing available and let the caller
+		# clamp to a single job.
+		case "${limit}" in '' | *[!0-9]*) echo 0; return ;; esac
+		case "${current}" in '' | *[!0-9]*) echo 0; return ;; esac
 		avail=$(( (limit - current) / 1024 ))
+		[ "${avail}" -lt 0 ] && avail=0
 	else
 		avail=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null || true)
 	fi

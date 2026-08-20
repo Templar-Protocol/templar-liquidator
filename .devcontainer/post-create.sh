@@ -111,6 +111,22 @@ if [ "$(git config --global --get commit.gpgsign 2>/dev/null || echo false)" = "
 	esac
 	if [ -n "${signing_key}" ] && [ ! -f "${signing_key}" ]; then
 		warn "commit.gpgsign is on but user.signingkey points at '${signing_key}', which does not exist in this container, so 'git commit' will fail. Load the key into the host ssh-agent (ssh-add --apple-use-keychain ~/.ssh/id_ed25519) and set user.signingkey to the matching .pub inside the container — see the comment in .devcontainer/post-create.sh."
+	elif [ -n "${signing_key}" ]; then
+		# The key resolves, so signing will work. Verifying is a SEPARATE
+		# setting: without gpg.ssh.allowedSignersFile, git reports every
+		# signed commit as "N" (no signature) locally — `git log --show-
+		# signature` even errors outright — while GitHub happily reports it
+		# as verified. Generate the file from config that is already present
+		# rather than asking anyone to hand-maintain it.
+		email="$(git config --global --get user.email 2>/dev/null || true)"
+		if [ -n "${email}" ]; then
+			allowed="${HOME}/.ssh/allowed_signers"
+			entry="${email} $(cut -d' ' -f1,2 "${signing_key}")"
+			if [ ! -f "${allowed}" ] || ! grep -qxF "${entry}" "${allowed}"; then
+				printf '%s\n' "${entry}" >> "${allowed}"
+			fi
+			git config --global gpg.ssh.allowedSignersFile "${allowed}"
+		fi
 	fi
 fi
 

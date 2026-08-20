@@ -1,6 +1,6 @@
 # Deploying on a VM
 
-A complete guide to running the bot as a long-lived Docker Compose service on any VM you control — a cloud instance, bare metal, whatever. This is the `loop` run mode: one continuous process, restarted by Docker/systemd if it dies, rather than the cron-triggered `--run-mode once` pattern the [GCP Terraform module](deploy-gcp.md) uses.
+A complete guide to running the bot as a long-lived Docker Compose service on any VM you control — a cloud instance, bare metal, whatever. This is the `loop` run mode: one continuous process, restarted by Docker/systemd if it dies, rather than the cron-triggered `--run-mode once` pattern (see the README's Run modes section).
 
 ## Prerequisites
 

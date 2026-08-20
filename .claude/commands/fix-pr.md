@@ -77,8 +77,7 @@ Read unresolved review comments on a pull request and implement fixes.
    ```
 
    Run only what the change actually touches — shell edits do not need the
-   Rust suite. Terraform changes also need
-   `terraform -chdir=terraform fmt -check -recursive` and `validate`.
+   Rust suite.
 
    **In the dev container, cargo needs constraining or it is OOM-killed.**
    `nproc` reports the host's full core count while the container has far less

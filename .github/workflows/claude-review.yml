@@ -394,7 +394,7 @@ jobs:
 
             NEVER REPORT
             - Anything CI already enforces: cargo fmt, cargo clippy -D warnings, cargo test,
-              cargo doc -D warnings, cargo-deny, terraform fmt/validate, the Docker build, and the
+              cargo doc -D warnings, cargo-deny, the Docker build, and the
               single-rev / version-pin / shellcheck gates in ci.yml
             - Pre-existing problems this diff did not introduce
             - Style, naming, or subjective preference

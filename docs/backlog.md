@@ -32,7 +32,7 @@ Documented, not implemented. This is the roadmap of things a fork or a future re
 
 **`# HELP` lines on `/metrics`.** The current Prometheus exposition (`Metrics::render`) emits `# TYPE` but not `# HELP` for each series — cosmetic for scraping, but `# HELP` is what shows up as the metric description in most dashboards/explorers.
 
-**Once-mode cycle-timeout wrapper.** `RUN_MODE=once` relies entirely on the external scheduler's own timeout (e.g. the Terraform module's `task_timeout_seconds`) to bound a stuck cycle. A wrapper timeout inside the binary itself would fail a stuck cycle deterministically rather than depending on the orchestrator to notice.
+**Once-mode cycle-timeout wrapper.** `RUN_MODE=once` relies entirely on the external scheduler's own timeout to bound a stuck cycle. A wrapper timeout inside the binary itself would fail a stuck cycle deterministically rather than depending on the orchestrator to notice.
 
 ## Configuration and interface
 

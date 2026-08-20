@@ -36,15 +36,6 @@ jobs:
           context: .
           push: false
 
-  terraform:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-      - run: terraform -chdir=terraform fmt -check -recursive
-      - run: terraform -chdir=terraform init -backend=false
-      - run: terraform -chdir=terraform validate
-
   # Cross-file pins that no compiler or linter can catch on its own: THE
   # SINGLE-REV RULE and the three-way Rust version pin. Both fail in ways that
   # do not name themselves (see the script's header), so they get their own
@@ -91,7 +82,6 @@ jobs:
       - lint-test
       - deny
       - docker
-      - terraform
       - invariants
       - shellcheck
     steps:
@@ -101,7 +91,6 @@ jobs:
             [lint-test]="${{ needs.lint-test.result }}"
             [deny]="${{ needs.deny.result }}"
             [docker]="${{ needs.docker.result }}"
-            [terraform]="${{ needs.terraform.result }}"
             [invariants]="${{ needs.invariants.result }}"
             [shellcheck]="${{ needs.shellcheck.result }}"
           )

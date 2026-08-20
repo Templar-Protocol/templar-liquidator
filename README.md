@@ -8,7 +8,7 @@ An inventory-based liquidation bot for [Templar Protocol](https://templarfi.org)
 
 ## Quickstart
 
-Fastest path — pull the released image and run it with your own `.env`:
+Pull the released image and run it with your own `.env` — **note the access caveat below; for most readers the Compose path is the one that works**:
 
 ```bash
 cp .env.example .env
@@ -43,9 +43,10 @@ docker compose up
 
 `docker compose up` **builds from source** — it compiles the crate and its
 git dependencies inside the image, including an `npm install` a dependency's
-`build.rs` runs — so the first run is slow (several minutes). The `docker
-run ghcr.io/...` path above pulls a prebuilt image and is the fast way to
-get started; use Compose when you want to iterate on the code itself.
+`build.rs` runs — so the first run is slow (several minutes). It is also the
+**only path that works without registry access**, so unless you have been
+granted access to the private package it is the way to get started, not just
+the way to iterate on the code.
 
 Three env vars are required — the bot refuses to start without them:
 

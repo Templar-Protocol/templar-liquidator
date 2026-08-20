@@ -60,7 +60,7 @@ This provisions: the Cloud Run Job itself, a Cloud Scheduler cron trigger, an Ar
 > GHCR packages default to private and the organization restricts making them
 > public. `terraform apply` succeeds; the first execution then fails to pull.
 >
-> Making this work today needs two module edits, not just a variable — worth
+> Making this work today needs three module edits, not just a variable — worth
 > knowing before you start:
 >
 > 1. `ghcr_mirror` is a `REMOTE_REPOSITORY` (`terraform/main.tf`), a
@@ -72,6 +72,12 @@ This provisions: the Cloud Run Job itself, a Cloud Scheduler cron trigger, an Ar
 >    (`terraform/main.tf`), which is also the place
 >    [terraform/README.md](../terraform/README.md) points at for path changes.
 >    Repoint that local at your own repository.
+> 3. The runtime service account's `roles/artifactregistry.reader` is scoped to
+>    the mirror alone (`job_reader` in `terraform/main.tf`), and it is the only
+>    such grant in the module — the job runs as its own identity, not the
+>    default compute service account. Grant that account reader on the new
+>    repository too, or the first execution fails to pull again, this time with
+>    `PERMISSION_DENIED`.
 >
 > The rest of the module — scheduler, service accounts, secret bindings — is
 > unaffected, as is building and running from source outside GCP.

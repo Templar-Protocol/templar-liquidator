@@ -253,6 +253,7 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
         SwapRetryConfig::default(),
         0.0, // min swap value (unused for Hold)
         oracle_cfg.collateral_asset_decimals,
+        oracle_cfg.borrow_asset_decimals,
     );
 
     // Execute the liquidation through the liquidator's own gateway path.

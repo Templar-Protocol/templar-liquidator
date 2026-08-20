@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `POSITION_CONCURRENCY` (`--position-concurrency`, default `1`) — how many positions one market's round evaluates/liquidates in flight at once. The default keeps the historical behavior exactly: sequential, with a 1-second pause between positions. Raising it drops the pause and fans evaluation out through a bounded pool; inventory reservations already serialize the capital commitment, so concurrent positions cannot double-spend the same balance. This is the scale lever `CONCURRENCY` was documented as but never was — that knob only ever parallelized registry deployment listing, and its docs now say so.
+- `LiquidationStrategy::min_profit_margin_bps()` — strategies now report the margin they gate on, and `should_liquidate` became a provided trait method implemented in terms of it (both built-ins previously carried byte-identical copies). [**breaking**] for out-of-tree strategies: implementing `min_profit_margin_bps` is now required; `should_liquidate` may be dropped unless the fork's go/no-go policy genuinely differs.
+
+### Fixed
+
+- *(inventory)* A successful liquidation now **debits** the tracked balance (`InventoryManager::consume`) instead of merely releasing the reservation. Previously the spent amount went straight back into "available" until the next RPC refresh, so every later position in the same round sized against tokens that had already left the account and submitted transactions doomed to fail on-chain — one spurious failure (plus a Telegram alert) per remaining eligible position after each success.
+- *(liquidator)* Failed oracle conversions now skip the position instead of proceeding on wrong-unit fallbacks. The expected-collateral-value fallback was the raw collateral amount (collateral units fed into a borrow-unit comparison); the gas fallback was a constant blind to the borrow asset's decimals.
+- *(executor)* The JIT-swap USD threshold check scales by the market's actual borrow-asset decimals instead of a hardcoded `10^6` — previously off by `10^12` for an 18-decimal borrow asset, making `MIN_SWAP_VALUE_USD` meaningless there.
+- *(liquidator)* The "not profitable, skipping" log line now shows `min_revenue_required` at the strategy's actual configured margin; it previously hardcoded the 50-bps default and lied whenever `MIN_PROFIT_BPS` was set to anything else.
+
 ## [0.2.0] - 2026-08-20
 
 ### Added

@@ -502,6 +502,9 @@ impl Liquidator {
             market_config
                 .price_oracle_configuration
                 .collateral_asset_decimals,
+            market_config
+                .price_oracle_configuration
+                .borrow_asset_decimals,
         );
 
         Self {
@@ -569,6 +572,32 @@ impl Liquidator {
             collateral_decimals,
             collateral_asset_id,
         )
+    }
+
+    /// Gates a liquidation attempt on both oracle conversions succeeding.
+    ///
+    /// Fail-closed policy: if either the collateral-value or gas-cost
+    /// conversion errors (a price missing from the oracle response), the
+    /// position must be skipped this round. The tempting fallbacks are both
+    /// wrong-unit numbers — the raw collateral amount is denominated in
+    /// collateral units, not borrow units, and any constant gas figure is
+    /// blind to the borrow asset's decimals — and feeding either into the
+    /// profitability gate turns it into noise.
+    fn require_conversions(
+        expected_collateral_value: LiquidatorResult<U128>,
+        gas_cost: LiquidatorResult<U128>,
+    ) -> Option<(U128, U128)> {
+        match (expected_collateral_value, gas_cost) {
+            (Ok(value), Ok(gas)) => Some((value, gas)),
+            (Err(error), _) => {
+                tracing::warn!(%error, "Could not value collateral in borrow-asset units, skipping position");
+                None
+            }
+            (_, Err(error)) => {
+                tracing::warn!(%error, "Could not convert gas cost to borrow-asset units, skipping position");
+                None
+            }
+        }
     }
 
     fn record_price_update_attempt(result: LiquidatorResult<bool>) -> bool {
@@ -790,14 +819,26 @@ impl Liquidator {
                 return Ok(LiquidationOutcome::Skipped);
             };
 
-            // Calculate expected value for profitability
-            let expected_collateral_value =
+            // Calculate expected value and gas cost for profitability. Both
+            // conversions must succeed — see `require_conversions` for why
+            // there is deliberately no fallback here.
+            let Some((expected_collateral_value, gas_cost)) = Self::require_conversions(
                 profitability::ProfitabilityCalculator::convert_collateral_to_borrow_asset(
                     collateral_amount,
                     &oracle_response,
                     &self.market_config,
-                )
-                .unwrap_or(collateral_amount);
+                ),
+                profitability::ProfitabilityCalculator::convert_gas_cost_to_borrow_asset(
+                    profitability::ProfitabilityCalculator::DEFAULT_GAS_COST_USD,
+                    &oracle_response,
+                    &self.market_config,
+                ),
+            ) else {
+                if loop_iteration > 1 {
+                    return Ok(LiquidationOutcome::Liquidated);
+                }
+                return Ok(LiquidationOutcome::Skipped);
+            };
 
             // Calculate what we'd actually get after applying liquidation spread
             // Spread reduces what we receive: value_after_spread = value × (1 - spread)
@@ -815,14 +856,6 @@ impl Liquidator {
             };
 
             // Step 5: Check profitability
-
-            let gas_cost =
-                profitability::ProfitabilityCalculator::convert_gas_cost_to_borrow_asset(
-                    profitability::ProfitabilityCalculator::DEFAULT_GAS_COST_USD,
-                    &oracle_response,
-                    &self.market_config,
-                )
-                .unwrap_or(U128(50_000));
 
             // Calculate detailed profitability metrics
             let (net_profit, _profit_pct) =
@@ -903,9 +936,12 @@ impl Liquidator {
                     -(i128::try_from(deficit).unwrap_or(i128::MAX))
                 };
 
-                // Calculate min required for profitability
-                let profit_margin_multiplier = 10_000 + 50; // 50 bps default
-                let min_revenue_required = (total_cost * profit_margin_multiplier) / 10_000;
+                // Minimum revenue at the strategy's actual configured margin
+                // (not a hardcoded default, which would lie whenever
+                // MIN_PROFIT_BPS is set to anything else).
+                let min_revenue_required = (total_cost
+                    * (10_000 + u128::from(self.strategy.min_profit_margin_bps())))
+                    / 10_000;
                 let spread_pct = spread.to_f64_lossy() * 100.0;
 
                 let message = if dry_run_mode {
@@ -1069,8 +1105,18 @@ impl Liquidator {
     }
 
     /// Runs liquidations for all eligible positions in the market.
-    #[tracing::instrument(skip(self, _concurrency), level = "info", fields(market = %self.market))]
-    pub async fn run_liquidations(&self, _concurrency: usize) -> LiquidatorResult<RoundSummary> {
+    ///
+    /// `concurrency` bounds how many positions are evaluated/liquidated in
+    /// flight at once. At `1` (the default), positions are processed
+    /// sequentially with a 1-second pause between them — the pacing free
+    /// public RPC endpoints tolerate. Above `1` the pause is dropped and
+    /// evaluation fans out; inventory reservations serialize the actual
+    /// capital commitment, so concurrent positions cannot double-spend the
+    /// same balance, but each in-flight position costs several RPC reads and
+    /// (in live mode) possibly its own oracle push.
+    #[tracing::instrument(skip(self, concurrency), level = "info", fields(market = %self.market))]
+    #[allow(clippy::too_many_lines)]
+    pub async fn run_liquidations(&self, concurrency: usize) -> LiquidatorResult<RoundSummary> {
         let max_percentage = self.strategy.max_liquidation_percentage();
 
         tracing::info!(
@@ -1126,12 +1172,31 @@ impl Liquidator {
         // (execution phase) rather than failing before submission.
         let mut failed_execution = 0u64;
         let total = borrows.len();
+        let concurrency = concurrency.max(1);
 
-        for (i, (account, position)) in borrows.into_iter().enumerate() {
-            match self
-                .liquidate(account.clone(), position, oracle_response.clone())
-                .await
-            {
+        use futures::StreamExt as _;
+        let mut results = futures::stream::iter(borrows.into_iter().enumerate().map(
+            |(i, (account, position))| {
+                let oracle_response = oracle_response.clone();
+                async move {
+                    let result = self
+                        .liquidate(account.clone(), position, oracle_response)
+                        .await;
+                    // Sequential mode keeps the historical 1s pacing between
+                    // positions (skipped after the last one). Concurrent mode
+                    // drops it — the operator raising the knob brings an RPC
+                    // endpoint sized for the load.
+                    if concurrency == 1 && i < total - 1 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    (account, result)
+                }
+            },
+        ))
+        .buffer_unordered(concurrency);
+
+        while let Some((account, result)) = results.next().await {
+            match result {
                 Ok(LiquidationOutcome::Liquidated) => {
                     self.notifier
                         .clear_failure_dedup_for(self.market.as_ref(), account.as_ref());
@@ -1160,10 +1225,6 @@ impl Liquidator {
                     }
                     failed += 1;
                 }
-            }
-
-            if i < total - 1 {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
 
@@ -1313,6 +1374,28 @@ mod tests {
             NotificationKind::InsufficientBalance.as_str(),
             "insufficient_balance"
         );
+    }
+
+    #[test]
+    fn require_conversions_fails_closed_when_either_conversion_errors() {
+        // The pre-fix behavior fell back to `collateral_amount` (collateral
+        // units!) for the expected value and a decimals-blind constant for
+        // gas when a conversion failed — feeding wrong-unit numbers into the
+        // profitability gate. The policy is fail-closed: no conversions, no
+        // liquidation attempt.
+        let err = || {
+            Err(LiquidatorError::StrategyError(
+                "price not found in oracle".to_string(),
+            ))
+        };
+
+        assert_eq!(
+            Liquidator::require_conversions(Ok(U128(100)), Ok(U128(5))),
+            Some((U128(100), U128(5)))
+        );
+        assert_eq!(Liquidator::require_conversions(err(), Ok(U128(5))), None);
+        assert_eq!(Liquidator::require_conversions(Ok(U128(100)), err()), None);
+        assert_eq!(Liquidator::require_conversions(err(), err()), None);
     }
 
     #[test]

@@ -81,8 +81,11 @@ pub struct ServiceConfig {
     pub registry_refresh_interval: u64,
     /// Execution mode: continuous loop or single cycle
     pub run_mode: crate::config::RunMode,
-    /// Concurrency for liquidations
+    /// Concurrency for registry deployment listing
     pub concurrency: usize,
+    /// Maximum positions evaluated/liquidated concurrently within one
+    /// market's round (1 = sequential with pacing; see `config::Args`)
+    pub position_concurrency: usize,
     /// Liquidation strategy
     pub strategy: Arc<dyn LiquidationStrategy>,
     /// Collateral strategy
@@ -154,6 +157,7 @@ impl std::fmt::Debug for ServiceConfig {
             .field("registry_refresh_interval", &self.registry_refresh_interval)
             .field("run_mode", &self.run_mode)
             .field("concurrency", &self.concurrency)
+            .field("position_concurrency", &self.position_concurrency)
             .field("collateral_strategy", &self.collateral_strategy)
             .field("dry_run", &self.dry_run)
             .field(
@@ -1096,7 +1100,9 @@ impl LiquidatorService {
 
                 let result = async {
                     tracing::info!(market = %market, "Scanning market for liquidations");
-                    liquidator.run_liquidations(self.config.concurrency).await
+                    liquidator
+                        .run_liquidations(self.config.position_concurrency)
+                        .await
                 }
                 .instrument(market_span)
                 .await;

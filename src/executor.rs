@@ -54,6 +54,9 @@ pub struct LiquidationExecutor {
     swap_retry_config: crate::swap::SwapRetryConfig,
     min_swap_value_usd: f64,
     collateral_decimals: i32,
+    /// Borrow-asset decimals, for treating borrow-denominated values as a USD
+    /// proxy in the JIT-swap threshold check.
+    borrow_decimals: i32,
 }
 
 impl LiquidationExecutor {
@@ -69,6 +72,7 @@ impl LiquidationExecutor {
         swap_retry_config: crate::swap::SwapRetryConfig,
         min_swap_value_usd: f64,
         collateral_decimals: i32,
+        borrow_decimals: i32,
     ) -> Self {
         Self {
             client,
@@ -80,6 +84,7 @@ impl LiquidationExecutor {
             swap_retry_config,
             min_swap_value_usd,
             collateral_decimals,
+            borrow_decimals,
         }
     }
 
@@ -118,8 +123,11 @@ impl LiquidationExecutor {
                 && self.swap_provider.is_some()
                 && collateral_asset.to_string() != borrow_asset.to_string()
             {
-                #[allow(clippy::cast_precision_loss)]
-                let usd_estimate = u128::from(expected_collateral_value) as f64 / 1_000_000.0;
+                let usd_estimate =
+                    crate::profitability::ProfitabilityCalculator::borrow_units_to_usd(
+                        u128::from(expected_collateral_value),
+                        self.borrow_decimals,
+                    );
 
                 if usd_estimate >= self.min_swap_value_usd {
                     tracing::info!(
@@ -237,11 +245,17 @@ impl LiquidationExecutor {
                             "Liquidation executed successfully (all receipts succeeded)"
                         );
 
-                        // Release the reservation — tokens have left our account
+                        // Tokens have left our account: debit the tracked
+                        // balance and clear the reservation together. A bare
+                        // `release` here would put the spent amount back into
+                        // "available" until the next RPC refresh, so later
+                        // positions in the same round would size against
+                        // inventory that no longer exists and submit
+                        // transactions doomed to fail on-chain.
                         self.inventory
                             .write()
                             .await
-                            .release(borrow_asset, liquidation_amount);
+                            .consume(borrow_asset, liquidation_amount);
 
                         // Handle collateral based on strategy
                         let (swap_succeeded, swap_issue) = match &self.collateral_strategy {
@@ -249,10 +263,13 @@ impl LiquidationExecutor {
                             CollateralStrategy::SwapToBorrow => {
                                 // Estimate USD value for threshold check.
                                 // The expected_collateral_value is denominated in borrow asset
-                                // (often USDC), so it serves as a rough USD proxy.
-                                #[allow(clippy::cast_precision_loss)]
+                                // (often a USD stablecoin), so it serves as a rough USD proxy
+                                // once the asset's decimals are scaled out.
                                 let usd_estimate = Some(
-                                    u128::from(expected_collateral_value) as f64 / 1_000_000.0,
+                                    crate::profitability::ProfitabilityCalculator::borrow_units_to_usd(
+                                        u128::from(expected_collateral_value),
+                                        self.borrow_decimals,
+                                    ),
                                 );
                                 // Immediately swap collateral back to borrow asset
                                 self.swap_collateral_to_borrow(

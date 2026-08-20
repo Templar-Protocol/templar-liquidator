@@ -57,13 +57,24 @@ This provisions: the Cloud Run Job itself, a Cloud Scheduler cron trigger, an Ar
 > Artifact Registry mirror proxies `https://ghcr.io` anonymously — the module
 > configures no `upstream_credentials` — and the published
 > `ghcr.io/templar-protocol/templar-liquidator` package is private, because
-> GHCR packages default to private and the organisation restricts making them
+> GHCR packages default to private and the organization restricts making them
 > public. `terraform apply` succeeds; the first execution then fails to pull.
 >
-> Until the package is public, use an image the mirror can actually reach:
-> build from source and push to your own Artifact Registry repository, then
-> point `image_tag` (and the repository) at that. The rest of the module —
-> scheduler, service accounts, secret bindings — is unaffected.
+> Making this work today needs two module edits, not just a variable — worth
+> knowing before you start:
+>
+> 1. `ghcr_mirror` is a `REMOTE_REPOSITORY` (`terraform/main.tf`), a
+>    read-through proxy. You cannot push into it. Hosting your own image means
+>    a separate `STANDARD` Artifact Registry repository, created outside this
+>    module or added to it.
+> 2. The image path is not a variable. `image_tag` is the only image-related
+>    input; the repository and path are fixed in the `mirrored_image` local
+>    (`terraform/main.tf`), which is also the place
+>    [terraform/README.md](../terraform/README.md) points at for path changes.
+>    Repoint that local at your own repository.
+>
+> The rest of the module — scheduler, service accounts, secret bindings — is
+> unaffected, as is building and running from source outside GCP.
 
 ## 4. Verify the first execution
 

@@ -17,12 +17,21 @@ docker login ghcr.io       # see the note below — the package is not yet publi
 docker run --env-file .env ghcr.io/templar-protocol/templar-liquidator:latest
 ```
 
-> **The published image is not anonymously pullable yet.** GHCR packages are
-> private by default, and this organisation currently restricts making them
-> public, so `docker pull` needs `docker login ghcr.io` with a personal access
-> token carrying `read:packages`. Building from source with Compose (below)
-> needs no login and is unaffected. This note goes away once the package is
-> made public.
+> **The published image is not publicly pullable yet**, and `docker login`
+> alone is not enough to fix that. GHCR packages are private by default, this
+> organization currently restricts making them public, and a private package
+> is readable only by accounts explicitly granted access to it — so:
+>
+> - **If you have been granted access:** log in with a GitHub personal access
+>   token (classic) carrying `read:packages`, supplying the token as the Docker
+>   password. If the organization enforces SSO, authorize the token for it
+>   first, or the pull still fails.
+> - **If you have not** — which is everyone outside the organization — this
+>   path cannot work at all. Use the Compose path below; it builds from source,
+>   needs no registry access, and is the supported route.
+>
+> Tracked in [#24](https://github.com/Templar-Protocol/templar-liquidator/issues/24);
+> this note goes away once the package is public.
 
 Or build and run locally with Docker Compose:
 

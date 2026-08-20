@@ -81,6 +81,13 @@ Do the same for any other secret you plan to reference in `secret_env`
    `main.tf`'s `secret_env` map to point at the
    secret ids you actually created, and adjust `env` (network, registry
    account ids, signer account id, strategy knobs) for your deployment.
+
+   > **A released `image_tag` will not pull today.** The mirror proxies the
+   > upstream GHCR package anonymously and that package is private, so the
+   > first execution fails at image pull even though `terraform apply`
+   > succeeds. See the Artifact Registry bullet under *What it deploys*, and
+   > [#24](https://github.com/Templar-Protocol/templar-liquidator/issues/24).
+
 4. ```bash
    terraform init
    terraform apply

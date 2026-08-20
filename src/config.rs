@@ -240,13 +240,27 @@ pub struct Args {
     #[arg(long, env = "PYTH_HERMES_URL")]
     pub hermes_url: Option<Url>,
 
-    /// RedStone gateway URL for fetching fresh prices
+    /// RedStone gateway URL. Currently unused: scan-side RedStone prices come
+    /// from the public price API (`--redstone-api-url`), and on-chain pushes
+    /// go through the proxy contract's own `update_prices` flow. Retained so
+    /// existing deployments passing it don't break; removal is tracked with
+    /// the other dead knobs in the architecture review.
     #[arg(
         long,
         env = "REDSTONE_GATEWAY_URL",
         default_value = "https://oracle-gateway-1.a.redstone.vip"
     )]
     pub redstone_gateway_url: String,
+
+    /// RedStone public price API, used to compose proxy-oracle prices
+    /// off-chain at scan time (same source templar-backend reads). Scan-side
+    /// only — execution still prices through the on-chain oracle.
+    #[arg(
+        long,
+        env = "REDSTONE_API_URL",
+        default_value = "https://api.redstone.finance"
+    )]
+    pub redstone_api_url: Url,
 
     /// Minimum USD value to attempt a swap (JIT or batch).
     /// Amounts below this threshold are skipped and left for batch swap.
@@ -366,6 +380,7 @@ impl std::fmt::Debug for Args {
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field("hermes_url", &self.hermes_url)
             .field("redstone_gateway_url", &self.redstone_gateway_url)
+            .field("redstone_api_url", &self.redstone_api_url)
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
             .field("swap_retry_attempts", &self.swap_retry_attempts)
@@ -636,7 +651,7 @@ impl Args {
                 .hermes_url
                 .clone()
                 .unwrap_or_else(|| self.network.hermes_url()),
-            redstone_gateway_url: self.redstone_gateway_url.clone(),
+            redstone_api_url: self.redstone_api_url.clone(),
             min_swap_value_usd: self.min_swap_value_usd,
             batch_swap_on_cycle_start: self.batch_swap_on_cycle_start,
             swap_retry_config: SwapRetryConfig {
@@ -711,6 +726,7 @@ mod tests {
             max_loop_iterations: 10,
             hermes_url: None,
             redstone_gateway_url: "https://oracle-gateway-1.a.redstone.vip".to_string(),
+            redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
             min_swap_value_usd: 10.0,
             batch_swap_on_cycle_start: true,
             swap_retry_attempts: 3,
@@ -1173,6 +1189,20 @@ mod tests {
         let mut args = create_test_args();
         args.position_concurrency = 32;
         assert!(args.build_config().notifier.max_inflight() >= 64);
+    }
+
+    /// Scan-side proxy-price composition reads the RedStone public API. The
+    /// default must be the same endpoint templar-backend's pkg/redstone uses.
+    #[test]
+    fn redstone_api_url_defaults_to_the_public_api() {
+        assert_eq!(
+            parse_with(&[]).redstone_api_url.as_str(),
+            "https://api.redstone.finance/"
+        );
+        assert_eq!(
+            create_test_args().build_config().redstone_api_url.as_str(),
+            "https://api.redstone.finance/"
+        );
     }
 
     #[test]

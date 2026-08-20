@@ -65,7 +65,9 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`inventory.rs`** — `InventoryManager`: tracks available (`balance − reserved`) balances per asset across all configured markets, behind an `Arc<RwLock<_>>` for concurrent access. Liquidations only proceed when inventory actually covers the sizing decision.
 
-**`oracle.rs`** — `OracleFetcher`: fetches prices across every oracle type Templar markets use — Pyth (via Hermes HTTP, not the on-chain contract directly), RedStone-backed feeds through proxy-oracle cache reads, and LST oracles with price transformers — and can push fresh prices on-chain immediately before a liquidation transaction, since the market contract reads its own on-chain oracle state at execution time.
+**`oracle.rs`** — `OracleFetcher`: fetches prices across every oracle type Templar markets use — Pyth (via Hermes HTTP, not the on-chain contract directly), LST oracles with price transformers, and proxy-oracle feeds, which are composed off-chain at scan time from each feed's configured primary source (Hermes for Pyth sources, the RedStone public API via `redstone.rs` for RedStone sources, transformer inputs via free view calls), falling back to the proxy's on-chain price cache for anything not composable off-chain (e.g. Lazer sources). It can also push fresh prices on-chain immediately before a liquidation transaction, since the market contract reads its own on-chain oracle state at execution time — scan-side composition never replaces that.
+
+**`redstone.rs`** — RedStone public price API client (`api.redstone.finance`, the endpoint templar-backend's `pkg/redstone` reads), keyed by symbol, with staleness and future-skew guards. Scan-side only.
 
 **`swap/mod.rs`** — the `SwapProvider` trait: the swap-provider extension seam. Not object-safe (its methods are generic over asset class), so dynamic dispatch goes through `swap/provider.rs`'s `SwapProviderImpl` enum instead.
 

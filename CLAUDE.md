@@ -61,7 +61,14 @@ One line per file in `src/`:
 - `inventory.rs` — `InventoryManager`: tracks available balances across all
   markets and assets so liquidations only proceed when inventory covers them.
 - `oracle.rs` — price fetching across oracle types the bot reads: Pyth
-  (Hermes HTTP), RedStone-backed and LST feeds via proxy-oracle cache reads.
+  (Hermes HTTP), LST feeds with transformers, and proxy-oracle feeds —
+  composed off-chain from each feed's configured source (Hermes / RedStone
+  API + transformer view calls) at scan time, with the proxy's on-chain
+  cache as fallback. Execution-time pricing still goes through the on-chain
+  push (`update_onchain_prices`).
+- `redstone.rs` — RedStone public price API client (`api.redstone.finance`,
+  the same source templar-backend's `pkg/redstone` reads), used only for
+  scan-side proxy price composition.
 - `swap/mod.rs` — `SwapProvider` trait, the swap-provider extension seam.
 - `swap/provider.rs` — `SwapProviderImpl`, a concrete enum wrapping the two
   shipped providers for dynamic dispatch (the trait itself has generic

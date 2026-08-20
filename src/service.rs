@@ -110,8 +110,8 @@ pub struct ServiceConfig {
     pub max_loop_iterations: u32,
     /// Pyth Hermes API URL for fetching price data
     pub hermes_url: url::Url,
-    /// RedStone gateway URL for fetching fresh prices
-    pub redstone_gateway_url: String,
+    /// RedStone public price API for scan-side proxy price composition
+    pub redstone_api_url: url::Url,
     /// Minimum USD value to attempt a swap (JIT or batch)
     pub min_swap_value_usd: f64,
     /// Enable batch swap of accumulated collateral at round start
@@ -171,7 +171,7 @@ impl std::fmt::Debug for ServiceConfig {
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field("hermes_url", &self.hermes_url)
-            .field("redstone_gateway_url", &self.redstone_gateway_url)
+            .field("redstone_api_url", &self.redstone_api_url)
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
             .field("swap_retry_config", &self.swap_retry_config)
@@ -274,7 +274,7 @@ impl LiquidatorService {
             client.clone(),
             pyth_updates.clone(),
             config.hermes_url.clone(),
-            Some(config.redstone_gateway_url.clone()),
+            config.redstone_api_url.clone(),
             None,
         );
 
@@ -758,7 +758,7 @@ impl LiquidatorService {
                     self.config.loop_liquidation,
                     self.config.max_loop_iterations,
                     self.config.hermes_url.clone(),
-                    Some(self.config.redstone_gateway_url.clone()),
+                    self.config.redstone_api_url.clone(),
                     self.config.swap_retry_config.clone(),
                     self.config.min_swap_value_usd,
                     Some(self.oracle_fetcher.proxy_oracle_cache()),

@@ -77,7 +77,8 @@ All comma-delimited (`value_delimiter = ','` in clap — repeat the flag or comm
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
 | `PYTH_HERMES_URL` | `--hermes-url` | network default (`https://hermes.pyth.network` mainnet / `https://hermes-beta.pyth.network` testnet) | Pyth Hermes endpoint for fetching latest price data. |
-| `REDSTONE_GATEWAY_URL` | `--redstone-gateway-url` | `https://oracle-gateway-1.a.redstone.vip` | RedStone gateway for fetching fresh prices. |
+| `REDSTONE_API_URL` | `--redstone-api-url` | `https://api.redstone.finance` | RedStone public price API, used to compose proxy-oracle prices off-chain at scan time (no gas, no keeper dependency). Scan-side only — execution still prices through the on-chain oracle. |
+| `REDSTONE_GATEWAY_URL` | `--redstone-gateway-url` | `https://oracle-gateway-1.a.redstone.vip` | **Currently unused.** Scan-side RedStone prices come from `REDSTONE_API_URL`, and on-chain pushes go through the proxy contract's own `update_prices` flow. Retained so existing deployments passing it don't break. |
 
 ## Notifications (Telegram)
 

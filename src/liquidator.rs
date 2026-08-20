@@ -91,6 +91,7 @@ pub mod metrics;
 pub mod notifier;
 pub mod oracle;
 pub mod profitability;
+pub mod redstone;
 pub mod rpc;
 pub mod scanner;
 pub mod service;
@@ -476,7 +477,7 @@ impl Liquidator {
         loop_liquidation: bool,
         max_loop_iterations: u32,
         hermes_url: url::Url,
-        redstone_gateway_url: Option<String>,
+        redstone_api_url: url::Url,
         swap_retry_config: crate::swap::SwapRetryConfig,
         min_swap_value_usd: f64,
         proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
@@ -487,7 +488,7 @@ impl Liquidator {
             client.clone(),
             pyth_updates.clone(),
             hermes_url,
-            redstone_gateway_url,
+            redstone_api_url,
             proxy_oracle_cache,
         );
         let executor = executor::LiquidationExecutor::new(

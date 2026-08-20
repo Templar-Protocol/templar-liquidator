@@ -60,6 +60,7 @@ To cut one:
 cargo update -p templar-liquidator
 
 # 2. Move CHANGELOG.md's [Unreleased] content into a `## [X.Y.Z] - YYYY-MM-DD` section
+#    and update the README quickstart's image pin to the new version
 
 # 3. Check the working tree agrees before going further
 ./scripts/check-release.sh vX.Y.Z
@@ -113,7 +114,7 @@ Two conventions worth keeping:
 - `## Upgrade notes` is for the operator, so state the no-op cases too — "no
   migrations, no new environment variables" is useful information.
 
-The `preflight` job runs `check-release.sh` again and blocks the release if the tag, `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` disagree — each of those mismatches otherwise fails silently, producing an image labelled with a version its binary does not report.
+The `preflight` job runs `check-release.sh` again and blocks the release if the tag, `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, or (for stable releases) the README quickstart's image pin disagree — each of those mismatches otherwise fails silently, producing an image labelled with a version its binary does not report, or a quickstart telling new readers to run a release-old one.
 
 `:latest` only moves for non-prerelease tags, so `vX.Y.Z-rc.1` publishes `X.Y.Z-rc.1` without repointing `:latest` (or `:<major>.<minor>`) at a release candidate.
 

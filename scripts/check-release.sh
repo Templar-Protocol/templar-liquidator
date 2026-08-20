@@ -81,6 +81,26 @@ else
 	bad "CHANGELOG.md has no '## [${version}]' section — add one before tagging"
 fi
 
+# 5. The README quickstart pins the published image by version, and nothing
+#    else keeps that pin current: a stale pin ships silently and every new
+#    reader runs a release-old binary. Prereleases are exempt — the quickstart
+#    keeps pointing at the last stable release until a stable tag moves it.
+case "${version}" in
+*-*)
+	note "prerelease: README image pin not required to match"
+	;;
+*)
+	readme_tag=$(grep -oE 'ghcr\.io/templar-protocol/templar-liquidator:[0-9A-Za-z.-]+' README.md | head -1 | cut -d: -f2 || true)
+	if [ -z "${readme_tag}" ]; then
+		bad "could not find a ghcr.io/templar-protocol/templar-liquidator:<tag> reference in README.md"
+	elif [ "${readme_tag}" != "${version}" ]; then
+		bad "README quickstart pins image tag ${readme_tag}, expected ${version} — update the docker run line in README.md"
+	else
+		note "README quickstart image pin = ${readme_tag}"
+	fi
+	;;
+esac
+
 if [ "${fail}" -ne 0 ]; then
 	echo
 	echo "Release preflight failed for ${tag}; nothing has been published."

@@ -31,7 +31,29 @@ near-api = "0.8.6"
 near-crypto = "0.37.3"
 near-jsonrpc-client = "0.22.0"
 near-sdk = { version = "5.25", default-features = false, features = ["unstable", "non-contract-usage"] }
-reqwest = { version = "0.11", features = ["json"] }
+# Feature set pinned rather than inherited, because 0.13 changed both halves
+# of what 0.11 gave us by default:
+#
+# - `default-tls` was redefined from native-tls to rustls. Taking that default
+#   links a *second* TLS stack (rustls + rustls-platform-verifier +
+#   webpki-root-certs) into a binary that already links OpenSSL for the NEAR
+#   RPC path — near-api's reqwest 0.12 pulls native-tls in regardless, so
+#   rustls here would be additive, not a replacement. Naming `native-tls`
+#   keeps the three HTTP integrations below on the same backend they have
+#   always used, and the same one near-api uses.
+# - `query` and `form` became opt-in. Only `query` is used, by the Hermes
+#   price fetch in src/oracle.rs; omitting it is a compile error.
+#
+# `charset`, `http2` and `system-proxy` were unconditional in 0.11 and are
+# spelled out only because `default-features = false` also turns them off.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "query",
+    "native-tls",
+    "charset",
+    "http2",
+    "system-proxy",
+] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0.18"
 tokio = { version = "1.51.0", features = ["full"] }

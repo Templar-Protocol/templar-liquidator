@@ -201,8 +201,16 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
         gas_cost_estimate: U128,
     ) -> LiquidatorResult<bool> {
         let total_cost = u128::from(liquidation_amount).saturating_add(gas_cost_estimate.into());
-        let min_revenue =
-            (total_cost * (10_000 + u128::from(self.min_profit_margin_bps()))) / 10_000;
+        // Ceiling division: the exact requirement is fractional in raw units
+        // and the gate must never accept a value strictly below it. Overflow
+        // in the bps scaling fails closed — a cost that large is never worth
+        // guessing about.
+        let Some(scaled) =
+            total_cost.checked_mul(10_000 + u128::from(self.min_profit_margin_bps()))
+        else {
+            return Ok(false);
+        };
+        let min_revenue = scaled.div_ceil(10_000);
         Ok(u128::from(expected_collateral_value) >= min_revenue)
     }
 
@@ -691,6 +699,31 @@ mod tests {
                     .unwrap(),
             );
         }
+    }
+
+    /// The minimum-revenue threshold must round *up*: at total cost 1100 and
+    /// a 50-bps margin the exact requirement is 1105.5, so 1105 must fail and
+    /// 1106 must pass. Floor division accepted 1105 — a sub-margin trade.
+    #[test]
+    fn min_revenue_requirement_rounds_up() {
+        let strategy = PercentageLiquidationStrategy::new(50, 50);
+        assert!(!strategy
+            .should_liquidate(U128(1000), U128(1105), U128(100))
+            .unwrap());
+        assert!(strategy
+            .should_liquidate(U128(1000), U128(1106), U128(100))
+            .unwrap());
+    }
+
+    /// A total cost large enough to overflow the bps multiplication must fail
+    /// closed (not profitable), never wrap into an arbitrary decision or
+    /// panic in debug builds.
+    #[test]
+    fn min_revenue_overflow_fails_closed() {
+        let strategy = PercentageLiquidationStrategy::new(50, 50);
+        assert!(!strategy
+            .should_liquidate(U128(u128::MAX), U128(u128::MAX), U128(u128::MAX))
+            .unwrap());
     }
 
     #[test]

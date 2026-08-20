@@ -36,7 +36,7 @@ The bot refuses to start without these three:
 | `LIQUIDATION_SCAN_INTERVAL` | `--liquidation-scan-interval` | `600` | Seconds between liquidation scan rounds (loop mode). |
 | `REGISTRY_REFRESH_INTERVAL` | `--registry-refresh-interval` | `3600` | Seconds between registry re-discovery (loop mode). |
 | `CONCURRENCY` | `--concurrency`, `-c` | `10` | Concurrency for registry deployment listing. Floored at 1 internally — `0` would stall the pipeline. |
-| `POSITION_CONCURRENCY` | `--position-concurrency` | `1` | Positions evaluated/liquidated concurrently within one market's round. `1` (the default) is fully sequential with a 1-second pause between positions — what free public RPC endpoints tolerate. Raising it drops the pause and fans evaluation out; each in-flight position costs several RPC reads (and in live mode, possibly an oracle push), so bring an RPC endpoint sized for the load. Floored at 1 internally. |
+| `POSITION_CONCURRENCY` | `--position-concurrency` | `1` | Positions evaluated/liquidated concurrently within one market's round. `1` (the default) is fully sequential with a 1-second pause between positions — what free public RPC endpoints tolerate. Raising it drops the pause and fans evaluation out; each in-flight position costs several RPC reads (and in live mode, possibly an oracle push), so bring an RPC endpoint sized for the load. Floored at 1 internally. Validate a raised value in dry-run or a staging deployment before going live: watch for RPC rate-limit errors, "Inventory no longer covers the sized amount" skips (thin inventory makes the knob buy less than it looks), and "Notification dropped" warnings. |
 
 ## Liquidation strategy
 

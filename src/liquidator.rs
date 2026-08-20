@@ -938,10 +938,12 @@ impl Liquidator {
 
                 // Minimum revenue at the strategy's actual configured margin
                 // (not a hardcoded default, which would lie whenever
-                // MIN_PROFIT_BPS is set to anything else).
-                let min_revenue_required = (total_cost
-                    * (10_000 + u128::from(self.strategy.min_profit_margin_bps())))
-                    / 10_000;
+                // MIN_PROFIT_BPS is set to anything else). Same ceiling
+                // arithmetic as the trait's provided `should_liquidate`;
+                // saturating here because this value is log-only.
+                let min_revenue_required = total_cost
+                    .saturating_mul(10_000 + u128::from(self.strategy.min_profit_margin_bps()))
+                    .div_ceil(10_000);
                 let spread_pct = spread.to_f64_lossy() * 100.0;
 
                 let message = if dry_run_mode {
@@ -1263,12 +1265,13 @@ impl Liquidator {
 
         // `attempted`/`succeeded`/`failed` are keyed off `phase() ==
         // ErrorPhase::Execution`, not off which call inside `liquidate()`
-        // raised the error — `execute_liquidation` can itself fail before
-        // submitting a transaction (e.g. the pre-submission inventory
-        // reserve maps to `InsufficientBalance`, classified `Preparation`),
-        // so "the error came from inside execute_liquidation" is NOT the
-        // same claim as "a transaction was submitted and failed"; only the
-        // `phase()` check is. `unprofitable` positions reached profitability
+        // raised the error — preparation-phase errors (serialization,
+        // strategy failures) must not count as submitted transactions, and
+        // only the `phase()` check makes that claim. (The pre-submission
+        // inventory reserve is no longer an error path at all: `liquidate()`
+        // reserves before the oracle push and returns `Skipped` when the
+        // balance no longer covers the sized amount.)
+        // `unprofitable` positions reached profitability
         // evaluation but never submission, so they count toward `candidates`
         // but not `attempted`. Scan/preparation-phase failures (`failed` minus
         // `failed_execution`) are excluded from `candidates` since it isn't

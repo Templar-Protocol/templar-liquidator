@@ -93,7 +93,11 @@ pub(crate) enum OffchainPriceSource {
 /// Composed proxy prices must pass this bot-side — the on-chain read they
 /// replace enforces the same bound on-chain.
 fn publish_time_is_fresh(publish_time_secs: i64, now_secs: i64, max_age_secs: u32) -> bool {
-    let age_secs = now_secs - publish_time_secs;
+    // Checked: a timestamp extreme enough to overflow the subtraction is
+    // upstream junk and reads as not-fresh, never a panic or wrap.
+    let Some(age_secs) = now_secs.checked_sub(publish_time_secs) else {
+        return false;
+    };
     age_secs <= i64::from(max_age_secs) && age_secs >= -(crate::redstone::MAX_FUTURE_SKEW_MS / 1000)
 }
 
@@ -1210,6 +1214,10 @@ mod tests {
         // staleness bound there is).
         assert!(publish_time_is_fresh(now + 5, now, 120));
         assert!(!publish_time_is_fresh(now + 31, now, 120));
+        // A timestamp that overflows the age subtraction is upstream junk —
+        // it must read as not-fresh, never panic or wrap.
+        assert!(!publish_time_is_fresh(i64::MIN, now, 120));
+        assert!(!publish_time_is_fresh(i64::MAX, now, 120));
     }
 
     #[test]

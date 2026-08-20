@@ -860,9 +860,22 @@ impl LiquidatorService {
 
             for (asset_key, price_id) in assets {
                 if let Some(Some(price)) = response.get(&price_id) {
-                    #[allow(clippy::cast_precision_loss)]
-                    let usd_price = (price.price.0 as f64) * 10f64.powi(price.expo);
-                    prices.insert(asset_key, usd_price);
+                    // Same validation as the liquidation conversions: an
+                    // unusable price is skipped, not inserted — an inf value
+                    // would pass the `< min_swap_value_usd` gate and trigger
+                    // a live swap the threshold was meant to block.
+                    match crate::ProfitabilityCalculator::price_to_usd(price) {
+                        Ok(usd_price) => {
+                            prices.insert(asset_key, usd_price);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                asset = %asset_key,
+                                %error,
+                                "Unusable collateral price, skipping"
+                            );
+                        }
+                    }
                 }
             }
         }

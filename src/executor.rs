@@ -202,7 +202,8 @@ impl LiquidationExecutor {
                             match self.first_failed_receipt(&operation_result).await {
                                 Ok(failed_receipt) => failed_receipt,
                                 Err(error) => {
-                                    // Inventory was reserved above; release it before
+                                    // Inventory was reserved by the caller (see the
+                                    // reservation contract above); release it before
                                     // surfacing the inspection error, like the other
                                     // failure paths.
                                     self.inventory

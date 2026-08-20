@@ -63,7 +63,7 @@ jobs:
     timeout-minutes: 5
     steps:
       # The sweep script only; taken from the base branch, not the PR.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.ref }}
           sparse-checkout: scripts/sweep-claude-review-comments.sh
@@ -104,7 +104,7 @@ jobs:
       # `git fetch origin <head-branch>` with whatever credential is in
       # .git/config. Adding `persist-credentials: false` here kills the review
       # before Claude starts.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 

@@ -8144,7 +8144,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -8462,7 +8462,7 @@ dependencies = [
  "hex",
  "near-account-id",
  "near-api",
- "near-crypto 0.34.7",
+ "near-crypto 0.37.3",
  "near-jsonrpc-client 0.22.0",
  "near-sdk",
  "reqwest 0.11.27",

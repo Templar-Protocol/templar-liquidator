@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(profitability)* Oracle prices are validated before use as divisors: a zero, negative, or non-finite price is now an error instead of dividing to infinity and saturating into a plausible-looking `Ok(u128::MAX)` collateral value that approved losing liquidations. Both conversion functions also reject results the `f64 → u128` cast would silently saturate.
+- *(oracle)* The direct-Pyth path now bounds Hermes prices by the market's freshness window, like every other pricing path — a fully-stale response comes back empty and the market is skipped, instead of pricing positions off stale data.
+- *(oracle)* A transformer read failure now surfaces as an error instead of an empty "no prices" response that hid the failure from the caller.
+
 - *(strategy)* The profitability gate's minimum-revenue threshold now rounds **up** (`div_ceil`) instead of down: a trade whose expected revenue lands exactly on the fractional requirement — e.g. 1105 against a required 1105.5 at 50 bps — is now rejected where it was previously accepted (a one-raw-unit-stricter gate). An overflowing bps multiplication now fails closed (not profitable) instead of wrapping in release builds or panicking in debug.
 
 - *(inventory)* A successful liquidation now **debits** the tracked balance (`InventoryManager::consume`) instead of merely releasing the reservation. Previously the spent amount went straight back into "available" until the next RPC refresh, so every later position in the same round sized against tokens that had already left the account and submitted transactions doomed to fail on-chain — one spurious failure (plus a Telegram alert) per remaining eligible position after each success.

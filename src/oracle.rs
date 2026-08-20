@@ -97,6 +97,25 @@ fn publish_time_is_fresh(publish_time_secs: i64, now_secs: i64, max_age_secs: u3
     age_secs <= i64::from(max_age_secs) && age_secs >= -(crate::redstone::MAX_FUTURE_SKEW_MS / 1000)
 }
 
+/// Seconds since the epoch, `0` if the clock predates it — which makes every
+/// quote look future-dated and fail freshness, the safe (fail-closed)
+/// direction for a pricing path.
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs().cast_signed())
+}
+
+/// Drops entries whose publish time falls outside the market's freshness
+/// bound. `None` entries pass through — they already mean "no price".
+fn retain_fresh(response: &mut OracleResponse, now_secs: i64, max_age_secs: u32) {
+    response.retain(|_, price| {
+        price
+            .as_ref()
+            .is_none_or(|p| publish_time_is_fresh(p.publish_time.as_secs(), now_secs, max_age_secs))
+    });
+}
+
 /// Classifies an [`OracleRequest`] as off-chain pricable, or `None` for Lazer.
 fn classify_offchain_request(request: &OracleRequest) -> Option<OffchainRequest> {
     match request {
@@ -664,14 +683,20 @@ impl OracleFetcher {
                 .await;
         }
 
-        // Standard Pyth oracle — fetch from Hermes HTTP API
-        self.fetch_pyth_prices_from_hermes(price_ids)
+        // Standard Pyth oracle — fetch from Hermes HTTP API. Hermes carries
+        // the publisher's timestamp verbatim, so the market's freshness bound
+        // is applied here, as on every other pricing path; a fully-stale
+        // response comes back empty and the caller skips the market.
+        let mut response = self
+            .fetch_pyth_prices_from_hermes(price_ids)
             .await
             .ok_or_else(|| {
                 LiquidatorError::PriceFetchError(crate::rpc::RpcError::WrongResponseKind(format!(
                     "Failed to fetch Pyth prices from Hermes for oracle {oracle}"
                 )))
-            })
+            })?;
+        retain_fresh(&mut response, unix_now_secs(), age);
+        Ok(response)
     }
 
     // ── LST oracle ───────────────────────────────────────────────────────────
@@ -720,12 +745,14 @@ impl OracleFetcher {
                     }
                 }
                 Err(e) => {
+                    // Surface the failure — an empty Ok would read as "no
+                    // prices" and hide that the transformer read broke.
                     tracing::warn!(
                         price_id = ?price_id,
                         error = %e,
-                        "Failed to get transformer, skipping market"
+                        "Failed to get transformer"
                     );
-                    return Ok(HashMap::new());
+                    return Err(LiquidatorError::PriceFetchError(e.into()));
                 }
             }
         }
@@ -898,9 +925,7 @@ impl OracleFetcher {
             .await;
 
         // Compose each feed, applying its transformer when one is configured.
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs().cast_signed());
+        let now_secs = unix_now_secs();
         let mut response = OracleResponse::new();
         for (price_id, plan) in plans {
             let (request, transform) = match plan {
@@ -1095,6 +1120,43 @@ mod tests {
             }
             other @ OffchainPriceSource::Direct(_) => panic!("expected Transformed, got {other:?}"),
         }
+    }
+
+    fn price_at(publish_secs: i64) -> pyth::Price {
+        pyth::Price {
+            price: near_sdk::json_types::I64(100),
+            conf: near_sdk::json_types::U64(0),
+            expo: -8,
+            publish_time: pyth::PythTimestamp::from_secs(publish_secs),
+        }
+    }
+
+    /// Direct-Pyth responses must be bounded by the market's freshness window
+    /// too, not just composed proxy prices: a stale entry is dropped (absent
+    /// = unpriced, failing closed at the market view), a fresh one kept, and
+    /// a `None` entry passed through unchanged.
+    #[test]
+    fn retain_fresh_drops_only_stale_entries() {
+        let now = 1_755_600_000_i64;
+        let mut response: OracleResponse = HashMap::new();
+        response.insert(PriceIdentifier([1; 32]), Some(price_at(now - 30)));
+        response.insert(PriceIdentifier([2; 32]), Some(price_at(now - 3_000)));
+        response.insert(PriceIdentifier([3; 32]), None);
+
+        retain_fresh(&mut response, now, 60);
+
+        assert!(
+            response.contains_key(&PriceIdentifier([1; 32])),
+            "fresh kept"
+        );
+        assert!(
+            !response.contains_key(&PriceIdentifier([2; 32])),
+            "stale dropped"
+        );
+        assert!(
+            response.contains_key(&PriceIdentifier([3; 32])),
+            "None passed through"
+        );
     }
 
     /// Composed Pyth prices must honor the market's freshness bound exactly

@@ -6,7 +6,10 @@
 //! - Profitability metrics
 
 use near_sdk::json_types::U128;
-use templar_common::{market::MarketConfiguration, oracle::pyth::OracleResponse};
+use templar_common::{
+    market::MarketConfiguration,
+    oracle::pyth::{self, OracleResponse},
+};
 
 use crate::{LiquidatorError, LiquidatorResult};
 
@@ -22,6 +25,38 @@ impl ProfitabilityCalculator {
     /// Default gas cost estimate in USD
     /// ~$0.05 USD for a liquidation transaction (conservative estimate for 0.01 NEAR at ~$5)
     pub const DEFAULT_GAS_COST_USD: f64 = 0.05;
+
+    /// Projects an oracle price (`mantissa × 10^expo`) to USD, rejecting
+    /// zero, negative, and non-finite values: dividing by any of them yields
+    /// inf, and `inf as u128` saturates to a plausible-looking `u128::MAX`
+    /// that sails through the profitability gate.
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn price_to_usd(price: &pyth::Price) -> LiquidatorResult<f64> {
+        let usd = (price.price.0 as f64) * 10f64.powi(price.expo);
+        if !usd.is_finite() || usd <= 0.0 {
+            return Err(LiquidatorError::StrategyError(format!(
+                "unusable oracle price: {} × 10^{}",
+                price.price.0, price.expo
+            )));
+        }
+        Ok(usd)
+    }
+
+    /// Converts an f64 amount to `u128`, rejecting values the bare cast would
+    /// silently saturate: non-finite, negative, or beyond `u128::MAX`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    pub(crate) fn checked_f64_to_u128(value: f64) -> LiquidatorResult<u128> {
+        if !value.is_finite() || value < 0.0 || value >= u128::MAX as f64 {
+            return Err(LiquidatorError::StrategyError(format!(
+                "amount not representable as u128: {value}"
+            )));
+        }
+        Ok(value as u128)
+    }
 
     /// Treats a raw borrow-asset amount as a USD figure by scaling out the
     /// asset's decimals. This is a *proxy*, valid only to the extent the
@@ -69,19 +104,9 @@ impl ProfitabilityCalculator {
                 LiquidatorError::StrategyError("Borrow asset price not found in oracle".to_string())
             })?;
 
-        // Convert price to USD value
-        // Price format: price * 10^expo
-        // Note: i64 to f64 conversion may lose precision, but acceptable for price calculations
-        #[allow(clippy::cast_precision_loss)]
-        let borrow_usd = (borrow_price.price.0 as f64) * 10f64.powi(borrow_price.expo);
-
-        // Convert gas cost from USD to borrow asset
-        // gas_cost_borrow = (gas_cost_usd / borrow_usd) * 10^borrow_decimals
+        let borrow_usd = Self::price_to_usd(borrow_price)?;
         let gas_cost_borrow = (gas_cost_usd / borrow_usd) * 10f64.powi(borrow_decimals);
-
-        // Note: f64 to u128 conversion may truncate, but result should fit within u128 range
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Ok(U128(gas_cost_borrow as u128))
+        Ok(U128(Self::checked_f64_to_u128(gas_cost_borrow)?))
     }
 
     /// Converts collateral asset amount to borrow asset units using oracle prices.
@@ -126,13 +151,8 @@ impl ProfitabilityCalculator {
                 LiquidatorError::StrategyError("Borrow asset price not found in oracle".to_string())
             })?;
 
-        // Convert prices to f64 for calculation
-        // Price format: price * 10^expo
-        // Note: i64 to f64 may lose precision, acceptable for price calculations
-        #[allow(clippy::cast_precision_loss)]
-        let collateral_usd = (collateral_price.price.0 as f64) * 10f64.powi(collateral_price.expo);
-        #[allow(clippy::cast_precision_loss)]
-        let borrow_usd = (borrow_price.price.0 as f64) * 10f64.powi(borrow_price.expo);
+        let collateral_usd = Self::price_to_usd(collateral_price)?;
+        let borrow_usd = Self::price_to_usd(borrow_price)?;
 
         // Convert collateral to borrow asset units
         // Step 1: Convert collateral to USD value
@@ -145,9 +165,7 @@ impl ProfitabilityCalculator {
         // Step 2: Convert USD value to borrow asset units
         let borrow_decimals = oracle_config.borrow_asset_decimals;
         let borrow_value = (collateral_value_usd / borrow_usd) * 10f64.powi(borrow_decimals);
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Ok(U128(borrow_value as u128))
+        Ok(U128(Self::checked_f64_to_u128(borrow_value)?))
     }
 
     /// Calculates detailed profitability metrics for a liquidation.
@@ -185,6 +203,47 @@ mod tests {
     use near_sdk::json_types::U128;
 
     use super::ProfitabilityCalculator;
+
+    fn price(mantissa: i64, expo: i32) -> templar_common::oracle::pyth::Price {
+        templar_common::oracle::pyth::Price {
+            price: near_sdk::json_types::I64(mantissa),
+            conf: near_sdk::json_types::U64(0),
+            expo,
+            publish_time: templar_common::oracle::pyth::PythTimestamp::from_secs(1_755_600_000),
+        }
+    }
+
+    /// A zero, negative, or non-finite oracle price must be an error, never a
+    /// divisor: dividing by it yields inf, and `inf as u128` saturates to a
+    /// plausible-looking u128::MAX that sails through the profitability gate.
+    #[test]
+    fn price_to_usd_rejects_unusable_prices() {
+        assert!(ProfitabilityCalculator::price_to_usd(&price(0, -8)).is_err());
+        assert!(ProfitabilityCalculator::price_to_usd(&price(-100, -8)).is_err());
+        // Extreme exponent overflows f64 to infinity.
+        assert!(ProfitabilityCalculator::price_to_usd(&price(i64::MAX, 300)).is_err());
+
+        let usd = ProfitabilityCalculator::price_to_usd(&price(6_435_012_000_000, -8)).unwrap();
+        assert!((usd - 64_350.12).abs() < 1e-6);
+    }
+
+    /// The f64→u128 cast saturates instead of failing; conversions must catch
+    /// non-finite, negative, and out-of-range values before the cast.
+    #[test]
+    fn checked_f64_to_u128_rejects_unrepresentable_values() {
+        assert!(ProfitabilityCalculator::checked_f64_to_u128(f64::INFINITY).is_err());
+        assert!(ProfitabilityCalculator::checked_f64_to_u128(f64::NAN).is_err());
+        assert!(ProfitabilityCalculator::checked_f64_to_u128(-1.0).is_err());
+        assert!(ProfitabilityCalculator::checked_f64_to_u128(3.5e38).is_err());
+        assert_eq!(
+            ProfitabilityCalculator::checked_f64_to_u128(1_000_000.9).unwrap(),
+            1_000_000
+        );
+        assert_eq!(
+            ProfitabilityCalculator::checked_f64_to_u128(0.0).unwrap(),
+            0
+        );
+    }
 
     /// The JIT-swap USD proxy must scale by the market's actual borrow-asset
     /// decimals — a hardcoded 10^6 is off by 10^12 for an 18-decimal asset.

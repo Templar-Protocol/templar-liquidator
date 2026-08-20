@@ -52,6 +52,28 @@ There's no OpenAPI/codegen step in this repo (that's a backend-monorepo pattern,
 
 Releases are tags (`vX.Y.Z`). Pushing one triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds and pushes `ghcr.io/templar-protocol/templar-liquidator:<tag>` (plus `:<major>.<minor>` and `:latest`) and cuts a GitHub Release. See [CHANGELOG.md](CHANGELOG.md) for the format each release entry should follow.
 
+To cut one:
+
+```bash
+# 1. Bump the version and regenerate the lock
+#    (edit Cargo.toml's `version`, then:)
+cargo update -p templar-liquidator
+
+# 2. Move CHANGELOG.md's [Unreleased] content into a `## [X.Y.Z] - YYYY-MM-DD` section
+
+# 3. Check it all agrees BEFORE tagging — this is what CI will run
+./scripts/check-release.sh vX.Y.Z
+
+# 4. Tag and push
+git tag vX.Y.Z && git push origin vX.Y.Z
+```
+
+The `preflight` job runs `check-release.sh` again and blocks the release if the tag, `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` disagree — each of those mismatches otherwise fails silently, producing an image labelled with a version its binary does not report.
+
+`:latest` only moves for non-prerelease tags, so `vX.Y.Z-rc.1` publishes `X.Y.Z-rc.1` without repointing `:latest` (or `:<major>.<minor>`) at a release candidate.
+
+Note that a GHCR package is **private by default even for a public repo** — after the first release, make the package public once, or the `docker pull` in the README will fail for everyone else.
+
 ## License
 
 By contributing, you agree your contribution is licensed under this repo's [GPL-3.0-only license](LICENSE).

@@ -9,7 +9,19 @@ permissions:
   packages: write
 
 jobs:
+  # Fail the release BEFORE anything is published. Every check in the script
+  # guards a failure that is silent rather than loud — a mislabelled image, a
+  # stale lock that only breaks inside the Docker build, a release with no
+  # changelog entry. Cheap, and it runs first because `image` needs it.
+  # Runnable locally: ./scripts/check-release.sh vX.Y.Z
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: ./scripts/check-release.sh "${GITHUB_REF_NAME}"
+
   image:
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -22,10 +34,16 @@ jobs:
         id: meta
         with:
           images: ghcr.io/templar-protocol/templar-liquidator
+          # `latest=auto` only moves :latest for a non-prerelease semver tag —
+          # the previous `type=raw,value=latest` moved it unconditionally, so
+          # tagging v1.0.0-rc.1 would have repointed :latest, and README's
+          # quickstart, at a release candidate. The {{major}}.{{minor}} tag is
+          # guarded for the same reason: metadata-action does not exclude
+          # prereleases from it on its own.
+          flavor: latest=auto
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .

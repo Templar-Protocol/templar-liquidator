@@ -286,10 +286,9 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
     assert_eq!(outcome, LiquidationOutcome::Liquidated);
     assert!(swap_issue.is_none(), "Hold strategy should not swap");
 
-    // The executor must have *consumed* the reservation: tracked total and
-    // available balances both drop by the spent amount and nothing stays
-    // reserved. (A bare release here would leave total/available unchanged —
-    // the stale-inventory bug this PR fixes.)
+    // The executor must have *consumed* the reservation: total and available
+    // both drop by the spent amount and nothing stays reserved (a bare
+    // release would leave them unchanged).
     {
         let inv = executor.inventory().read().await;
         let spent = u128::from(liquidation_amount);

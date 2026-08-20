@@ -1,16 +1,14 @@
 //! RedStone price API client (scan-side, off-chain).
 //!
 //! Fetches USD prices from the RedStone public API
-//! (<https://api.redstone.finance>), keyed by asset symbol — the same source
-//! and endpoint templar-backend's `pkg/redstone` reads. Used only to compose
+//! (<https://api.redstone.finance>), keyed by asset symbol. Used only to compose
 //! proxy-oracle prices for scan-time position evaluation; execution-time
 //! pricing still goes through the on-chain oracle push in
 //! [`crate::oracle::OracleFetcher::update_onchain_prices`], so nothing here
 //! can bypass on-chain freshness or circuit-breaker state where funds move.
 //!
-//! The multi-symbol form (`/prices?symbols=A,B&provider=redstone`) is the only
-//! one used: the single-symbol form serves a frozen quote upstream (verified
-//! by templar-backend 2026-08-15) and must not be reintroduced.
+//! Only the multi-symbol form (`/prices?symbols=A,B&provider=redstone`) is
+//! used: the single-symbol form serves a frozen quote upstream — never use it.
 
 use std::collections::HashMap;
 

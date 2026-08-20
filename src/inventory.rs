@@ -422,12 +422,9 @@ impl InventoryManager {
     }
 
     /// Records that a reserved amount was actually spent on-chain: debits the
-    /// tracked balance and clears the reservation in one step.
-    ///
-    /// Use this — not [`release`](Self::release) — after a liquidation lands.
-    /// Releasing alone restores the amount to "available" even though the
-    /// tokens have left the account, so every later sizing decision until the
-    /// next RPC refresh would run against inventory that no longer exists.
+    /// tracked balance and clears the reservation in one step. Use this — not
+    /// [`release`](Self::release) — after a liquidation lands; releasing alone
+    /// would count spent tokens as available until the next RPC refresh.
     pub fn consume(&mut self, asset: &FungibleAsset<BorrowAsset>, amount: BorrowAssetAmount) {
         if let Some(entry) = self.inventory.get_mut(asset) {
             entry.consume(amount);
@@ -701,12 +698,9 @@ mod tests {
         assert_eq!(inventory.get_reserved_balance(&asset).0, 200);
     }
 
-    /// A successful liquidation spends the reserved tokens: `consume` must
-    /// debit the balance *and* clear the reservation together. Releasing the
-    /// reservation alone (the pre-fix behavior) leaves the in-memory balance
-    /// at its pre-liquidation level until the next RPC refresh, so later
-    /// positions in the same round size against tokens that already left the
-    /// account and submit transactions doomed to fail on-chain.
+    /// `consume` must debit the balance *and* clear the reservation together —
+    /// releasing alone would count spent tokens as available until the next
+    /// RPC refresh.
     #[test]
     fn test_consume_debits_balance_and_clears_reservation() {
         let client = create_test_client();

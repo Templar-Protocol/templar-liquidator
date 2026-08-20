@@ -7,11 +7,6 @@ name: Claude PR Review
 # subscription token in the CLAUDE_CODE_OAUTH_TOKEN repository secret. The
 # check never blocks a merge.
 #
-# Adapted from templar-backend's workflow of the same name. Differences that
-# matter here: this repo has a single `main` branch (the backend gates on
-# `dev` and deliberately skips its dev -> main release PRs), and the domain
-# hazards below are this bot's, not the backend's.
-#
 # The review instructions live in this file rather than the code-review
 # marketplace plugin: that plugin stops when Claude has already commented on a
 # PR, which would make every re-review after the first one a no-op. The prompt
@@ -295,7 +290,7 @@ jobs:
                - Correctness: logic that returns a wrong result, breaks an edge case, or regresses
                  existing behaviour
                - Security and data exposure. This bot holds a signer key and moves real inventory;
-                 it is NOT non-custodial like the rest of the Templar backend.
+                 it is NOT non-custodial.
                - Domain hazards specific to this repo:
                  THE SINGLE-REV RULE — any templar-* `rev =` in Cargo.toml changed without ALL the
                    others (and sandbox.yml's CONTRACTS_REV) moving to the same rev;

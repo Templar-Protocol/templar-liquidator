@@ -46,7 +46,7 @@ Documented, not implemented. This is the roadmap of things a fork or a future re
 
 ## Build and dependencies
 
-**cargo-chef Docker layer caching.** The current [`Dockerfile`](../Dockerfile) copies `Cargo.toml`/`Cargo.lock`/`src` and runs `cargo build --release` in one layer; any source change invalidates that layer and triggers a full from-scratch dependency compile (there's no separate dependency-only layer to reuse). `cargo-chef` — already used for this exact reason in the sibling `blockchain-gateway` service — would cache the dependency-compilation layer independently of source changes.
+**cargo-chef Docker layer caching.** The current [`Dockerfile`](../Dockerfile) copies `Cargo.toml`/`Cargo.lock`/`src` and runs `cargo build --release` in one layer; any source change invalidates that layer and triggers a full from-scratch dependency compile (there's no separate dependency-only layer to reuse). `cargo-chef` would cache the dependency-compilation layer independently of source changes.
 
 **`reqwest` 0.11 → 0.12.** Tracked in [`deny.toml`](../deny.toml) as the real fix for the `rustls-pemfile` unmaintained-advisory allowance: `reqwest` 0.12 drops `rustls-pemfile` entirely. No functional motivation beyond that today.
 

@@ -1275,8 +1275,7 @@ impl SwapProvider for OneClickSwap {
         //
         // At least ONE asset should be NEP-245 (Intents) for 1-Click to be useful.
         // If both are direct NEP-141 on NEAR, an on-chain AMM would be the
-        // better venue — no such provider ships (see swap/mod.rs on why the
-        // Ref Finance one was removed), so those pairs go unswapped.
+        // better venue; no such provider ships, so those pairs go unswapped.
         let from_is_nep245 = from_asset.clone().into_nep245().is_some();
         let to_is_nep245 = to_asset.clone().into_nep245().is_some();
 

@@ -575,15 +575,10 @@ impl Liquidator {
         )
     }
 
-    /// Gates a liquidation attempt on both oracle conversions succeeding.
-    ///
-    /// Fail-closed policy: if either the collateral-value or gas-cost
-    /// conversion errors (a price missing from the oracle response), the
-    /// position must be skipped this round. The tempting fallbacks are both
-    /// wrong-unit numbers — the raw collateral amount is denominated in
-    /// collateral units, not borrow units, and any constant gas figure is
-    /// blind to the borrow asset's decimals — and feeding either into the
-    /// profitability gate turns it into noise.
+    /// Gates a liquidation attempt on both oracle conversions succeeding:
+    /// no conversions, no attempt. Any fallback here is a wrong-unit number
+    /// (raw collateral units, or a decimals-blind gas constant) that would
+    /// turn the profitability gate into noise.
     fn require_conversions(
         expected_collateral_value: LiquidatorResult<U128>,
         gas_cost: LiquidatorResult<U128>,
@@ -976,13 +971,10 @@ impl Liquidator {
                 return Ok(LiquidationOutcome::Unprofitable);
             }
 
-            // Reserve inventory BEFORE the (paid) oracle push below, so a
-            // position that loses an inventory race under POSITION_CONCURRENCY
-            // fails here — before spending any gas — rather than after paying
-            // for its own price update. Sizing above ran against a snapshot;
-            // this reserve is the atomic commitment. The executor releases the
-            // reservation on failure and consumes it on success; dry-run
-            // touches no inventory on either side.
+            // Reserve BEFORE the paid oracle push: a position that loses an
+            // inventory race under POSITION_CONCURRENCY must fail before
+            // spending gas. The executor releases the reservation on failure
+            // and consumes it on success; dry-run touches no inventory.
             if !dry_run {
                 let reserve_result = self.executor.inventory().write().await.reserve(
                     &self.market_config.borrow_asset,
@@ -1210,10 +1202,10 @@ impl Liquidator {
                     let result = self
                         .liquidate(account.clone(), position, oracle_response)
                         .await;
-                    // Sequential mode keeps the historical 1s pacing between
-                    // positions (skipped after the last one). Concurrent mode
-                    // drops it — the operator raising the knob brings an RPC
-                    // endpoint sized for the load.
+                    // Sequential mode paces positions 1s apart (skipped after
+                    // the last one); concurrent mode drops the pause — the
+                    // operator raising the knob brings an RPC endpoint sized
+                    // for the load.
                     if concurrency == 1 && i < total - 1 {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
@@ -1268,10 +1260,7 @@ impl Liquidator {
         // ErrorPhase::Execution`, not off which call inside `liquidate()`
         // raised the error — preparation-phase errors (serialization,
         // strategy failures) must not count as submitted transactions, and
-        // only the `phase()` check makes that claim. (The pre-submission
-        // inventory reserve is no longer an error path at all: `liquidate()`
-        // reserves before the oracle push and returns `Skipped` when the
-        // balance no longer covers the sized amount.)
+        // only the `phase()` check makes that claim.
         // `unprofitable` positions reached profitability
         // evaluation but never submission, so they count toward `candidates`
         // but not `attempted`. Scan/preparation-phase failures (`failed` minus
@@ -1407,11 +1396,8 @@ mod tests {
 
     #[test]
     fn require_conversions_fails_closed_when_either_conversion_errors() {
-        // The pre-fix behavior fell back to `collateral_amount` (collateral
-        // units!) for the expected value and a decimals-blind constant for
-        // gas when a conversion failed — feeding wrong-unit numbers into the
-        // profitability gate. The policy is fail-closed: no conversions, no
-        // liquidation attempt.
+        // Fail-closed: no conversions, no liquidation attempt. Any fallback
+        // would be a wrong-unit number fed into the profitability gate.
         let err = || {
             Err(LiquidatorError::StrategyError(
                 "price not found in oracle".to_string(),

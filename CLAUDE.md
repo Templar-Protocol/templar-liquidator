@@ -8,12 +8,12 @@ directly from that inventory, and receives their collateral at a discount in
 return. Received collateral can optionally be swapped back into borrow assets
 so the same inventory is available for the next round.
 
-**This bot is NOT non-custodial.** Unlike the rest of the Templar backend, it
-holds a signer key (`SIGNER_ACCOUNT_ID` / `SIGNER_KEY`) and submits transactions
-itself — that is the point of a liquidation bot. Treat the signer key with the
-weight that implies: it moves real inventory, and the bot is expected to run
-unsupervised. Dry-run is the default for exactly this reason (see Safety
-invariants below).
+**This bot is NOT non-custodial.** Unlike the Templar smart contracts it
+trades against, it holds a signer key (`SIGNER_ACCOUNT_ID` / `SIGNER_KEY`)
+and submits transactions itself — that is the point of a liquidation bot.
+Treat the signer key with the weight that implies: it moves real inventory,
+and the bot is expected to run unsupervised. Dry-run is the default for
+exactly this reason (see Safety invariants below).
 
 This repo is published as a **public reference implementation**. The expected
 way to adapt it to different parameters or a different venue is to fork and
@@ -60,15 +60,12 @@ One line per file in `src/`:
   swap.
 - `inventory.rs` — `InventoryManager`: tracks available balances across all
   markets and assets so liquidations only proceed when inventory covers them.
-- `oracle.rs` — price fetching across oracle types the bot reads: Pyth
-  (Hermes HTTP), LST feeds with transformers, and proxy-oracle feeds —
-  composed off-chain from each feed's configured source (Hermes / RedStone
-  API + transformer view calls) at scan time, with the proxy's on-chain
-  cache as fallback. Execution-time pricing still goes through the on-chain
-  push (`update_onchain_prices`).
-- `redstone.rs` — RedStone public price API client (`api.redstone.finance`,
-  the same source templar-backend's `pkg/redstone` reads), used only for
-  scan-side proxy price composition.
+- `oracle.rs` — price fetching: Pyth via Hermes, LST feeds via
+  transformers, proxy feeds composed off-chain from their source configs
+  (on-chain cache as fallback). Execution-time pricing still goes through
+  the on-chain push (`update_onchain_prices`).
+- `redstone.rs` — RedStone public price API client (`api.redstone.finance`),
+  used only for scan-side proxy price composition.
 - `swap/mod.rs` — `SwapProvider` trait, the swap-provider extension seam.
 - `swap/provider.rs` — `SwapProviderImpl`, a concrete enum wrapping the
   shipped provider for dynamic dispatch (the trait itself has generic

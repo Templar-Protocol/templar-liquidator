@@ -576,7 +576,7 @@ mod tests {
     fn with_limits_sets_the_inflight_capacity() {
         let notifier = Notifier::with_limits(None, Duration::from_secs(60), 32);
         assert_eq!(notifier.max_inflight(), 32);
-        // The plain constructors keep the historical default.
+        // The plain constructors keep the default.
         assert_eq!(
             Notifier::new(None).max_inflight(),
             MAX_INFLIGHT_NOTIFICATIONS

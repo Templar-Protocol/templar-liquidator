@@ -239,8 +239,7 @@ pub struct Args {
     /// RedStone gateway URL. Currently unused: scan-side RedStone prices come
     /// from the public price API (`--redstone-api-url`), and on-chain pushes
     /// go through the proxy contract's own `update_prices` flow. Retained so
-    /// existing deployments passing it don't break; removal is tracked with
-    /// the other dead knobs in the architecture review.
+    /// existing deployments passing it don't break.
     #[arg(
         long,
         env = "REDSTONE_GATEWAY_URL",
@@ -249,8 +248,8 @@ pub struct Args {
     pub redstone_gateway_url: String,
 
     /// RedStone public price API, used to compose proxy-oracle prices
-    /// off-chain at scan time (same source templar-backend reads). Scan-side
-    /// only — execution still prices through the on-chain oracle.
+    /// off-chain at scan time. Scan-side only — execution still prices
+    /// through the on-chain oracle.
     #[arg(
         long,
         env = "REDSTONE_API_URL",
@@ -600,9 +599,8 @@ impl Args {
         let failure_cooldown =
             std::time::Duration::from_secs(self.failure_notification_cooldown_hours * 3600);
         // A concurrent round can fire up to two notifications per in-flight
-        // position (liquidation + swap issue). Scale the notifier's in-flight
-        // cap with the knob — at the default cap the busiest rounds would
-        // silently drop alerts once the inter-position pause is gone.
+        // position (liquidation + swap issue); scale the notifier's cap with
+        // the knob so busy rounds don't silently drop alerts.
         let notification_capacity = crate::notifier::MAX_INFLIGHT_NOTIFICATIONS
             .max(self.position_concurrency.max(1).saturating_mul(2));
         let notifier = Arc::new(Notifier::with_limits(
@@ -1184,7 +1182,8 @@ mod tests {
     }
 
     /// Scan-side proxy-price composition reads the RedStone public API. The
-    /// default must be the same endpoint templar-backend's pkg/redstone uses.
+    /// default must stay on the public price API (api.redstone.finance) —
+    /// the data-package gateways serve a different, signed format.
     #[test]
     fn redstone_api_url_defaults_to_the_public_api() {
         assert_eq!(

@@ -7,9 +7,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/Templar-Protocol/templar-liquidator"
 description = "Inventory-based liquidation bot for Templar Protocol lending markets on NEAR"
 
-# Standalone crate: stop Cargo from walking up to the backend monorepo's
-# workspace root (/workspace/Cargo.toml) while this checkout lives nested
-# under it as a worktree. Harmless once extracted to its own repo.
+# Standalone crate: an empty workspace table stops Cargo from adopting any
+# enclosing workspace, wherever this repo happens to be checked out.
 [workspace]
 
 [lib]
@@ -62,8 +61,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5"
 
 # ── Templar crates: ONE uniform rev for every crate (mixed revs make Cargo
-# resolve two contracts checkouts whose types don't unify — same rule as the
-# backend's blockchain-gateway). Bump ALL revs together, never one alone.
+# resolve two contracts checkouts whose types don't unify). Bump ALL revs
+# together, never one alone.
 templar-common = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0", features = ["rpc"] }
 templar-gateway-client = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0", features = ["clap"] }
 templar-gateway-core = { git = "https://github.com/Templar-Protocol/contracts", rev = "8f8fe1d1a057756f71438abc75d7b3c688b282f0" }

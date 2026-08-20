@@ -18,10 +18,8 @@ use super::{oneclick::OneClickSwap, SwapProvider};
 /// Concrete swap provider implementation that can be used for dynamic dispatch.
 ///
 /// Wraps every shipped swap provider and implements `SwapProvider` by
-/// forwarding. Currently single-variant on purpose: Ref Finance was removed
-/// (its `min_amount_out` carried no price or decimals conversion, so it
-/// offered no effective slippage protection), and the enum shape was kept so
-/// third-party venues slot in as new variants without touching the trait.
+/// forwarding. Deliberately an enum even while single-variant: third-party
+/// venues slot in as new variants without touching the trait.
 #[derive(Debug, Clone)]
 pub enum SwapProviderImpl {
     /// 1-Click API provider for NEP-245 cross-chain swaps

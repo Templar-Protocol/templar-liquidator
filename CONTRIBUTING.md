@@ -77,6 +77,41 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 Step 4 is not optional bookkeeping. `check-release.sh` reads the **working tree**, while the `preflight` job reads the **tagged commit** — so bumping the files without committing them lets step 3 pass locally and `preflight` fail afterwards, once `vX.Y.Z` is already on origin and has to be deleted remotely before you can retry. Tagging a merged commit also keeps the release reachable from `main`; `git push origin vX.Y.Z` pushes the tag *plus its objects*, so an unmerged commit would publish fine and then be unreachable from any branch.
 
+### Release notes
+
+`release.yml` publishes with auto-generated notes (the commit list). That is the
+**starting point, not the deliverable** — rewrite the release body by hand
+afterwards, in the same house style as
+[templar-backend's releases](https://github.com/Templar-Protocol/templar-backend/releases):
+
+```
+<Patch|Minor> release: one paragraph, no heading, saying what changed in plain
+language and what it means for someone running this. Not a list.
+
+## Features        (minor releases; omit if none)
+## Fixes           (omit if none)
+## Security        (omit if none)
+## Dependencies    (omit if none)
+## Infrastructure  (CI, deploy, tooling; omit if none)
+## Upgrade notes   (what an operator must do — include "nothing to do" cases)
+
+**Full Changelog**: <keep the auto-generated compare link>
+```
+
+Bullets read `- **<area> — <what changed> (#PR)** — <mechanism, consequence, and
+what was actually done>`. The area is a component name (`analytics`,
+`gateway`, `dev container`) or omitted when cross-cutting. Explain the failure
+mode and its consequence, not just the change: "CORS fails closed and silently:
+the browser refuses the response and the site looks like the API is down" is the
+register to aim for.
+
+Two conventions worth keeping:
+
+- Distinguish **verified by running** from **tested**. Where a change was
+  exercised against live infrastructure, say so and give the numbers.
+- `## Upgrade notes` is for the operator, so state the no-op cases too — "no
+  migrations, no new environment variables" is useful information.
+
 The `preflight` job runs `check-release.sh` again and blocks the release if the tag, `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` disagree — each of those mismatches otherwise fails silently, producing an image labelled with a version its binary does not report.
 
 `:latest` only moves for non-prerelease tags, so `vX.Y.Z-rc.1` publishes `X.Y.Z-rc.1` without repointing `:latest` (or `:<major>.<minor>`) at a release candidate.

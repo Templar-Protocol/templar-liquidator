@@ -13,8 +13,16 @@ Fastest path — pull the released image and run it with your own `.env`:
 ```bash
 cp .env.example .env
 nano .env  # fill in the three required vars below
+docker login ghcr.io       # see the note below — the package is not yet public
 docker run --env-file .env ghcr.io/templar-protocol/templar-liquidator:latest
 ```
+
+> **The published image is not anonymously pullable yet.** GHCR packages are
+> private by default, and this organisation currently restricts making them
+> public, so `docker pull` needs `docker login ghcr.io` with a personal access
+> token carrying `read:packages`. Building from source with Compose (below)
+> needs no login and is unaffected. This note goes away once the package is
+> made public.
 
 Or build and run locally with Docker Compose:
 

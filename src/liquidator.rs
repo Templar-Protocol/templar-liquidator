@@ -1211,8 +1211,19 @@ impl Liquidator {
             .get_oracle_prices(oracle_account.clone(), &price_ids, price_max_age)
             .await?;
 
-        if oracle_response.is_empty() {
-            tracing::warn!("Oracle returned no prices, skipping market");
+        // The scan needs the full feed pair; a partial response would reach
+        // every position's status check and fail each with "Missing price"
+        // instead of skipping the market once.
+        if !crate::oracle::covers_all(&oracle_response, &price_ids) {
+            let missing: Vec<String> = price_ids
+                .iter()
+                .filter(|id| !matches!(oracle_response.get(*id), Some(Some(_))))
+                .map(|id| hex::encode(id.0))
+                .collect();
+            tracing::warn!(
+                missing = ?missing,
+                "Oracle prices missing or stale, skipping market"
+            );
             return Ok(RoundSummary::default());
         }
 

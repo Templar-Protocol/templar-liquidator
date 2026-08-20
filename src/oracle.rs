@@ -108,10 +108,13 @@ fn unix_now_secs() -> i64 {
 
 /// True when every requested feed has a `Some` price in the response.
 ///
-/// A partial response is worse than an empty one for a direct-Pyth market:
-/// with no fallback path, it reaches per-position status checks and fails
-/// each one with "Missing price" instead of skipping the market once.
-fn covers_all(response: &OracleResponse, price_ids: &[PriceIdentifier]) -> bool {
+/// Deliberately a caller-side decision, not enforced inside
+/// [`OracleFetcher::get_oracle_prices`]: the market scan needs its full feed
+/// pair and gates on this (a partial pair reaches per-position status checks
+/// and fails each with "Missing price"), while batch callers pricing many
+/// unrelated feeds tolerate partial responses per-asset — one stale feed must
+/// not blank the rest of the batch.
+pub(crate) fn covers_all(response: &OracleResponse, price_ids: &[PriceIdentifier]) -> bool {
     price_ids
         .iter()
         .all(|id| matches!(response.get(id), Some(Some(_))))
@@ -707,13 +710,6 @@ impl OracleFetcher {
                 )))
             })?;
         retain_fresh(&mut response, unix_now_secs(), age);
-        if !covers_all(&response, price_ids) {
-            tracing::warn!(
-                %oracle,
-                "Stale or missing Pyth feed(s); treating the market as unpriced"
-            );
-            return Ok(OracleResponse::new());
-        }
         Ok(response)
     }
 

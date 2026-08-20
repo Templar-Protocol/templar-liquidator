@@ -31,7 +31,7 @@ near-api = "0.8.6"
 near-crypto = "0.37.3"
 near-jsonrpc-client = "0.22.0"
 near-sdk = { version = "5.25", default-features = false, features = ["unstable", "non-contract-usage"] }
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0.18"
 tokio = { version = "1.51.0", features = ["full"] }

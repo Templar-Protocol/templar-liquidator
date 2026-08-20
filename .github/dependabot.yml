@@ -1,0 +1,110 @@
+# Dependabot configuration.
+#
+# Two repo invariants shape this file, and both are enforced by ignore rules
+# rather than by reviewer vigilance:
+#
+#   1. THE SINGLE-REV RULE (see CLAUDE.md). Every templar-* git dependency
+#      must stay pinned to the SAME `rev`. Dependabot updates cargo git
+#      dependencies one crate at a time, which is exactly the drift the rule
+#      forbids — two checkouts of the same upstream repo, and types that look
+#      identical failing to unify with confusing "expected X, found X" errors.
+#      So every templar-* crate is ignored here and bumped by hand, all
+#      together, along with sandbox.yml's CONTRACTS_REV.
+#
+#   2. The Rust version is pinned in THREE places that must move together:
+#      Cargo.toml `rust-version`, rust-toolchain.toml `channel`, and the
+#      Dockerfile builder's `FROM rust:X-bookworm`. A Dependabot PR bumping
+#      only the Dockerfile would desync them, so the docker ecosystem below
+#      takes digest refreshes (which are security-relevant and safe) but not
+#      version bumps.
+version: 2
+updates:
+  # ── Cargo ────────────────────────────────────────────
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    ignore:
+      # THE SINGLE-REV RULE — see the header. Bump these by hand, together.
+      - dependency-name: "templar-*"
+      - dependency-name: "test-utils"
+    groups:
+      # One PR for the long tail of compatible updates; anything major still
+      # arrives on its own so it gets read properly.
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # ── GitHub Actions ───────────────────────────────────
+  # Every action in this repo is SHA-pinned with a `# vN` comment; Dependabot
+  # maintains both halves. Grouped into one weekly PR so a bump to a
+  # credential-holding action (docker/login-action, claude-code-action) is
+  # never stuck behind unrelated ones competing for the PR limit.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # ── Docker ───────────────────────────────────────────
+  # Digest refreshes only. A version bump here would break the three-way Rust
+  # pin described in the header; do those by hand across all three files.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "deps(docker)"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+
+  # ── Dev container ────────────────────────────────────
+  # This is the ecosystem that would have caught the bug fixed in #13: the
+  # docker-in-docker feature sat pinned at 1.0.9 (Nov 2022) while its current
+  # major moved to 4.x, and the stale install script broke every arm64
+  # rebuild. Features are pinned to exact versions on purpose, so without
+  # Dependabot watching them nothing ages them forward.
+  - package-ecosystem: "devcontainers"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "deps(devcontainer)"
+
+  # ── Terraform ────────────────────────────────────────
+  - package-ecosystem: "terraform"
+    directory: "/terraform"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "infra"

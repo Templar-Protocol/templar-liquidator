@@ -1,0 +1,72 @@
+name: Dev container
+
+# Builds the dev container image on BOTH architectures whenever its definition
+# changes.
+#
+# This exists because of a real failure: the docker-in-docker feature sat
+# pinned at 1.0.9 (Nov 2022) whose install script runs `pip3 install --user
+# pipx` against the system Python on any non-x86_64 host. Debian bookworm
+# refuses that under PEP 668, so every Apple Silicon rebuild died while amd64
+# hosts stayed green — and nothing in CI ran the dev container at all, on
+# either architecture. An arm64 job would have caught it the day it broke.
+# Free arm64 runners are available because this repository is public.
+#
+# Deliberately NOT part of ci.yml's `CI Summary` gate: that gate treats a
+# skipped job as a failure precisely because nothing there is path-filtered,
+# and this workflow is path-filtered. Keeping it separate preserves that
+# invariant. It is advisory — wire it into branch protection if you want it
+# blocking.
+#
+# `devcontainer build` only builds the image (base + features). It does not run
+# postCreateCommand, so this does not compile near-cli-rs — that step is
+# non-fatal by design and takes minutes. This gate answers "does the container
+# build", which is the failure it was written for.
+
+on:
+  pull_request:
+    paths:
+      - ".devcontainer/**"
+      - ".github/workflows/devcontainer.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".devcontainer/**"
+      - ".github/workflows/devcontainer.yml"
+  # Feature versions are pinned, so they only rot with time rather than with
+  # commits — a monthly run surfaces an upstream break before someone hits it
+  # mid-task on a rebuild.
+  schedule:
+    - cron: "23 5 1 * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install the devcontainer CLI
+        run: npm install -g @devcontainers/cli
+
+      - name: Build
+        run: devcontainer build --workspace-folder .
+
+      # The lock file pins each feature to a content digest. If a build
+      # resolves something the committed lock does not describe, the pin has
+      # drifted and the commit no longer says what will actually be installed.
+      - name: Check devcontainer-lock.json is up to date
+        run: |
+          if ! git diff --exit-code -- .devcontainer/devcontainer-lock.json; then
+            echo "::error::devcontainer-lock.json changed during the build — commit the updated lock file."
+            exit 1
+          fi

@@ -45,6 +45,34 @@ jobs:
       - run: terraform -chdir=terraform init -backend=false
       - run: terraform -chdir=terraform validate
 
+  # Cross-file pins that no compiler or linter can catch on its own: THE
+  # SINGLE-REV RULE and the three-way Rust version pin. Both fail in ways that
+  # do not name themselves (see the script's header), so they get their own
+  # gate. Runnable locally: ./scripts/check-repo-invariants.sh
+  invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: ./scripts/check-repo-invariants.sh
+
+  # The repo ships operator-facing shell — deploy.sh, init-server.sh, the
+  # run-*.sh wrappers, the Loki/Grafana installer — that people are told to
+  # read and run against their own servers, plus the dev container's
+  # post-create. Nothing was linting any of it.
+  #
+  # Gated at `error` rather than shellcheck's default, deliberately. At
+  # `warning` the existing scripts produce 6 findings and at `info` 34, and
+  # the loudest of them are intentional: deploy.sh's unquoted `<< EOF`
+  # heredocs (SC2087) interpolate local variables into the script that runs on
+  # the remote host, which is the whole point of those blocks. Turning this on
+  # at `error` gates real bugs from day one instead of landing red and being
+  # ignored. Tighten it by fixing the warnings first, then raising the level.
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: shellcheck --severity=error scripts/*.sh .devcontainer/*.sh
+
   # ── CI Summary ──────────────────────────────────────
   # Aggregate gate: the single required status check on main. Requiring this
   # rather than each job by name means adding or renaming a job never needs a
@@ -64,6 +92,8 @@ jobs:
       - deny
       - docker
       - terraform
+      - invariants
+      - shellcheck
     steps:
       - name: Check all jobs
         run: |
@@ -72,6 +102,8 @@ jobs:
             [deny]="${{ needs.deny.result }}"
             [docker]="${{ needs.docker.result }}"
             [terraform]="${{ needs.terraform.result }}"
+            [invariants]="${{ needs.invariants.result }}"
+            [shellcheck]="${{ needs.shellcheck.result }}"
           )
 
           echo "CI pipeline status:"

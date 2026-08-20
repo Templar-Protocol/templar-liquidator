@@ -2,9 +2,17 @@
 //!
 //! Handles fetching prices from various oracle types including:
 //! - Pyth oracles (via Hermes HTTP API)
-//! - RedStone-backed feeds through proxy oracle cache reads
 //! - LST oracles with price transformers
-//! - Proxy oracles with cached on-chain aggregation
+//! - Proxy oracles — composed off-chain at scan time from each feed's
+//!   configured source (Hermes for Pyth sources, the RedStone public price
+//!   API via [`crate::redstone`] for RedStone sources, transformer inputs by
+//!   free view call), with the proxy's on-chain price cache as fallback for
+//!   anything not composable off-chain (e.g. Lazer sources). Every composed
+//!   price is bounded by the market's freshness window before use.
+//!
+//! Execution-time pricing is separate and unchanged: the market contract
+//! reads its own on-chain oracle, which this module refreshes via
+//! [`OracleFetcher::update_onchain_prices`] before a live liquidation.
 
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
@@ -78,6 +86,22 @@ pub(crate) enum OffchainPriceSource {
     },
 }
 
+/// Reports whether a quote's publish time is usable under the market's
+/// freshness bound: no older than `max_age_secs`, and no further ahead of
+/// `now_secs` than ordinary clock skew explains (the same allowance
+/// [`crate::redstone::MAX_FUTURE_SKEW_MS`] gives RedStone entries — a
+/// future-dated quote has negative age and would pass every staleness bound
+/// there is).
+///
+/// Composed proxy prices must pass this bot-side because the on-chain read
+/// they replace (`ListEmaPricesNoOlderThan { age }`) enforced it on-chain —
+/// a composed feed that skipped the check would price positions off stale
+/// data the fail-closed design promises to reject.
+fn publish_time_is_fresh(publish_time_secs: i64, now_secs: i64, max_age_secs: u32) -> bool {
+    let age_secs = now_secs - publish_time_secs;
+    age_secs <= i64::from(max_age_secs) && age_secs >= -(crate::redstone::MAX_FUTURE_SKEW_MS / 1000)
+}
+
 /// Classifies an [`OracleRequest`] as off-chain pricable, or `None` for Lazer.
 fn classify_offchain_request(request: &OracleRequest) -> Option<OffchainRequest> {
     match request {
@@ -131,9 +155,10 @@ pub type ProxyOracleCache =
 
 /// Oracle price fetcher.
 ///
-/// Fetches prices directly from Pyth Hermes.
-/// Supports LST oracles with transformers and proxy oracles with cached on-chain
-/// aggregation.
+/// Fetches Pyth prices directly from Hermes, LST oracle prices via
+/// transformers, and proxy-oracle prices by off-chain composition with the
+/// proxy's on-chain cache as fallback — see the module docs for the full
+/// scan-vs-execution pricing split.
 pub struct OracleFetcher {
     client: SigningClient,
     pyth_updates: PythUpdatesClient,
@@ -847,8 +872,9 @@ impl OracleFetcher {
         }
 
         // Batch the underlying fetches: one Hermes call, one RedStone call.
-        let mut pyth_ids: Vec<PriceIdentifier> = Vec::new();
-        let mut redstone_symbols: Vec<String> = Vec::new();
+        // Set-based dedup; the order of a batch request carries no meaning.
+        let mut pyth_id_set: HashSet<PriceIdentifier> = HashSet::new();
+        let mut redstone_symbol_set: HashSet<String> = HashSet::new();
         for (_, plan) in &plans {
             let request = match plan {
                 OffchainPriceSource::Direct(request)
@@ -856,17 +882,15 @@ impl OracleFetcher {
             };
             match request {
                 OffchainRequest::Pyth(id) => {
-                    if !pyth_ids.contains(id) {
-                        pyth_ids.push(*id);
-                    }
+                    pyth_id_set.insert(*id);
                 }
                 OffchainRequest::RedStone(symbol) => {
-                    if !redstone_symbols.contains(symbol) {
-                        redstone_symbols.push(symbol.clone());
-                    }
+                    redstone_symbol_set.insert(symbol.clone());
                 }
             }
         }
+        let pyth_ids: Vec<PriceIdentifier> = pyth_id_set.into_iter().collect();
+        let redstone_symbols: Vec<String> = redstone_symbol_set.into_iter().collect();
         let pyth_prices = if pyth_ids.is_empty() {
             OracleResponse::new()
         } else {
@@ -880,6 +904,9 @@ impl OracleFetcher {
             .await;
 
         // Compose each feed, applying its transformer when one is configured.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs().cast_signed());
         let mut response = OracleResponse::new();
         for (price_id, plan) in plans {
             let (request, transform) = match plan {
@@ -891,7 +918,29 @@ impl OracleFetcher {
                 } => (request, Some((call, action))),
             };
             let underlying = match &request {
-                OffchainRequest::Pyth(id) => pyth_prices.get(id).cloned().flatten(),
+                // Hermes copies the publisher's timestamp through verbatim, so
+                // the market's freshness bound is enforced here — a stale entry
+                // is treated as unpriced and falls through to the on-chain
+                // cache read, which enforces the same bound on-chain. (The
+                // RedStone leg applies the equivalent guards in its client.)
+                OffchainRequest::Pyth(id) => {
+                    pyth_prices.get(id).cloned().flatten().filter(|price| {
+                        let fresh = publish_time_is_fresh(
+                            price.publish_time.as_secs(),
+                            now_secs,
+                            max_age_secs,
+                        );
+                        if !fresh {
+                            tracing::debug!(
+                                %oracle,
+                                ?price_id,
+                                publish_time = price.publish_time.as_secs(),
+                                "Composed Pyth price is stale or future-dated, deferring to on-chain cache"
+                            );
+                        }
+                        fresh
+                    })
+                }
                 OffchainRequest::RedStone(symbol) => redstone_prices.get(symbol).cloned(),
             };
             let Some(underlying) = underlying else {
@@ -1054,6 +1103,25 @@ mod tests {
             }
             other @ OffchainPriceSource::Direct(_) => panic!("expected Transformed, got {other:?}"),
         }
+    }
+
+    /// Composed Pyth prices must honor the market's freshness bound exactly
+    /// like the RedStone leg and the on-chain cache read they replace: a
+    /// stale (or implausibly future-dated) Hermes entry must fall through to
+    /// the on-chain fallback, never price a position off an hour-old number.
+    #[test]
+    fn publish_time_freshness_matches_the_markets_bound() {
+        let now = 1_755_600_000_i64;
+        // Fresh, and exactly at the bound: usable.
+        assert!(publish_time_is_fresh(now - 10, now, 120));
+        assert!(publish_time_is_fresh(now - 120, now, 120));
+        // One second past the bound: stale.
+        assert!(!publish_time_is_fresh(now - 121, now, 120));
+        // Slight future skew is clock drift; beyond the allowance it is
+        // implausible and must be refused (a negative age passes every
+        // staleness bound there is).
+        assert!(publish_time_is_fresh(now + 5, now, 120));
+        assert!(!publish_time_is_fresh(now + 31, now, 120));
     }
 
     #[test]

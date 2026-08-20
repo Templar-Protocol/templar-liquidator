@@ -43,7 +43,7 @@ flowchart TD
     Executor -.formats logs via.-> Format
 ```
 
-External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market, token contracts) go through the in-process `templar-gateway-client` dependency that every module above ultimately calls into; Pyth Hermes and the RedStone gateway are plain HTTPS calls made from `oracle.rs`; Ref Finance and 1-Click are NEAR contract calls and an HTTPS API respectively, both from `swap/`.
+External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market, token contracts) go through the in-process `templar-gateway-client` dependency that every module above ultimately calls into; Pyth Hermes is a plain HTTPS call made from `oracle.rs`, and the RedStone public price API (`api.redstone.finance`) a plain HTTPS call made from `redstone.rs`; Ref Finance and 1-Click are NEAR contract calls and an HTTPS API respectively, both from `swap/`.
 
 ## Module responsibilities
 

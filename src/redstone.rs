@@ -49,9 +49,10 @@ pub(crate) fn to_pyth_price(
     value: &near_sdk::serde_json::Value,
     timestamp_ms: i64,
 ) -> Option<pyth::Price> {
-    // 2^53: the largest ceiling under which every f64 in range is an exact
-    // integer, so the mantissa survives the round-trip losslessly. At expo -8
-    // that still admits unit prices up to ~$90M.
+    // 2^53: the largest f64 integer that is still exactly representable (the
+    // first unrepresentable integer is 2^53 + 1), so any mantissa up to and
+    // including it survives the round-trip losslessly — the bound below is
+    // inclusive. At expo -8 that admits unit prices up to ~$90M.
     const MAX_MANTISSA: f64 = 9_007_199_254_740_992.0;
 
     let usd = match value {
@@ -63,7 +64,7 @@ pub(crate) fn to_pyth_price(
         return None;
     }
     let scaled = (usd * 10f64.powi(-SYNTH_EXPO)).round();
-    if !(1.0..MAX_MANTISSA).contains(&scaled) {
+    if !(1.0..=MAX_MANTISSA).contains(&scaled) {
         // Rounded to zero (dust below 10^SYNTH_EXPO) or too large to carry
         // exactly — absent beats a wrong number.
         return None;

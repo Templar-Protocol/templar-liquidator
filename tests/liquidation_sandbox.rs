@@ -256,6 +256,14 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
         oracle_cfg.borrow_asset_decimals,
     );
 
+    // Live-mode contract: the caller reserves before executing (the service
+    // does this before its oracle push); the executor consumes on success.
+    executor
+        .inventory()
+        .write()
+        .await
+        .reserve(&borrow_asset, liquidation_amount)?;
+
     // Execute the liquidation through the liquidator's own gateway path.
     let (outcome, swap_issue) = executor
         .execute_liquidation(

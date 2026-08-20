@@ -973,6 +973,31 @@ impl Liquidator {
                 return Ok(LiquidationOutcome::Unprofitable);
             }
 
+            // Reserve inventory BEFORE the (paid) oracle push below, so a
+            // position that loses an inventory race under POSITION_CONCURRENCY
+            // fails here — before spending any gas — rather than after paying
+            // for its own price update. Sizing above ran against a snapshot;
+            // this reserve is the atomic commitment. The executor releases the
+            // reservation on failure and consumes it on success; dry-run
+            // touches no inventory on either side.
+            if !dry_run {
+                let reserve_result = self.executor.inventory().write().await.reserve(
+                    &self.market_config.borrow_asset,
+                    templar_common::asset::BorrowAssetAmount::from(liquidation_amount.0),
+                );
+                if let Err(error) = reserve_result {
+                    tracing::info!(
+                        borrower = %borrow_account,
+                        error = %error,
+                        "Inventory no longer covers the sized amount (consumed by a concurrent position), skipping"
+                    );
+                    if loop_iteration > 1 {
+                        return Ok(LiquidationOutcome::Liquidated);
+                    }
+                    return Ok(LiquidationOutcome::Skipped);
+                }
+            }
+
             // Step 6: Push fresh prices to underlying Pyth oracle(s) before first execution.
             // The market contract reads from the on-chain oracle during liquidation,
             // so prices must be fresh there — not just in our HTTP-fetched view.

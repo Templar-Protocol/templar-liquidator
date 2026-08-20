@@ -46,6 +46,7 @@ services:
       "--liquidation-scan-interval", "${LIQUIDATION_SCAN_INTERVAL:-600}",
       "--registry-refresh-interval", "${REGISTRY_REFRESH_INTERVAL:-3600}",
       "--concurrency", "${CONCURRENCY:-10}",
+      "--position-concurrency", "${POSITION_CONCURRENCY:-1}",
       "--transaction-timeout", "${TRANSACTION_TIMEOUT:-60}",
       "--collateral-strategy", "${COLLATERAL_STRATEGY:-hold}",
       "--max-loop-iterations", "${MAX_LOOP_ITERATIONS:-10}",

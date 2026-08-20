@@ -100,11 +100,21 @@ impl LiquidationExecutor {
 
     /// Executes a liquidation transaction.
     ///
+    /// # Reservation contract
+    ///
+    /// In live mode the caller must have **already reserved**
+    /// `liquidation_amount` of `borrow_asset` in the shared inventory before
+    /// calling. [`crate::Liquidator::liquidate`] reserves before its on-chain
+    /// oracle push so a position that loses an inventory race under
+    /// `POSITION_CONCURRENCY` fails before spending gas, not after. This
+    /// method still owns the reservation's end of life: it releases on every
+    /// failure path and consumes (debits) on success. Dry-run touches no
+    /// inventory on either side.
+    ///
     /// # Flow
-    /// 1. Reserve inventory
-    /// 2. Create and submit transaction
-    /// 3. Handle collateral based on strategy
-    /// 4. Release inventory on failure
+    /// 1. Create and submit transaction (caller holds the reservation)
+    /// 2. Handle collateral based on strategy
+    /// 3. Consume the reservation on success, release it on failure
     #[tracing::instrument(skip(self, borrow_asset, collateral_asset), level = "info")]
     #[allow(clippy::too_many_lines)]
     pub async fn execute_liquidation(
@@ -151,19 +161,6 @@ impl LiquidationExecutor {
             }
             return Ok((LiquidationOutcome::Liquidated, None));
         }
-
-        // Reserve inventory for this liquidation
-        self.inventory
-            .write()
-            .await
-            .reserve(borrow_asset, liquidation_amount)?;
-
-        tracing::info!(
-            borrower = %borrow_account,
-            liquidation_amount = %u128::from(liquidation_amount),
-            borrow_asset = %borrow_asset,
-            "Reserved inventory for liquidation"
-        );
 
         // Execute liquidation transaction through the gateway. The driver signs,
         // submits, and polls to finality; a reverted on-chain transaction comes

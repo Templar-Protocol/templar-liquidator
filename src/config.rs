@@ -589,7 +589,17 @@ impl Args {
         };
         let failure_cooldown =
             std::time::Duration::from_secs(self.failure_notification_cooldown_hours * 3600);
-        let notifier = Arc::new(Notifier::with_cooldown(telegram_config, failure_cooldown));
+        // A concurrent round can fire up to two notifications per in-flight
+        // position (liquidation + swap issue). Scale the notifier's in-flight
+        // cap with the knob — at the default cap the busiest rounds would
+        // silently drop alerts once the inter-position pause is gone.
+        let notification_capacity = crate::notifier::MAX_INFLIGHT_NOTIFICATIONS
+            .max(self.position_concurrency.max(1).saturating_mul(2));
+        let notifier = Arc::new(Notifier::with_limits(
+            telegram_config,
+            failure_cooldown,
+            notification_capacity,
+        ));
 
         // The error deliberately omits the value: a mistyped key is still
         // near-complete key material, and this message reaches stderr.
@@ -1147,6 +1157,22 @@ mod tests {
         let mut args = create_test_args();
         args.position_concurrency = 0;
         assert_eq!(args.build_config().position_concurrency, 1);
+    }
+
+    /// A concurrent round can fire up to two notifications per in-flight
+    /// position (liquidation + swap issue); the notifier's in-flight cap must
+    /// scale with the knob or the busiest rounds silently drop alerts.
+    #[test]
+    fn notifier_inflight_capacity_scales_with_position_concurrency() {
+        let default_cfg = create_test_args().build_config();
+        assert_eq!(
+            default_cfg.notifier.max_inflight(),
+            crate::notifier::MAX_INFLIGHT_NOTIFICATIONS,
+        );
+
+        let mut args = create_test_args();
+        args.position_concurrency = 32;
+        assert!(args.build_config().notifier.max_inflight() >= 64);
     }
 
     #[test]

@@ -17,8 +17,10 @@
 //!
 //! 1. **Registry refresh** — discover deployed markets across the configured
 //!    registries and validate them ([`crate::service`]).
-//! 2. **Position scan** — read borrow positions for each market and check which
-//!    ones are currently liquidatable ([`crate::scanner`]).
+//! 2. **Position scan** — read borrow positions for each market, screen them
+//!    locally against oracle prices with the contract's own status logic, and
+//!    confirm apparent candidates on-chain ([`crate::scanner`]); per-position
+//!    RPC scales with liquidatable positions, not with market size.
 //! 3. **Strategy sizing** — decide how much of a liquidatable position to repay
 //!    given available inventory ([`crate::liquidation_strategy`]).
 //! 4. **Profitability gate** — reject the sizing decision unless the discounted
@@ -381,6 +383,33 @@ impl LiquidatorError {
             Self::OracleUpdateError(_) => NotificationKind::OracleUpdate,
             Self::NoMarkets => NotificationKind::NoMarkets,
         }
+    }
+}
+
+/// What the round loop does with a position's locally computed status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalScreen {
+    /// Apparent liquidation: confirm on-chain and attempt it.
+    Candidate,
+    /// Healthy: skip without any RPC, clearing failure-dedup state exactly
+    /// as an on-chain Healthy answer would.
+    SkipHealthy,
+    /// Below maintenance but not liquidatable: skip without any RPC.
+    SkipMaintenance,
+}
+
+/// Screens a locally computed [`BorrowStatus`] into a round-loop action.
+///
+/// The screen only decides which positions pay for an on-chain status read —
+/// every apparent liquidation is still confirmed by the market contract
+/// inside [`Liquidator::liquidate`] before anything is sized or submitted,
+/// so a false positive costs one RPC read and a false negative cannot occur
+/// for any status this returns `Candidate` for.
+fn screen_status(status: BorrowStatus) -> LocalScreen {
+    match status {
+        BorrowStatus::Liquidation(_) => LocalScreen::Candidate,
+        BorrowStatus::Healthy => LocalScreen::SkipHealthy,
+        BorrowStatus::MaintenanceRequired => LocalScreen::SkipMaintenance,
     }
 }
 
@@ -1181,8 +1210,6 @@ impl Liquidator {
             return Ok(RoundSummary::default());
         }
 
-        tracing::info!(positions = borrows.len(), "Evaluating positions");
-
         // Process positions
         let mut liquidated = 0u64;
         let mut not_liquidatable = 0u64;
@@ -1191,11 +1218,68 @@ impl Liquidator {
         // Subset of `failed` where a transaction was actually submitted
         // (execution phase) rather than failing before submission.
         let mut failed_execution = 0u64;
-        let total = borrows.len();
+        let position_count = borrows.len();
+
+        // Screen positions locally before paying for any per-position RPC:
+        // status is computed with the same `MarketConfiguration::borrow_status`
+        // the contract runs, from data already in hand (positions, prices,
+        // config). Only apparent candidates get the authoritative on-chain
+        // check inside `liquidate()`. Wall-clock now stands in for block time
+        // — an expiry that flips within clock-skew of the boundary is caught
+        // by the on-chain check or the next round. If the price pair can't be
+        // built locally, every position is confirmed on-chain instead.
+        #[allow(clippy::cast_possible_truncation)]
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let candidates: Vec<(AccountId, BorrowPosition)> = match self
+            .market_config
+            .price_oracle_configuration
+            .create_price_pair(&oracle_response)
+        {
+            Ok(price_pair) => borrows
+                .into_iter()
+                .filter(|(account, position)| {
+                    let status = self.market_config.borrow_status(
+                        position.collateralization_ratio(&price_pair),
+                        position.started_at_block_timestamp_ms,
+                        now_ms,
+                    );
+                    match screen_status(status) {
+                        LocalScreen::Candidate => true,
+                        LocalScreen::SkipHealthy => {
+                            self.notifier
+                                .clear_failure_dedup_for(self.market.as_ref(), account.as_ref());
+                            not_liquidatable += 1;
+                            false
+                        }
+                        LocalScreen::SkipMaintenance => {
+                            not_liquidatable += 1;
+                            false
+                        }
+                    }
+                })
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Could not build price pair for local screening; confirming every position on-chain"
+                );
+                borrows.into_iter().collect()
+            }
+        };
+
+        tracing::info!(
+            positions = position_count,
+            candidates = candidates.len(),
+            "Screened positions locally"
+        );
+
+        let total = candidates.len();
         let concurrency = concurrency.max(1);
 
         use futures::StreamExt as _;
-        let mut results = futures::stream::iter(borrows.into_iter().enumerate().map(
+        let mut results = futures::stream::iter(candidates.into_iter().enumerate().map(
             |(i, (account, position))| {
                 let oracle_response = oracle_response.clone();
                 async move {
@@ -1391,6 +1475,35 @@ mod tests {
         assert_eq!(
             NotificationKind::InsufficientBalance.as_str(),
             "insufficient_balance"
+        );
+    }
+
+    /// The local screen decides which positions pay for an on-chain status
+    /// read. Any liquidation status — for any reason — must be a candidate
+    /// (the on-chain check stays authoritative), healthy positions must skip
+    /// *and* clear failure-dedup state (mirroring the on-chain Healthy
+    /// handling), and maintenance-required positions skip without clearing.
+    #[test]
+    fn local_screen_maps_every_status() {
+        use templar_common::borrow::LiquidationReason;
+
+        assert_eq!(
+            screen_status(BorrowStatus::Liquidation(
+                LiquidationReason::Undercollateralization
+            )),
+            LocalScreen::Candidate,
+        );
+        assert_eq!(
+            screen_status(BorrowStatus::Liquidation(LiquidationReason::Expiration)),
+            LocalScreen::Candidate,
+        );
+        assert_eq!(
+            screen_status(BorrowStatus::Healthy),
+            LocalScreen::SkipHealthy
+        );
+        assert_eq!(
+            screen_status(BorrowStatus::MaintenanceRequired),
+            LocalScreen::SkipMaintenance,
         );
     }
 

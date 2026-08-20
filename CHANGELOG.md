@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Position scans screen locally before any per-position RPC: each position's status is computed with the contract's own `MarketConfiguration::borrow_status` from data already fetched (positions, oracle prices, market config), and only apparent liquidation candidates get the authoritative on-chain check. Per-round RPC drops from one read per position to one per candidate — on a healthy market, roughly the number of markets rather than the number of positions. Behavior is unchanged for candidates (the contract still decides), and if the local price pair can't be built the round falls back to confirming every position on-chain.
+
 - Markets whose configured asset decimals fall outside `[0, 38]` are now rejected at registration (they arrive from on-chain state unvalidated and would corrupt every `10^d` conversion as zero/infinity). A previously-scanned market with such a config **silently drops out of scope**: the only trace is a "Market filtered out" log line with reason `asset decimals out of sane range [0, 38]`, and a `--run-mode once` deployment whose *only* market is rejected now exits non-zero with `NoMarkets` where it previously ran. No real token uses more than 24 decimals, so a legitimately configured market cannot hit this.
 
 ### Fixed
@@ -45,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI (`fmt`, `clippy`, unit tests, `cargo doc`, `cargo-deny`, Docker build, `terraform validate`) and tagged releases publishing `ghcr.io/templar-protocol/templar-liquidator:<tag>`.
 
 ### Changed
+
+- Position scans screen locally before any per-position RPC: each position's status is computed with the contract's own `MarketConfiguration::borrow_status` from data already fetched (positions, oracle prices, market config), and only apparent liquidation candidates get the authoritative on-chain check. Per-round RPC drops from one read per position to one per candidate — on a healthy market, roughly the number of markets rather than the number of positions. Behavior is unchanged for candidates (the contract still decides), and if the local price pair can't be built the round falls back to confirming every position on-chain.
 
 - *(liquidator)* [**breaking**] `DRY_RUN` now defaults to `true`. Every previous deployment ran live by default; anyone relying on that must now set `DRY_RUN=false` explicitly. The env var also tightened to accept only the literal strings `true`/`false` — any other value aborts startup instead of silently falling back to either mode.
 

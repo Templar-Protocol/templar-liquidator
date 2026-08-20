@@ -120,7 +120,7 @@ See [docs/economics.md](docs/economics.md) for strategy tuning, inventory sizing
 Each liquidation round moves through these stages in order — every stage is owned by a single module, so a fork that only needs to change one piece of behavior can read (or replace) just that module:
 
 1. **Registry refresh** — discover deployed markets across the configured registries and validate each one's contract version ([`src/service.rs`](src/service.rs)).
-2. **Position scan** — read every borrow position in a market and check which are currently liquidatable ([`src/scanner.rs`](src/scanner.rs)).
+2. **Position scan** — read every borrow position in a market, screen them locally against oracle prices using the contract's own status logic, and confirm apparent candidates on-chain ([`src/scanner.rs`](src/scanner.rs), [`src/liquidator.rs`](src/liquidator.rs)); per-position RPC scales with liquidatable positions, not market size.
 3. **Strategy sizing** — decide how much of a liquidatable position to repay, given available inventory ([`src/liquidation_strategy.rs`](src/liquidation_strategy.rs)).
 4. **Profitability gate** — reject the sizing decision unless the discounted collateral is expected to cover the repay amount plus gas, with the configured `MIN_PROFIT_BPS` margin ([`src/profitability.rs`](src/profitability.rs)).
 5. **Execution** — submit the liquidation transaction and confirm every receipt in it actually succeeded, not just the top-level transaction ([`src/executor.rs`](src/executor.rs)).

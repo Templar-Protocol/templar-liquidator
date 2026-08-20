@@ -64,13 +64,32 @@ available_kb() {
 # image digest and feature version pins in devcontainer.json.
 NEAR_CLI_RS_VERSION="0.30.0"
 
-# 1. Toolchain — `rustup show` reads rust-toolchain.toml and installs the
+# 1. Mark the workspace safe for git.
+#
+#    The workspace is a virtiofs bind mount from the host, and the uid it
+#    reports through that mount is not stable: `stat` and `git` can disagree
+#    seconds apart, and `git pull` fails with "detected dubious ownership"
+#    while `git status` succeeds, because pull re-discovers the repository in
+#    subprocesses that get their own attribute read. The files really are the
+#    user's on the host, so this is a uid-mapping artefact rather than a
+#    permissions problem worth respecting.
+#
+#    VS Code usually adds this itself, but ~/.gitconfig is regenerated on every
+#    rebuild and is not on a volume, so it cannot be relied on. Idempotent:
+#    plain `--add` would append a duplicate line on each re-run.
+echo "==> Marking the workspace safe for git"
+workspace="$(cd "$(dirname "$0")/.." && pwd)"
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "${workspace}"; then
+	git config --global --add safe.directory "${workspace}"
+fi
+
+# 2. Toolchain — `rustup show` reads rust-toolchain.toml and installs the
 #    pinned 1.97.0 toolchain plus rustfmt/clippy. Fatal if it fails; there is
 #    no usable container without it.
 echo "==> Installing the pinned Rust toolchain"
 rustup show
 
-# 2. near-cli-rs — docs/TESTNET.md's walkthrough opens with `near account
+# 3. near-cli-rs — docs/TESTNET.md's walkthrough opens with `near account
 #    create-account ...`, so the CLI has to actually be here.
 #
 #    Compiled from source rather than installed from the project's prebuilt
@@ -134,7 +153,7 @@ else
 	fi
 fi
 
-# 3. Claude Code — the CLI itself is disposable and reinstalled on each
+# 4. Claude Code — the CLI itself is disposable and reinstalled on each
 #    rebuild, but its state is not: ~/.claude is a named volume (see
 #    devcontainer.json) holding session transcripts, config and credentials.
 #
@@ -174,7 +193,7 @@ else
 		"Claude Code install failed. Nothing in the build depends on it. Retry with: npm install -g @anthropic-ai/claude-code"
 fi
 
-# 4. Warm the dependency cache, including the git checkout of the pinned
+# 5. Warm the dependency cache, including the git checkout of the pinned
 #    templar-* rev — worth doing up front since that fetch needs network and
 #    would otherwise happen lazily on the first build/test/clippy run.
 echo "==> Warming the cargo dependency cache"

@@ -105,8 +105,7 @@ rustup show
 #    create-account ...`, so the CLI has to actually be here.
 #
 #    Compiled from source rather than installed from the project's prebuilt
-#    release tarball (which is what templar-backend's post-create.sh does).
-#    Those tarballs are built on Ubuntu 24.04 and their binaries need
+#    release tarball: those tarballs are built on Ubuntu 24.04 and need
 #    GLIBC_2.39; this container is Debian bookworm (glibc 2.36) to match the
 #    production Dockerfile's builder stage, so a prebuilt `near` would install
 #    fine and then fail to execute. Every published near-cli-rs release has
@@ -204,8 +203,7 @@ ln -sfn "${HOME}/.claude/.claude.json" "${HOME}/.claude.json" ||
 #    Installed WITHOUT sudo, deliberately. The node feature puts node/npm under
 #    /usr/local/share/nvm, which is writable by this user but is not on root's
 #    sudo secure_path — `sudo npm install -g` fails with "npm: command not
-#    found". (templar-backend can use sudo there because it installs Node from
-#    the NodeSource apt repo into /usr/bin instead.)
+#    found".
 if command -v claude >/dev/null 2>&1; then
 	echo "==> Claude Code already installed ($(claude --version 2>/dev/null || echo unknown))"
 else

@@ -24,9 +24,7 @@ FROM rust:1.97.0-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e7
 # used here only for its Pyth source - see src/service.rs's
 # `.with_pyth_source`) unconditionally depends on templar-redstone-bridge,
 # whose build.rs unconditionally shells out to `npm install`/`build`/`bundle`
-# to produce a JS bundle embedded in the compiled binary. Same requirement as
-# services/blockchain-gateway/Dockerfile in the backend monorepo, which
-# depends on the same crate.
+# to produce a JS bundle embedded in the compiled binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
@@ -73,9 +71,7 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 # embedded into the binary at build time; running it needs a `node`
 # subprocess only via `.with_redstone_source(...)`, which this binary never
 # calls (it only calls `.with_pyth_source(...)` - see src/service.rs and the
-# "not by the liquidator" note in src/oracle.rs). Unlike
-# services/blockchain-gateway/Dockerfile in the backend monorepo, which does
-# call it and installs `nodejs` at runtime for exactly that reason.
+# "not by the liquidator" note in src/oracle.rs).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \

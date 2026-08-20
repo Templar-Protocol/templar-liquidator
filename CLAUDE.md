@@ -9,11 +9,11 @@ return. Received collateral can optionally be swapped back into borrow assets
 so the same inventory is available for the next round.
 
 **This bot is NOT non-custodial.** Unlike the Templar smart contracts it
-trades against, it holds a signer key (`SIGNER_ACCOUNT_ID` / `SIGNER_KEY`) and
-submits transactions itself — that is the point of a liquidation bot. Treat the signer key with the
-weight that implies: it moves real inventory, and the bot is expected to run
-unsupervised. Dry-run is the default for exactly this reason (see Safety
-invariants below).
+trades against, it holds a signer key (`SIGNER_ACCOUNT_ID` / `SIGNER_KEY`)
+and submits transactions itself — that is the point of a liquidation bot.
+Treat the signer key with the weight that implies: it moves real inventory,
+and the bot is expected to run unsupervised. Dry-run is the default for
+exactly this reason (see Safety invariants below).
 
 This repo is published as a **public reference implementation**. The expected
 way to adapt it to different parameters or a different venue is to fork and

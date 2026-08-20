@@ -45,8 +45,7 @@
   // it `cargo test --lib --bins`, the first command in CLAUDE.md's orientation
   // list, fails in the container.
   //
-  // Pinned to 22 to match templar-backend's devcontainer; Node 20 went
-  // end-of-life in April 2026.
+  // Pinned to 22; Node 20 went end-of-life in April 2026.
   "features": {
     "ghcr.io/devcontainers/features/terraform:1.5.0": {},
     "ghcr.io/devcontainers/features/github-cli:1.1.1": {},

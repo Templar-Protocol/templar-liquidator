@@ -68,9 +68,14 @@ fi
 # 4. CHANGELOG must carry a section for this version. The release notes are
 #    generated from commit history, so a missing entry is not otherwise
 #    noticed — the release just quietly ships without the curated summary.
-# Fixed-string match on the whole header prefix. With `grep -E` the dots in a
-# version are wildcards, so `## [0x2y0]` satisfied a search for 0.2.0.
-if grep -qF "## [${version}]" CHANGELOG.md; then
+# Two stages, because each half needs different matching. The version carries
+# regex metacharacters — with `grep -E` the dots are wildcards, so `## [0x2y0]`
+# satisfied a search for 0.2.0 — hence the fixed-string pass. But a fixed
+# string cannot be anchored, and `## [0.2.0]` is a SUBSTRING of `### [0.2.0]`
+# and of any prose line quoting the header, either of which would pass while
+# the release shipped with no level-2 section. So: literal match on the
+# version, then an anchored regex on the constant prefix.
+if grep -F "## [${version}]" CHANGELOG.md | grep -q '^## \['; then
 	note "CHANGELOG.md has a section for ${version}"
 else
 	bad "CHANGELOG.md has no '## [${version}]' section — add one before tagging"

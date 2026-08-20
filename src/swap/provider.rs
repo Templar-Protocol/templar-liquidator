@@ -3,9 +3,10 @@
 //! Since the `SwapProvider` trait has generic methods, it cannot be made into
 //! a trait object. This enum is the dispatch point instead: the crate ships
 //! one variant (1-Click), and a fork adding a venue implements
-//! [`SwapProvider`] for its own type and adds a variant here — every match
-//! below is exhaustive, so the compiler walks the fork through each method
-//! that needs forwarding.
+//! [`SwapProvider`] for its own type and adds a variant here — the
+//! irrefutable `let` bindings below stop compiling once a second variant
+//! exists, so the compiler walks the fork through each method that needs
+//! forwarding.
 
 use near_sdk::AccountId;
 use templar_common::asset::{AssetClass, FungibleAsset, FungibleAssetAmount};

@@ -70,9 +70,10 @@ One line per file in `src/`:
   the same source templar-backend's `pkg/redstone` reads), used only for
   scan-side proxy price composition.
 - `swap/mod.rs` — `SwapProvider` trait, the swap-provider extension seam.
-- `swap/provider.rs` — `SwapProviderImpl`, a concrete enum wrapping the two
-  shipped providers for dynamic dispatch (the trait itself has generic
-  methods and can't be a trait object).
+- `swap/provider.rs` — `SwapProviderImpl`, a concrete enum wrapping the
+  shipped provider for dynamic dispatch (the trait itself has generic
+  methods and can't be a trait object); a fork's venue becomes a new
+  variant here.
 - `swap/oneclick.rs` — 1-Click API provider (NEAR Intents cross-chain swaps):
   quote → deposit → poll.
 - `swap/retry.rs` — swap error classification (retryable vs. permanent) and

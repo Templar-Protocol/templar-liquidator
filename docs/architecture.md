@@ -71,7 +71,7 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`swap/oneclick.rs`** — 1-Click API provider for NEAR Intents (NEP-245) cross-chain swaps: quote → deposit → poll to a terminal status.
 
-**`swap/retry.rs`** — shared error classification (retryable network/server/rate-limit errors vs. permanent validation errors) and the generic retry wrapper both providers run swaps through.
+**`swap/retry.rs`** — shared error classification (retryable network/server/rate-limit errors vs. permanent validation errors) and the generic retry wrapper swaps run through.
 
 **`notifier.rs`** — Telegram notifications; the notification extension seam (no trait boundary yet — a fork wanting another channel extends or replaces this type directly). Also owns consecutive-scan-failure threshold tracking and per-(market, borrower, error-class) failure-notification dedup/cooldown.
 

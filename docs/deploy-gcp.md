@@ -53,6 +53,35 @@ terraform apply
 
 This provisions: the Cloud Run Job itself, a Cloud Scheduler cron trigger, an Artifact Registry remote repository mirroring `ghcr.io` (Cloud Run can't pull from GHCR directly), two least-privilege service accounts (job runtime, scheduler invoker), and Secret Manager IAM bindings scoped to the secrets you named. See [`terraform/README.md`](../terraform/README.md#what-it-deploys) for the full list.
 
+> **This path currently does not work against the upstream image.** The
+> Artifact Registry mirror proxies `https://ghcr.io` anonymously — the module
+> configures no `upstream_credentials` — and the published
+> `ghcr.io/templar-protocol/templar-liquidator` package is private, because
+> GHCR packages default to private and the organization restricts making them
+> public. `terraform apply` succeeds; the first execution then fails to pull.
+>
+> Making this work today needs three module edits, not just a variable — worth
+> knowing before you start:
+>
+> 1. `ghcr_mirror` is a `REMOTE_REPOSITORY` (`terraform/main.tf`), a
+>    read-through proxy. You cannot push into it. Hosting your own image means
+>    a separate `STANDARD` Artifact Registry repository, created outside this
+>    module or added to it.
+> 2. The image path is not a variable. `image_tag` is the only image-related
+>    input; the repository and path are fixed in the `mirrored_image` local
+>    (`terraform/main.tf`), which is also the place
+>    [terraform/README.md](../terraform/README.md) points at for path changes.
+>    Repoint that local at your own repository.
+> 3. The runtime service account's `roles/artifactregistry.reader` is scoped to
+>    the mirror alone (`job_reader` in `terraform/main.tf`), and it is the only
+>    such grant in the module — the job runs as its own identity, not the
+>    default compute service account. Grant that account reader on the new
+>    repository too, or the first execution fails to pull again, this time with
+>    `PERMISSION_DENIED`.
+>
+> The rest of the module — scheduler, service accounts, secret bindings — is
+> unaffected, as is building and running from source outside GCP.
+
 ## 4. Verify the first execution
 
 Either wait for the next scheduled tick, or trigger one manually — `my-liquidator-deploy` (from step 3) exports `scheduler_job_name`, so you don't need to guess the generated name:

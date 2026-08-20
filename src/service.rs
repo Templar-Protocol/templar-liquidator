@@ -931,6 +931,17 @@ impl LiquidatorService {
 
             let usd_value = self.collateral_usd_value(&asset_key, balance.0, usd_price);
 
+            // The threshold below compares with `<`, which +inf passes — a
+            // huge (finite) price times a huge balance must skip, not swap.
+            if !usd_value.is_finite() {
+                tracing::warn!(
+                    asset = %asset_key,
+                    "Collateral USD value is not finite, skipping batch swap"
+                );
+                skipped += 1;
+                continue;
+            }
+
             if usd_value < self.config.min_swap_value_usd {
                 tracing::debug!(
                     asset = %asset_key,

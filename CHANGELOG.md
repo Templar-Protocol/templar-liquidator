@@ -27,13 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **RUSTSEC-2026-0258** — `h2` 0.3.27, unbounded empty DATA frames. Reached only through `reqwest` 0.11.27 → `hyper` 0.14.
   - **RUSTSEC-2025-0134** — `rustls-pemfile` 1.0.4, unmaintained. This one compiled into the release binary.
 
-  Both crates are now absent from `Cargo.lock` entirely, so the ignore entries were removed rather than left to rot as `advisory-not-detected` warnings.
+  The affected *versions* are gone from `Cargo.lock`: `h2` 0.3.x no longer appears (only the patched 0.4.16, reached through `hyper` 1.x), and `rustls-pemfile` is absent entirely. The ignore entries were removed rather than left to rot as `advisory-not-detected` warnings.
 
 ### Dependencies
+
+Versions below are this crate's **direct** dependencies. Older copies of all three remain in the graph transitively (see the note after the list), so audit against `cargo tree --package templar-liquidator --depth 1` rather than against `Cargo.lock` alone.
 
 - `reqwest` 0.11.27 → **0.13.4**, switched to `default-features = false` with an explicit feature set (`json`, `query`, `native-tls`, `charset`, `http2`, `system-proxy`). Note `query` is now a feature gate rather than always-on, and `RequestBuilder::query` — used for the Pyth Hermes call in `oracle.rs` — is unavailable without it.
 - `near-crypto` 0.34.7 → **0.37.3**
 - `near-jsonrpc-client` 0.20.0 → **0.22.0**
+
+  `Cargo.lock` still carries `reqwest` 0.12.28, `near-crypto` 0.34.7 and `near-jsonrpc-client` 0.20.0 alongside the versions above. None of that is leftovers this crate can drop:
+
+  - `reqwest` 0.12.28 is required by `near-jsonrpc-client` **0.22.0** — the very version bumped to here — as well as by `near-api` and `near-openapi-client`, so that copy stays regardless of what this crate pins directly.
+  - `near-jsonrpc-client` 0.20.0 and `near-crypto` 0.34.7 arrive through `templar-common` at the pinned contracts rev, so they move only when that rev moves (see THE SINGLE-REV RULE in `CLAUDE.md`), never through a Dependabot bump here.
+
+  `deny.toml` sets `multiple-versions = "allow"` for exactly this reason.
 
   Net effect on the dependency graph: 894 → 884 packages.
 

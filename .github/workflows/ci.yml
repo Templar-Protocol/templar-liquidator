@@ -69,7 +69,7 @@ jobs:
   # rather than each job by name means adding or renaming a job never needs a
   # matching ruleset edit — only the `needs` list below.
   #
-  # Unlike the backend's equivalent, `skipped` is treated as a failure here.
+  # `skipped` is treated as a failure here, not a pass.
   # Nothing in this workflow is path-filtered or conditionally gated, so a
   # skipped job means a condition regressed rather than that work was
   # legitimately avoided — which is precisely how a green summary once hid a

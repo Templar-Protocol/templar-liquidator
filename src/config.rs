@@ -249,8 +249,8 @@ pub struct Args {
     pub redstone_gateway_url: String,
 
     /// RedStone public price API, used to compose proxy-oracle prices
-    /// off-chain at scan time (same source templar-backend reads). Scan-side
-    /// only — execution still prices through the on-chain oracle.
+    /// off-chain at scan time. Scan-side only — execution still prices
+    /// through the on-chain oracle.
     #[arg(
         long,
         env = "REDSTONE_API_URL",
@@ -1184,7 +1184,8 @@ mod tests {
     }
 
     /// Scan-side proxy-price composition reads the RedStone public API. The
-    /// default must be the same endpoint templar-backend's pkg/redstone uses.
+    /// default must stay on the public price API (api.redstone.finance) —
+    /// the data-package gateways serve a different, signed format.
     #[test]
     fn redstone_api_url_defaults_to_the_public_api() {
         assert_eq!(

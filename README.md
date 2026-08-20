@@ -190,7 +190,7 @@ Both endpoints are inert in `RUN_MODE=once` — a single-cycle run exits before 
 ## Deployment
 
 - **Any VM (Docker Compose)**: [docs/deploy-vm.md](docs/deploy-vm.md).
-- **Cron-style schedulers** (Cloud Run Jobs, Kubernetes CronJobs, plain cron): run the container with `RUN_MODE=once` on an interval and alert on non-zero exits — see [Run modes](#run-modes) and [docs/configuration.md](docs/configuration.md). A ready-made GCP Terraform module used to live in this repo and was moved out to keep the reference implementation platform-generic (Templar runs it from a private infra repo); forks that want it can recover the module and its walkthrough from git history at [`v0.2.0`](https://github.com/Templar-Protocol/templar-liquidator/tree/v0.2.0/terraform).
+- **Cron-style schedulers** (Cloud Run Jobs, Kubernetes CronJobs, plain cron): run the container with `RUN_MODE=once` on an interval and alert on non-zero exits — see [Run modes](#run-modes) and [docs/configuration.md](docs/configuration.md). A ready-made GCP Terraform module used to live in this repo and was moved out to keep the reference implementation platform-generic; forks that want it can recover the module and its walkthrough from git history at [`v0.2.0`](https://github.com/Templar-Protocol/templar-liquidator/tree/v0.2.0/terraform).
 
 ## FAQ
 
@@ -204,4 +204,4 @@ Both endpoints are inert in `RUN_MODE=once` — a single-cycle run exits before 
 
 ## Disclaimer
 
-This bot holds and spends funds under `SIGNER_KEY`. Unlike the rest of the Templar backend, it is **not non-custodial** — it signs and submits real transactions on your behalf, unsupervised, once you set `DRY_RUN=false`. You are solely responsible for the funds it controls, the correctness of your configuration, and any losses that result from running it. **Use at your own risk.** This code is provided as-is under the GPL-3.0-only license (see [LICENSE](LICENSE)), with no warranty of any kind.
+This bot holds and spends funds under `SIGNER_KEY`. It is **not non-custodial** — unlike the Templar smart contracts themselves, it signs and submits real transactions on your behalf, unsupervised, once you set `DRY_RUN=false`. You are solely responsible for the funds it controls, the correctness of your configuration, and any losses that result from running it. **Use at your own risk.** This code is provided as-is under the GPL-3.0-only license (see [LICENSE](LICENSE)), with no warranty of any kind.

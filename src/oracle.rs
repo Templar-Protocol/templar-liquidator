@@ -114,7 +114,7 @@ fn classify_offchain_request(request: &OracleRequest) -> Option<OffchainRequest>
 /// Picks the first source in the proxy's configured order that can be priced
 /// off-chain.
 ///
-/// Primary-source semantics, matching templar-backend's `pkg/oracle` resolver:
+/// Primary-source semantics:
 /// the proxy's own aggregation and circuit breakers are on-chain policy the
 /// scan does not replicate (and the kernel keeps them private), which is safe
 /// because scan-time prices are advisory — execution still pushes fresh prices

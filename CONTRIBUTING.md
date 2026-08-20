@@ -81,8 +81,9 @@ Step 4 is not optional bookkeeping. `check-release.sh` reads the **working tree*
 
 `release.yml` publishes with auto-generated notes (the commit list). That is the
 **starting point, not the deliverable** — rewrite the release body by hand
-afterwards, in the same house style as
-[templar-backend's releases](https://github.com/Templar-Protocol/templar-backend/releases):
+afterwards, in this house style (see this repo's own
+[releases](https://github.com/Templar-Protocol/templar-liquidator/releases) for
+worked examples):
 
 ```text
 <Patch|Minor> release: one paragraph, no heading, saying what changed in plain

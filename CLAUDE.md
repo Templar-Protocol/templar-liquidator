@@ -8,9 +8,9 @@ directly from that inventory, and receives their collateral at a discount in
 return. Received collateral can optionally be swapped back into borrow assets
 so the same inventory is available for the next round.
 
-**This bot is NOT non-custodial.** Unlike the rest of the Templar backend, it
-holds a signer key (`SIGNER_ACCOUNT_ID` / `SIGNER_KEY`) and submits transactions
-itself — that is the point of a liquidation bot. Treat the signer key with the
+**This bot is NOT non-custodial.** Unlike the Templar smart contracts it
+trades against, it holds a signer key (`SIGNER_ACCOUNT_ID` / `SIGNER_KEY`) and
+submits transactions itself — that is the point of a liquidation bot. Treat the signer key with the
 weight that implies: it moves real inventory, and the bot is expected to run
 unsupervised. Dry-run is the default for exactly this reason (see Safety
 invariants below).
@@ -66,9 +66,8 @@ One line per file in `src/`:
   API + transformer view calls) at scan time, with the proxy's on-chain
   cache as fallback. Execution-time pricing still goes through the on-chain
   push (`update_onchain_prices`).
-- `redstone.rs` — RedStone public price API client (`api.redstone.finance`,
-  the same source templar-backend's `pkg/redstone` reads), used only for
-  scan-side proxy price composition.
+- `redstone.rs` — RedStone public price API client (`api.redstone.finance`),
+  used only for scan-side proxy price composition.
 - `swap/mod.rs` — `SwapProvider` trait, the swap-provider extension seam.
 - `swap/provider.rs` — `SwapProviderImpl`, a concrete enum wrapping the
   shipped provider for dynamic dispatch (the trait itself has generic

@@ -83,13 +83,44 @@ if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "${wor
 	git config --global --add safe.directory "${workspace}"
 fi
 
-# 2. Toolchain — `rustup show` reads rust-toolchain.toml and installs the
+# 2. Warn if commit signing cannot work in here.
+#
+#    VS Code copies the host ~/.gitconfig in verbatim, so `user.signingkey`
+#    still points at a path on the HOST (typically ~/.ssh/id_ed25519) that does
+#    not exist in the container. With commit.gpgsign=true that fails closed —
+#    `git commit` is refused outright rather than quietly producing unsigned
+#    commits, which is the right way round but blocks committing until fixed.
+#
+#    The fix does NOT require mounting a private key into the container. VS
+#    Code forwards the host ssh-agent (SSH_AUTH_SOCK), so once the signing key
+#    is loaded there, ssh-keygen signs through the agent and the private key
+#    never leaves the host:
+#
+#      # on the host, once
+#      ssh-add --apple-use-keychain ~/.ssh/id_ed25519    # macOS; ssh-add on Linux
+#      # in the container, point signingkey at the matching PUBLIC key
+#      git config --global user.signingkey ~/.ssh/id_ed25519.pub
+#
+#    Only a warning: an unsigned-commit setup is a perfectly reasonable way to
+#    use this container, and failing the create over it would be worse than the
+#    problem.
+if [ "$(git config --global --get commit.gpgsign 2>/dev/null || echo false)" = "true" ]; then
+	signing_key="$(git config --global --get user.signingkey 2>/dev/null || true)"
+	case "${signing_key}" in
+	"~/"*) signing_key="${HOME}/${signing_key#\~/}" ;;
+	esac
+	if [ -n "${signing_key}" ] && [ ! -f "${signing_key}" ]; then
+		warn "commit.gpgsign is on but user.signingkey points at '${signing_key}', which does not exist in this container, so 'git commit' will fail. Load the key into the host ssh-agent (ssh-add --apple-use-keychain ~/.ssh/id_ed25519) and set user.signingkey to the matching .pub inside the container — see the comment in .devcontainer/post-create.sh."
+	fi
+fi
+
+# 3. Toolchain — `rustup show` reads rust-toolchain.toml and installs the
 #    pinned 1.97.0 toolchain plus rustfmt/clippy. Fatal if it fails; there is
 #    no usable container without it.
 echo "==> Installing the pinned Rust toolchain"
 rustup show
 
-# 3. near-cli-rs — docs/TESTNET.md's walkthrough opens with `near account
+# 4. near-cli-rs — docs/TESTNET.md's walkthrough opens with `near account
 #    create-account ...`, so the CLI has to actually be here.
 #
 #    Compiled from source rather than installed from the project's prebuilt
@@ -153,7 +184,7 @@ else
 	fi
 fi
 
-# 4. Claude Code — the CLI itself is disposable and reinstalled on each
+# 5. Claude Code — the CLI itself is disposable and reinstalled on each
 #    rebuild, but its state is not: ~/.claude is a named volume (see
 #    devcontainer.json) holding session transcripts, config and credentials.
 #
@@ -193,7 +224,7 @@ else
 		"Claude Code install failed. Nothing in the build depends on it. Retry with: npm install -g @anthropic-ai/claude-code"
 fi
 
-# 5. Warm the dependency cache, including the git checkout of the pinned
+# 6. Warm the dependency cache, including the git checkout of the pinned
 #    templar-* rev — worth doing up front since that fetch needs network and
 #    would otherwise happen lazily on the first build/test/clippy run.
 echo "==> Warming the cargo dependency cache"

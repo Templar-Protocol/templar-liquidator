@@ -32,7 +32,6 @@ The bot refuses to start without these three:
 |---|---|---|---|
 | `RUN_MODE` | `--run-mode` | `loop` | `loop` (continuous) or `once` (single registry refresh + liquidation round, then exit — for cron/Cloud Run Jobs). |
 | — | `--once` | `false` | Shorthand for `--run-mode once`. No env var equivalent; forces once mode and takes precedence over `--run-mode` if both are given. |
-| `TRANSACTION_TIMEOUT` | `--transaction-timeout` | `60` | Seconds to wait for a transaction to reach finality. |
 | `LIQUIDATION_SCAN_INTERVAL` | `--liquidation-scan-interval` | `600` | Seconds between liquidation scan rounds (loop mode). |
 | `REGISTRY_REFRESH_INTERVAL` | `--registry-refresh-interval` | `3600` | Seconds between registry re-discovery (loop mode). |
 | `CONCURRENCY` | `--concurrency`, `-c` | `10` | Concurrency for registry deployment listing. Floored at 1 internally — `0` would stall the pipeline. |
@@ -77,7 +76,6 @@ All comma-delimited (`value_delimiter = ','` in clap — repeat the flag or comm
 |---|---|---|---|
 | `PYTH_HERMES_URL` | `--hermes-url` | network default (`https://hermes.pyth.network` mainnet / `https://hermes-beta.pyth.network` testnet) | Pyth Hermes endpoint for fetching latest price data. |
 | `REDSTONE_API_URL` | `--redstone-api-url` | `https://api.redstone.finance` | RedStone public price API, used to compose proxy-oracle prices off-chain at scan time (no gas, no keeper dependency). Scan-side only — execution still prices through the on-chain oracle. |
-| `REDSTONE_GATEWAY_URL` | `--redstone-gateway-url` | `https://oracle-gateway-1.a.redstone.vip` | **Currently unused.** Scan-side RedStone prices come from `REDSTONE_API_URL`, and on-chain pushes go through the proxy contract's own `update_prices` flow. Retained so existing deployments passing it don't break. |
 
 ## Notifications (Telegram)
 

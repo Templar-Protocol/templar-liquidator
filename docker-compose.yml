@@ -47,10 +47,8 @@ services:
       "--registry-refresh-interval", "${REGISTRY_REFRESH_INTERVAL:-3600}",
       "--concurrency", "${CONCURRENCY:-10}",
       "--position-concurrency", "${POSITION_CONCURRENCY:-1}",
-      "--transaction-timeout", "${TRANSACTION_TIMEOUT:-60}",
       "--collateral-strategy", "${COLLATERAL_STRATEGY:-hold}",
       "--max-loop-iterations", "${MAX_LOOP_ITERATIONS:-10}",
-      "--redstone-gateway-url", "${REDSTONE_GATEWAY_URL:-https://oracle-gateway-1.a.redstone.vip}",
       # Uncomment to enable loop liquidation (repeatedly liquidate until healthy):
       # "--loop-liquidation",
       # "--fixed-liquidation-amount-usd", "${FIXED_LIQUIDATION_AMOUNT_USD}",

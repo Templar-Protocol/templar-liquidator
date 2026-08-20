@@ -19,17 +19,15 @@ license-files = []
 [advisories]
 yanked = "warn"
 ignore = [
-    # RUSTSEC-2026-0258 — h2 "unbounded empty DATA frames" (low severity;
-    # unbounded memory or a panic if a length overflows). Two h2 versions are
-    # in the graph: h2 0.4.16 (axum -> hyper 1.x) IS the patched release, so
-    # only h2 0.3.27 is affected, reached through our direct reqwest 0.11.27
-    # -> hyper 0.14. The real fix is migrating to reqwest 0.12, which moves
-    # this path onto hyper 1.x / h2 0.4.x and also clears the unmaintained
-    # rustls-pemfile advisory below — tracked in issue #11 rather than done
-    # inside the migration PR, which keeps the lifted code at parity with the
-    # contracts monorepo baseline. Verified with `cargo tree -e normal -i
-    # h2@0.3.27` and `... -i h2@0.4.16`.
-    { id = "RUSTSEC-2026-0258", reason = "affected h2 0.3.27 arrives via reqwest 0.11; fixed by the reqwest 0.12 migration tracked in issue #11" },
+    # RUSTSEC-2026-0258 (h2 0.3.27, "unbounded empty DATA frames") and
+    # RUSTSEC-2025-0134 (rustls-pemfile 1.0.4, unmaintained) were both ignored
+    # here because they arrived through our direct reqwest 0.11.27 -> hyper
+    # 0.14. Bumping that dependency to reqwest 0.13 was the fix both entries
+    # named: h2 0.3.x and rustls-pemfile are gone from Cargo.lock entirely, so
+    # the ignores are removed rather than left to rot as `advisory-not-detected`
+    # warnings. Nothing to re-add if a future bump reintroduces them — they
+    # would be new findings on their own merits.
+
     # RUSTSEC-2026-0222 — wasmtime 45.0.3, "Stores can mix up type indices
     # between engines". Path: near-sdk 5.29.0 (feature `unit-testing`) ->
     # near-vm-runner -> wasmtime. `unit-testing` is enabled ONLY by our
@@ -53,14 +51,6 @@ ignore = [
     # compile time and contributes no code to the compiled binary. Clears
     # when alloy drops its `paste` dependency upstream.
     { id = "RUSTSEC-2024-0436", reason = "paste is a proc-macro (compile-time only, no runtime code in the shipped binary), pulled in transitively via alloy -> templar-universal-account. Unmaintained, not a vulnerability; no safe upgrade exists. Clears when alloy drops it." },
-
-    # RUSTSEC-2025-0134 — `rustls-pemfile` 1.0.4, unmaintained (not a
-    # vulnerability; repo archived). Path: reqwest 0.11.27 (our own direct
-    # dependency) -> rustls-pemfile. Unlike the two above, this one DOES
-    # compile into the release binary. No safe upgrade exists within
-    # reqwest 0.11; the real fix is the already-identified reqwest 0.11 ->
-    # 0.12 migration, which drops rustls-pemfile entirely.
-    { id = "RUSTSEC-2025-0134", reason = "unmaintained (not a vulnerability), pulled in via our direct reqwest 0.11.27 dependency. Fix is the reqwest 0.11 -> 0.12 migration (tracked as follow-up work), which removes rustls-pemfile." },
 ]
 
 [bans]

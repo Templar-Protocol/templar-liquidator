@@ -53,6 +53,18 @@ terraform apply
 
 This provisions: the Cloud Run Job itself, a Cloud Scheduler cron trigger, an Artifact Registry remote repository mirroring `ghcr.io` (Cloud Run can't pull from GHCR directly), two least-privilege service accounts (job runtime, scheduler invoker), and Secret Manager IAM bindings scoped to the secrets you named. See [`terraform/README.md`](../terraform/README.md#what-it-deploys) for the full list.
 
+> **This path currently does not work against the upstream image.** The
+> Artifact Registry mirror proxies `https://ghcr.io` anonymously — the module
+> configures no `upstream_credentials` — and the published
+> `ghcr.io/templar-protocol/templar-liquidator` package is private, because
+> GHCR packages default to private and the organisation restricts making them
+> public. `terraform apply` succeeds; the first execution then fails to pull.
+>
+> Until the package is public, use an image the mirror can actually reach:
+> build from source and push to your own Artifact Registry repository, then
+> point `image_tag` (and the repository) at that. The rest of the module —
+> scheduler, service accounts, secret bindings — is unaffected.
+
 ## 4. Verify the first execution
 
 Either wait for the next scheduled tick, or trigger one manually — `my-liquidator-deploy` (from step 3) exports `scheduler_job_name`, so you don't need to guess the generated name:

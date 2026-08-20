@@ -16,7 +16,10 @@ own (private) infrastructure repo.
   (default every 10 minutes).
 - One **Artifact Registry remote repository** that mirrors `ghcr.io` — Cloud
   Run cannot pull images from GHCR directly, so every pull goes through this
-  proxy instead.
+  proxy instead. Note it proxies **anonymously**: no `upstream_credentials` are
+  configured, so the upstream package must be publicly readable. The published
+  `templar-liquidator` package is not, so point this at an image you control
+  until that changes (see [docs/deploy-gcp.md](../docs/deploy-gcp.md)).
 - Two **service accounts**: one the job runs as (least privilege: Artifact
   Registry read + access to the specific secrets you reference), one
   Scheduler uses to invoke the job (`roles/run.invoker` only).

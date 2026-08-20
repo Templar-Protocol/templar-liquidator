@@ -8,30 +8,15 @@ An inventory-based liquidation bot for [Templar Protocol](https://templarfi.org)
 
 ## Quickstart
 
-Pull the released image and run it with your own `.env` — **note the access caveat below; for most readers the Compose path is the one that works**:
+Pull the released image and run it with your own `.env` — no registry login
+needed, and pin a release tag rather than `:latest` for anything you leave
+running:
 
 ```bash
 cp .env.example .env
 nano .env  # fill in the three required vars below
-docker login ghcr.io       # see the note below — the package is not yet public
-docker run --env-file .env ghcr.io/templar-protocol/templar-liquidator:latest
+docker run --env-file .env ghcr.io/templar-protocol/templar-liquidator:0.2.0
 ```
-
-> **The published image is not publicly pullable yet**, and `docker login`
-> alone is not enough to fix that. GHCR packages are private by default, this
-> organization currently restricts making them public, and a private package
-> is readable only by accounts explicitly granted access to it — so:
->
-> - **If you have been granted access:** log in with a GitHub personal access
->   token (classic) carrying `read:packages`, supplying the token as the Docker
->   password. If the organization enforces SSO, authorize the token for it
->   first, or the pull still fails.
-> - **If you have not** — which is everyone outside the organization — this
->   path cannot work at all. Use the Compose path below; it builds from source,
->   needs no registry access, and is the supported route.
->
-> Tracked in [#24](https://github.com/Templar-Protocol/templar-liquidator/issues/24);
-> this note goes away once the package is public.
 
 Or build and run locally with Docker Compose:
 
@@ -43,10 +28,9 @@ docker compose up
 
 `docker compose up` **builds from source** — it compiles the crate and its
 git dependencies inside the image, including an `npm install` a dependency's
-`build.rs` runs — so the first run is slow (several minutes). It is also the
-**only path that works without registry access**, so unless you have been
-granted access to the private package it is the way to get started, not just
-the way to iterate on the code.
+`build.rs` runs — so the first run is slow (several minutes). Reach for it
+when you want to audit or modify what you run; the published image is the
+faster way to just try the bot.
 
 Three env vars are required — the bot refuses to start without them:
 

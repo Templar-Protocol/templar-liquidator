@@ -117,8 +117,6 @@ The `preflight` job runs `check-release.sh` again and blocks the release if the 
 
 `:latest` only moves for non-prerelease tags, so `vX.Y.Z-rc.1` publishes `X.Y.Z-rc.1` without repointing `:latest` (or `:<major>.<minor>`) at a release candidate.
 
-Note that a GHCR package is **private by default even for a public repo**, and this organization currently restricts making them public — the control is disabled at the org level, not on the package. Until that changes, the published image cannot be pulled by anyone outside the organization, which affects the README quickstart. Tracked in [#24](https://github.com/Templar-Protocol/templar-liquidator/issues/24), which also lists the notes to delete once it is resolved.
-
 ## License
 
 By contributing, you agree your contribution is licensed under this repo's [GPL-3.0-only license](LICENSE).

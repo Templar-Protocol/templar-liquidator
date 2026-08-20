@@ -398,6 +398,19 @@ enum LocalScreen {
     SkipMaintenance,
 }
 
+/// Forward margin applied to the expiry leg of the local screen, covering
+/// wall-clock skew against block time plus a round's duration. A position
+/// expiring within the margin screens as a candidate and gets the
+/// authoritative on-chain check — so a lagging clock can only cost an extra
+/// RPC read, never a missed expiry liquidation.
+const EXPIRY_SCREEN_MARGIN_MS: u64 = 15 * 60 * 1000;
+
+/// The timestamp the local screen's expiry check runs against: now plus
+/// [`EXPIRY_SCREEN_MARGIN_MS`], saturating.
+fn expiry_screen_timestamp(now_ms: u64) -> u64 {
+    now_ms.saturating_add(EXPIRY_SCREEN_MARGIN_MS)
+}
+
 /// Screens a locally computed [`BorrowStatus`] into a round-loop action.
 ///
 /// The screen only decides which positions pay for an on-chain status read —
@@ -1224,10 +1237,11 @@ impl Liquidator {
         // status is computed with the same `MarketConfiguration::borrow_status`
         // the contract runs, from data already in hand (positions, prices,
         // config). Only apparent candidates get the authoritative on-chain
-        // check inside `liquidate()`. Wall-clock now stands in for block time
-        // — an expiry that flips within clock-skew of the boundary is caught
-        // by the on-chain check or the next round. If the price pair can't be
-        // built locally, every position is confirmed on-chain instead.
+        // check inside `liquidate()`. Wall-clock now stands in for block time,
+        // with `EXPIRY_SCREEN_MARGIN_MS` of forward slack on the expiry leg
+        // so a lagging clock routes near-expiry positions on-chain instead of
+        // skipping them. If the price pair can't be built locally, every
+        // position is confirmed on-chain instead.
         // Wall-clock now feeds the expiry leg of the screen; if it can't be
         // computed, skip screening entirely (fail open toward candidacy)
         // rather than screen against a bogus timestamp.
@@ -1247,7 +1261,7 @@ impl Liquidator {
                     let status = self.market_config.borrow_status(
                         position.collateralization_ratio(&price_pair),
                         position.started_at_block_timestamp_ms,
-                        now_ms,
+                        expiry_screen_timestamp(now_ms),
                     );
                     match screen_status(status) {
                         LocalScreen::Candidate => true,
@@ -1515,6 +1529,20 @@ mod tests {
             screen_status(BorrowStatus::MaintenanceRequired),
             LocalScreen::SkipMaintenance,
         );
+    }
+
+    /// The expiry leg of the screen must look *ahead* by the margin: a
+    /// position expiring within it is a candidate (the on-chain check
+    /// decides), so a wall clock lagging block time by up to the margin can
+    /// only cost an extra RPC read, never a missed expiry liquidation.
+    #[test]
+    fn expiry_screen_timestamp_adds_the_forward_margin() {
+        assert_eq!(expiry_screen_timestamp(0), EXPIRY_SCREEN_MARGIN_MS);
+        assert_eq!(
+            expiry_screen_timestamp(1_000),
+            1_000 + EXPIRY_SCREEN_MARGIN_MS
+        );
+        assert_eq!(expiry_screen_timestamp(u64::MAX), u64::MAX);
     }
 
     #[test]

@@ -1228,16 +1228,20 @@ impl Liquidator {
         // — an expiry that flips within clock-skew of the boundary is caught
         // by the on-chain check or the next round. If the price pair can't be
         // built locally, every position is confirmed on-chain instead.
+        // Wall-clock now feeds the expiry leg of the screen; if it can't be
+        // computed, skip screening entirely (fail open toward candidacy)
+        // rather than screen against a bogus timestamp.
         #[allow(clippy::cast_possible_truncation)]
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
-        let candidates: Vec<(AccountId, BorrowPosition)> = match self
+            .ok()
+            .map(|d| d.as_millis() as u64);
+        let price_pair = self
             .market_config
             .price_oracle_configuration
-            .create_price_pair(&oracle_response)
-        {
-            Ok(price_pair) => borrows
+            .create_price_pair(&oracle_response);
+        let candidates: Vec<(AccountId, BorrowPosition)> = match (price_pair, now_ms) {
+            (Ok(price_pair), Some(now_ms)) => borrows
                 .into_iter()
                 .filter(|(account, position)| {
                     let status = self.market_config.borrow_status(
@@ -1260,10 +1264,16 @@ impl Liquidator {
                     }
                 })
                 .collect(),
-            Err(error) => {
+            (Err(error), _) => {
                 tracing::warn!(
                     %error,
                     "Could not build price pair for local screening; confirming every position on-chain"
+                );
+                borrows.into_iter().collect()
+            }
+            (Ok(_), None) => {
+                tracing::warn!(
+                    "System clock predates the epoch; confirming every position on-chain"
                 );
                 borrows.into_iter().collect()
             }

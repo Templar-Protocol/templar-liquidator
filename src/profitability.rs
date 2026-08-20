@@ -83,7 +83,9 @@ impl ProfitabilityCalculator {
     ///
     /// # Errors
     ///
-    /// Returns an error if the borrow asset price is not found in the oracle response
+    /// Returns an error if the borrow asset price is not found in the oracle
+    /// response, is present but unusable (zero, negative, or non-finite), or
+    /// the converted amount is not representable as `u128`.
     pub fn convert_gas_cost_to_borrow_asset(
         gas_cost_usd: f64,
         oracle_response: &OracleResponse,
@@ -125,7 +127,9 @@ impl ProfitabilityCalculator {
     ///
     /// # Errors
     ///
-    /// Returns an error if collateral or borrow asset prices are not found in the oracle response
+    /// Returns an error if either price is not found in the oracle response,
+    /// is present but unusable (zero, negative, or non-finite), or the
+    /// converted amount is not representable as `u128`.
     pub fn convert_collateral_to_borrow_asset(
         collateral_amount: U128,
         oracle_response: &OracleResponse,
@@ -202,7 +206,84 @@ impl ProfitabilityCalculator {
 mod tests {
     use near_sdk::json_types::U128;
 
-    use super::ProfitabilityCalculator;
+    use super::{pyth, MarketConfiguration, OracleResponse, ProfitabilityCalculator};
+
+    /// A real mainnet `get_configuration` payload (linear-usdt market),
+    /// deserialized through the same serde path production uses. Borrow asset
+    /// has 6 decimals, collateral 24; price ids are 0xbb…/0xcc… repeated.
+    const MARKET_CONFIG_JSON: &str = r#"{"time_chunk_configuration":{"duration_ms":"600000"},"borrow_asset":{"Nep141":"usdt.tether-token.near"},"collateral_asset":{"Nep141":"linear-protocol.near"},"price_oracle_configuration":{"account_id":"proxy-oracle-linear-usdt.v1.tmplr.near","collateral_asset_price_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","collateral_asset_decimals":24,"borrow_asset_price_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","borrow_asset_decimals":6,"price_maximum_age_s":60},"borrow_mcr_maintenance":"1.40000000000000000000000000000000000001","borrow_mcr_liquidation":"1.33333333333333333333333333333333333334","borrow_asset_maximum_usage_ratio":"0.99000000000000000000000000000000000001","borrow_origination_fee":{"Flat":"0"},"borrow_interest_rate_strategy":{"Piecewise":{"base":"0","optimal":"0.90000000000000000000000000000000000001","rate_1":"0.08888888888888888888888888888888888889","rate_2":"2.40000000000000000000000000000000000001"}},"borrow_maximum_duration_ms":null,"borrow_range":{"minimum":"1","maximum":null},"supply_range":{"minimum":"40000","maximum":null},"supply_withdrawal_range":{"minimum":"40000","maximum":null},"supply_withdrawal_fee":{"fee":{"Flat":"0"},"duration":"0","behavior":"Fixed"},"yield_weights":{"supply":4,"static":{"revenue.tmplr.near":1}},"protocol_account_id":"revenue.tmplr.near","liquidation_maximum_spread":"0.1"}"#;
+
+    fn market_config() -> MarketConfiguration {
+        near_sdk::serde_json::from_str(MARKET_CONFIG_JSON).expect("fixture parses")
+    }
+
+    fn fixture_response(
+        borrow: Option<pyth::Price>,
+        collateral: Option<pyth::Price>,
+    ) -> OracleResponse {
+        let mut r = OracleResponse::new();
+        r.insert(
+            templar_common::oracle::pyth::PriceIdentifier([0xbb; 32]),
+            borrow,
+        );
+        r.insert(
+            templar_common::oracle::pyth::PriceIdentifier([0xcc; 32]),
+            collateral,
+        );
+        r
+    }
+
+    /// The public conversions must route through the validation — helper-only
+    /// coverage would not catch either function being un-wired from it.
+    #[test]
+    fn conversions_reject_unusable_prices_end_to_end() {
+        let cfg = market_config();
+
+        // Zero borrow price: both conversions must error, not saturate.
+        let r = fixture_response(Some(price(0, -8)), Some(price(100_000_000, -8)));
+        assert!(ProfitabilityCalculator::convert_gas_cost_to_borrow_asset(0.05, &r, &cfg).is_err());
+        assert!(
+            ProfitabilityCalculator::convert_collateral_to_borrow_asset(U128(1), &r, &cfg).is_err()
+        );
+
+        // Zero collateral price: the collateral conversion must error.
+        let r = fixture_response(Some(price(100_000_000, -8)), Some(price(0, -8)));
+        assert!(
+            ProfitabilityCalculator::convert_collateral_to_borrow_asset(U128(1), &r, &cfg).is_err()
+        );
+
+        // A result too large for u128 must error rather than saturate.
+        let r = fixture_response(Some(price(100_000_000, -8)), Some(price(i64::MAX, 10)));
+        assert!(ProfitabilityCalculator::convert_collateral_to_borrow_asset(
+            U128(u128::MAX),
+            &r,
+            &cfg
+        )
+        .is_err());
+    }
+
+    /// Sanity of the happy path against the real market fixture: $0.05 gas at
+    /// a $1.00 borrow price and 6 decimals is 50_000 raw units; one whole
+    /// 24-decimal collateral token at $1.00 each converts to 10^6 raw borrow
+    /// units.
+    #[test]
+    fn conversions_produce_expected_values_end_to_end() {
+        let cfg = market_config();
+        let one_usd = price(100_000_000, -8);
+        let r = fixture_response(Some(one_usd.clone()), Some(one_usd));
+
+        let gas = ProfitabilityCalculator::convert_gas_cost_to_borrow_asset(0.05, &r, &cfg)
+            .expect("usable prices");
+        assert_eq!(gas.0, 50_000);
+
+        let value = ProfitabilityCalculator::convert_collateral_to_borrow_asset(
+            U128(1_000_000_000_000_000_000_000_000),
+            &r,
+            &cfg,
+        )
+        .expect("usable prices");
+        assert_eq!(value.0, 1_000_000);
+    }
 
     fn price(mantissa: i64, expo: i32) -> templar_common::oracle::pyth::Price {
         templar_common::oracle::pyth::Price {

@@ -106,6 +106,17 @@ fn unix_now_secs() -> i64 {
         .map_or(0, |d| d.as_secs().cast_signed())
 }
 
+/// True when every requested feed has a `Some` price in the response.
+///
+/// A partial response is worse than an empty one for a direct-Pyth market:
+/// with no fallback path, it reaches per-position status checks and fails
+/// each one with "Missing price" instead of skipping the market once.
+fn covers_all(response: &OracleResponse, price_ids: &[PriceIdentifier]) -> bool {
+    price_ids
+        .iter()
+        .all(|id| matches!(response.get(id), Some(Some(_))))
+}
+
 /// Drops entries whose publish time falls outside the market's freshness
 /// bound. `None` entries pass through — they already mean "no price".
 fn retain_fresh(response: &mut OracleResponse, now_secs: i64, max_age_secs: u32) {
@@ -696,6 +707,13 @@ impl OracleFetcher {
                 )))
             })?;
         retain_fresh(&mut response, unix_now_secs(), age);
+        if !covers_all(&response, price_ids) {
+            tracing::warn!(
+                %oracle,
+                "Stale or missing Pyth feed(s); treating the market as unpriced"
+            );
+            return Ok(OracleResponse::new());
+        }
         Ok(response)
     }
 
@@ -1129,6 +1147,26 @@ mod tests {
             expo: -8,
             publish_time: pyth::PythTimestamp::from_secs(publish_secs),
         }
+    }
+
+    /// A partial direct-Pyth response must not escape: with no fallback
+    /// path, it would reach per-position status checks and fail each one
+    /// with "Missing price" instead of skipping the market once.
+    #[test]
+    fn covers_all_requires_a_some_price_for_every_requested_feed() {
+        let now = 1_755_600_000_i64;
+        let mut response: OracleResponse = HashMap::new();
+        response.insert(PriceIdentifier([1; 32]), Some(price_at(now)));
+        response.insert(PriceIdentifier([2; 32]), Some(price_at(now)));
+        let both = [PriceIdentifier([1; 32]), PriceIdentifier([2; 32])];
+
+        assert!(covers_all(&response, &both));
+        // A feed answered with None is not covered.
+        response.insert(PriceIdentifier([2; 32]), None);
+        assert!(!covers_all(&response, &both));
+        // An absent feed is not covered.
+        response.remove(&PriceIdentifier([2; 32]));
+        assert!(!covers_all(&response, &both));
     }
 
     /// Direct-Pyth responses must be bounded by the market's freshness window

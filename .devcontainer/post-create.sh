@@ -89,52 +89,11 @@ if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "${wor
 	git config --global --add safe.directory "${workspace}"
 fi
 
-# 2. Warn if commit signing cannot work in here.
-#
-#    VS Code copies the host ~/.gitconfig in verbatim, so `user.signingkey`
-#    still points at a path on the HOST (typically ~/.ssh/id_ed25519) that does
-#    not exist in the container. With commit.gpgsign=true that fails closed —
-#    `git commit` is refused outright rather than quietly producing unsigned
-#    commits, which is the right way round but blocks committing until fixed.
-#
-#    The fix does NOT require mounting a private key into the container. VS
-#    Code forwards the host ssh-agent (SSH_AUTH_SOCK), so once the signing key
-#    is loaded there, ssh-keygen signs through the agent and the private key
-#    never leaves the host:
-#
-#      # on the host, once
-#      ssh-add --apple-use-keychain ~/.ssh/id_ed25519    # macOS; ssh-add on Linux
-#      # in the container, point signingkey at the matching PUBLIC key
-#      git config --global user.signingkey ~/.ssh/id_ed25519.pub
-#
-#    Only a warning: an unsigned-commit setup is a perfectly reasonable way to
-#    use this container, and failing the create over it would be worse than the
-#    problem.
-if [ "$(git config --global --get commit.gpgsign 2>/dev/null || echo false)" = "true" ]; then
-	signing_key="$(git config --global --get user.signingkey 2>/dev/null || true)"
-	case "${signing_key}" in
-	"~/"*) signing_key="${HOME}/${signing_key#\~/}" ;;
-	esac
-	if [ -n "${signing_key}" ] && [ ! -f "${signing_key}" ]; then
-		warn "commit.gpgsign is on but user.signingkey points at '${signing_key}', which does not exist in this container, so 'git commit' will fail. Load the key into the host ssh-agent (ssh-add --apple-use-keychain ~/.ssh/id_ed25519) and set user.signingkey to the matching .pub inside the container — see the comment in .devcontainer/post-create.sh."
-	elif [ -n "${signing_key}" ]; then
-		# The key resolves, so signing will work. Verifying is a SEPARATE
-		# setting: without gpg.ssh.allowedSignersFile, git reports every
-		# signed commit as "N" (no signature) locally — `git log --show-
-		# signature` even errors outright — while GitHub happily reports it
-		# as verified. Generate the file from config that is already present
-		# rather than asking anyone to hand-maintain it.
-		email="$(git config --global --get user.email 2>/dev/null || true)"
-		if [ -n "${email}" ]; then
-			allowed="${HOME}/.ssh/allowed_signers"
-			entry="${email} $(cut -d' ' -f1,2 "${signing_key}")"
-			if [ ! -f "${allowed}" ] || ! grep -qxF "${entry}" "${allowed}"; then
-				printf '%s\n' "${entry}" >> "${allowed}"
-			fi
-			git config --global gpg.ssh.allowedSignersFile "${allowed}"
-		fi
-	fi
-fi
+# 2. Commit signing. Extracted to its own script because it also runs from
+#    postStartCommand — SSH_AUTH_SOCK is not reliably present during creation.
+#    See .devcontainer/git-signing.sh for the whole story.
+echo "==> Configuring git commit signing"
+"$(dirname "$0")/git-signing.sh"
 
 # 3. Toolchain — `rustup show` reads rust-toolchain.toml and installs the
 #    pinned 1.97.0 toolchain plus rustfmt/clippy. Fatal if it fails; there is
@@ -214,8 +173,16 @@ fi
 #    before the CLI can write to it. ~/.claude.json sits *outside* that
 #    directory, so it is moved in and symlinked back — otherwise it is the one
 #    piece of state that would still be lost on rebuild.
-echo "==> Setting up Claude Code"
+#    ~/.config/gh is a named volume for the same reason: gh's OAuth token lives
+#    there, the container cannot inherit the host's login (it is in the macOS
+#    keychain), and without persistence every rebuild needs another
+#    `gh auth login`. Same root-owned-volume problem, same fix.
+echo "==> Setting up Claude Code and gh credential persistence"
 sudo chown -R "$(id -u):$(id -g)" "${HOME}/.claude" || warn "could not chown ${HOME}/.claude"
+if [ -d "${HOME}/.config/gh" ]; then
+	sudo chown -R "$(id -u):$(id -g)" "${HOME}/.config/gh" ||
+		warn "could not chown ${HOME}/.config/gh; gh auth may not persist across rebuilds"
+fi
 
 #
 #    Each step below warns rather than aborting. The chown above is the one
@@ -246,7 +213,57 @@ else
 		"Claude Code install failed. Nothing in the build depends on it. Retry with: npm install -g @anthropic-ai/claude-code"
 fi
 
-# 6. Warm the dependency cache, including the git checkout of the pinned
+# 6. CI-parity tooling.
+#
+#    CI gates on both of these (.github/workflows/ci.yml's `shellcheck` and
+#    `deny` jobs), so without them locally the first sign of a violation is a
+#    red PR. Neither is needed to build the crate; both are cheap.
+#
+#    cargo-deny is installed from its static musl release binary rather than
+#    `cargo install`, which would compile a large dependency tree — and unlike
+#    near-cli-rs there is no glibc trap here, because a musl build carries no
+#    libc dependency at all. Pinned and checksum-verified, downloaded to a temp
+#    dir and moved into place only after the checksum passes, so a failed or
+#    truncated download never leaves a partial binary on PATH.
+#    To bump: change the version and both sha256 (the .sha256 sidecars on the
+#    GitHub release).
+CARGO_DENY_VERSION="0.20.2"
+echo "==> Installing CI-parity tooling (shellcheck, cargo-deny)"
+
+if ! command -v shellcheck >/dev/null 2>&1; then
+	sudo apt-get install -y -qq --no-install-recommends shellcheck ||
+		warn "shellcheck install failed; CI's shellcheck job cannot be reproduced locally."
+fi
+
+if [ "$(cargo deny --version 2>/dev/null | awk '{ print $2 }')" = "${CARGO_DENY_VERSION}" ]; then
+	echo "    cargo-deny ${CARGO_DENY_VERSION} already installed"
+else
+	case "$(uname -m)" in
+	aarch64 | arm64) deny_arch="aarch64"; deny_sha="995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d" ;;
+	x86_64 | amd64) deny_arch="x86_64"; deny_sha="9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f" ;;
+	*) deny_arch="" ;;
+	esac
+
+	if [ -z "${deny_arch}" ]; then
+		warn "cargo-deny: no prebuilt binary for $(uname -m); install it manually if you need to reproduce CI's deny job."
+	elif ! deny_tmp="$(mktemp -d 2>/dev/null)"; then
+		warn "cargo-deny: mktemp failed; skipping."
+	else
+		deny_tar="cargo-deny-${CARGO_DENY_VERSION}-${deny_arch}-unknown-linux-musl.tar.gz"
+		if curl -fsSL -o "${deny_tmp}/${deny_tar}" \
+			"https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${deny_tar}" &&
+			echo "${deny_sha}  ${deny_tmp}/${deny_tar}" | sha256sum -c - >/dev/null 2>&1 &&
+			tar -xzf "${deny_tmp}/${deny_tar}" -C "${deny_tmp}" &&
+			sudo install -m 0755 "${deny_tmp}"/*/cargo-deny /usr/local/bin/cargo-deny; then
+			echo "    cargo-deny ${CARGO_DENY_VERSION} installed"
+		else
+			warn "cargo-deny install failed (download/checksum/extract); CI's deny job cannot be reproduced locally."
+		fi
+		rm -rf "${deny_tmp}"
+	fi
+fi
+
+# 7. Warm the dependency cache, including the git checkout of the pinned
 #    templar-* rev — worth doing up front since that fetch needs network and
 #    would otherwise happen lazily on the first build/test/clippy run.
 echo "==> Warming the cargo dependency cache"

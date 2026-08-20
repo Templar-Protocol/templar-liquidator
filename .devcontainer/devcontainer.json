@@ -66,13 +66,26 @@
   // NOTE: this volume holds credentials. It is not covered by the repo's
   // .gitignore or by anything in .dockerignore — it lives in Docker's volume
   // store on the host. `docker volume rm` it if you hand this machine over.
+  //
+  // gh stores its OAuth token under ~/.config/gh. Without a volume, every
+  // rebuild needs another `gh auth login` — and the container cannot inherit
+  // the host's login, which lives in the macOS keychain. Same posture as the
+  // Claude volume above: a credential in a Docker volume on the host.
+  // `docker volume rm` both if you hand this machine over.
   "mounts": [
-    "source=templar-liquidator-claude-code,target=/home/vscode/.claude,type=volume"
+    "source=templar-liquidator-claude-code,target=/home/vscode/.claude,type=volume",
+    "source=templar-liquidator-gh-config,target=/home/vscode/.config/gh,type=volume"
   ],
   // Toolchain install, near-cli-rs, and the cargo cache warm-up. Kept in a
   // script rather than inlined here so each step can carry the reasoning for
   // why it exists and be non-fatal on its own — see .devcontainer/post-create.sh.
   "postCreateCommand": "${containerWorkspaceFolder}/.devcontainer/post-create.sh",
+  // Commit signing only. It needs the forwarded ssh-agent, and SSH_AUTH_SOCK is
+  // not reliably present during creation — it is set up around the connection.
+  // Re-running on every start wires signing up as soon as the agent is
+  // reachable instead of only on the rebuild where the timing happened to work.
+  // Idempotent and near-instant once configured.
+  "postStartCommand": "${containerWorkspaceFolder}/.devcontainer/git-signing.sh",
   "customizations": {
     "vscode": {
       "extensions": [

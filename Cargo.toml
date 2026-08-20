@@ -29,7 +29,7 @@ hex = { version = "0.4.3", features = ["serde"] }
 near-account-id = "2.6"
 near-api = "0.8.6"
 near-crypto = "0.34.7"
-near-jsonrpc-client = "0.20.0"
+near-jsonrpc-client = "0.22.0"
 near-sdk = { version = "5.25", default-features = false, features = ["unstable", "non-contract-usage"] }
 reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }

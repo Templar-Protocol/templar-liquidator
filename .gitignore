@@ -9,3 +9,8 @@
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
+
+# Claude Code scratch state. `.claude/commands/` is intentionally tracked (the
+# /fix-pr command is shared tooling); worktrees are per-machine checkouts and
+# are embedded git repos, which must never be committed into this one.
+.claude/worktrees/

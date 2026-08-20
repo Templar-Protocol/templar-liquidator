@@ -71,7 +71,6 @@ If it doesn't exist when you try this, get the current testnet registry account 
 Also relevant for testnet:
 
 ```bash
-REF_CONTRACT=v2.ref-dev.testnet   # only if you plan to test COLLATERAL_STRATEGY=swap-to-borrow
 ```
 
 ## 4. Find or create a borrow position **[procedure]**

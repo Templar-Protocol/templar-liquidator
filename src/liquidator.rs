@@ -39,7 +39,7 @@
 //!
 //! - [`crate::swap::SwapProvider`] — a DEX/aggregator integration for converting
 //!   collateral back into borrow assets. Reach for this when the bot needs to route
-//!   through a venue other than the built-in Ref Finance or 1-Click providers.
+//!   through a venue other than the built-in 1-Click provider.
 //! - [`crate::liquidation_strategy::LiquidationStrategy`] — the policy for how much
 //!   of a position to repay each round. Reach for this when the built-in
 //!   percentage-of-inventory and fixed-USD-amount strategies don't match the sizing

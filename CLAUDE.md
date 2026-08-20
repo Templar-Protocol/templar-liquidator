@@ -75,10 +75,8 @@ One line per file in `src/`:
   methods and can't be a trait object).
 - `swap/oneclick.rs` — 1-Click API provider (NEAR Intents cross-chain swaps):
   quote → deposit → poll.
-- `swap/ref.rs` — Ref Finance AMM provider for NEP-141 tokens, with automatic
-  wNEAR routing.
 - `swap/retry.rs` — swap error classification (retryable vs. permanent) and
-  the generic retry wrapper both providers run through.
+  the generic retry wrapper swaps run through.
 - `notifier.rs` — Telegram notifications; the notification extension seam
   (no trait boundary yet — a fork adding another channel extends or replaces
   this type directly).

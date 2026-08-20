@@ -1,44 +1,43 @@
 //! Concrete swap provider enum for dynamic dispatch.
 //!
 //! Since the `SwapProvider` trait has generic methods, it cannot be made into
-//! a trait object. This module provides a concrete enum that can be used
-//! for dynamic dispatch while maintaining type safety.
+//! a trait object. This enum is the dispatch point instead: the crate ships
+//! one variant (1-Click), and a fork adding a venue implements
+//! [`SwapProvider`] for its own type and adds a variant here — every match
+//! below is exhaustive, so the compiler walks the fork through each method
+//! that needs forwarding.
 
 use near_sdk::AccountId;
 use templar_common::asset::{AssetClass, FungibleAsset, FungibleAssetAmount};
 
 use crate::rpc::AppResult;
 
-use super::{oneclick::OneClickSwap, r#ref::RefSwap, SwapProvider};
+use super::{oneclick::OneClickSwap, SwapProvider};
 
 /// Concrete swap provider implementation that can be used for dynamic dispatch.
 ///
-/// This enum wraps all supported swap providers and implements `SwapProvider`,
-/// allowing it to be used where dynamic dispatch is needed.
+/// Wraps every shipped swap provider and implements `SwapProvider` by
+/// forwarding. Currently single-variant on purpose: Ref Finance was removed
+/// (its `min_amount_out` carried no price or decimals conversion, so it
+/// offered no effective slippage protection), and the enum shape was kept so
+/// third-party venues slot in as new variants without touching the trait.
 #[derive(Debug, Clone)]
 pub enum SwapProviderImpl {
-    /// Ref Finance classic AMM provider (v2.ref-finance.near)
-    RefFinance(RefSwap),
     /// 1-Click API provider for NEP-245 cross-chain swaps
     OneClick(OneClickSwap),
 }
 
 impl SwapProviderImpl {
-    /// Creates a Ref Finance provider variant.
-    pub fn ref_finance(provider: RefSwap) -> Self {
-        Self::RefFinance(provider)
-    }
-
     /// Creates a 1-Click API provider variant.
     pub fn oneclick(provider: OneClickSwap) -> Self {
         Self::OneClick(provider)
     }
 
-    /// Loads supported tokens for the 1-Click provider (no-op for others).
+    /// Loads supported tokens for the 1-Click provider (no-op for providers
+    /// without a token cache).
     pub async fn load_supported_tokens(&self) {
-        if let Self::OneClick(provider) = self {
-            provider.load_supported_tokens().await;
-        }
+        let Self::OneClick(provider) = self;
+        provider.load_supported_tokens().await;
     }
 }
 
@@ -50,10 +49,8 @@ impl SwapProvider for SwapProviderImpl {
         to_asset: &FungibleAsset<T>,
         output_amount: FungibleAssetAmount<T>,
     ) -> AppResult<FungibleAssetAmount<F>> {
-        match self {
-            Self::RefFinance(provider) => provider.quote(from_asset, to_asset, output_amount).await,
-            Self::OneClick(provider) => provider.quote(from_asset, to_asset, output_amount).await,
-        }
+        let Self::OneClick(provider) = self;
+        provider.quote(from_asset, to_asset, output_amount).await
     }
 
     async fn swap<F: AssetClass, T: AssetClass>(
@@ -62,17 +59,13 @@ impl SwapProvider for SwapProviderImpl {
         to_asset: &FungibleAsset<T>,
         amount: FungibleAssetAmount<F>,
     ) -> AppResult<()> {
-        match self {
-            Self::RefFinance(provider) => provider.swap(from_asset, to_asset, amount).await,
-            Self::OneClick(provider) => provider.swap(from_asset, to_asset, amount).await,
-        }
+        let Self::OneClick(provider) = self;
+        provider.swap(from_asset, to_asset, amount).await
     }
 
     fn provider_name(&self) -> &'static str {
-        match self {
-            Self::RefFinance(provider) => provider.provider_name(),
-            Self::OneClick(provider) => provider.provider_name(),
-        }
+        let Self::OneClick(provider) = self;
+        provider.provider_name()
     }
 
     fn supports_assets<F: AssetClass, T: AssetClass>(
@@ -80,10 +73,8 @@ impl SwapProvider for SwapProviderImpl {
         from_asset: &FungibleAsset<F>,
         to_asset: &FungibleAsset<T>,
     ) -> bool {
-        match self {
-            Self::RefFinance(provider) => provider.supports_assets(from_asset, to_asset),
-            Self::OneClick(provider) => provider.supports_assets(from_asset, to_asset),
-        }
+        let Self::OneClick(provider) = self;
+        provider.supports_assets(from_asset, to_asset)
     }
 
     async fn ensure_storage_registration<F: AssetClass>(
@@ -91,17 +82,9 @@ impl SwapProvider for SwapProviderImpl {
         token_contract: &FungibleAsset<F>,
         account_id: &AccountId,
     ) -> AppResult<()> {
-        match self {
-            Self::RefFinance(provider) => {
-                provider
-                    .ensure_storage_registration(token_contract, account_id)
-                    .await
-            }
-            Self::OneClick(provider) => {
-                provider
-                    .ensure_storage_registration(token_contract, account_id)
-                    .await
-            }
-        }
+        let Self::OneClick(provider) = self;
+        provider
+            .ensure_storage_registration(token_contract, account_id)
+            .await
     }
 }

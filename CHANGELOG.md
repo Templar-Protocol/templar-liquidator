@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- [**breaking**] The Ref Finance swap provider (`swap/ref.rs`, `RefSwap`) and its `REF_CONTRACT` / `--ref-contract` knob. Two reasons: it was dead wiring (the service constructed it and immediately discarded it — only 1-Click was ever used for JIT and batch swaps), and it was unsafe to wire in as-is: its `min_amount_out` was derived from the *input* amount with no price or decimals conversion, giving no effective slippage protection for any non-1:1 pair (a BTC→USDC swap would have accepted nearly any execution price). Passing `--ref-contract` now fails at startup as an unknown flag; the `REF_CONTRACT` env var is simply ignored. The multi-provider architecture stays: `SwapProvider` (trait) + `SwapProviderImpl` (dispatch enum) are the seam — a fork adds a venue by implementing the trait and adding a variant, and `swap/mod.rs` documents the slippage bar any AMM provider must clear.
+
 ### Added
 
 - Off-chain proxy-oracle price composition at scan time. Proxy-backed markets previously required a keeper to have recently pushed the proxy's on-chain price cache before they could even be *scanned* — in a standalone deployment (any fork not running Templar's backend keeper) every proxy market failed with `Missing price` forever. The scanner now reads each feed's source config from the proxy contract (a free view call) and composes the price off-chain: Pyth sources via Hermes, RedStone sources via the public price API (`REDSTONE_API_URL` / `--redstone-api-url`, default `https://api.redstone.finance` — the endpoint templar-backend reads), transformers applied with their on-chain input (also a free view call). Feeds that can't be composed off-chain (e.g. Lazer-sourced) fall back to the on-chain cache read as before. Costs no gas anywhere; execution-time pricing is unchanged — the bot still pushes fresh prices on-chain before a live liquidation and the market contract still enforces its own oracle, freshness bound, and circuit breakers.

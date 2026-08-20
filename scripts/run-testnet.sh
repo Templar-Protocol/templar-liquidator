@@ -47,7 +47,6 @@ PARTIAL_LIQUIDATION_PERCENTAGE="${PARTIAL_LIQUIDATION_PERCENTAGE}"
 FIXED_LIQUIDATION_AMOUNT_USD="${FIXED_LIQUIDATION_AMOUNT_USD}"
 LOOP_LIQUIDATION="${LOOP_LIQUIDATION:-false}"
 MAX_LOOP_ITERATIONS="${MAX_LOOP_ITERATIONS:-10}"
-TRANSACTION_TIMEOUT="${TRANSACTION_TIMEOUT:-60}"
 MIN_PROFIT_BPS="${MIN_PROFIT_BPS:-50}"
 DRY_RUN="${DRY_RUN:-true}"
 # Exported (unlike the other CMD_ARGS-driven values above) because the binary
@@ -68,7 +67,6 @@ IGNORED_MARKETS="${IGNORED_MARKETS}"
 
 # Oracle price update configuration
 PYTH_HERMES_URL="${PYTH_HERMES_URL}"
-REDSTONE_GATEWAY_URL="${REDSTONE_GATEWAY_URL:-https://oracle-gateway-1.a.redstone.vip}"
 
 # Build binary
 # scripts/ lives directly under the repo root, so the root is scripts/..
@@ -145,7 +143,6 @@ CMD_ARGS=(
     "--registry-refresh-interval" "$REGISTRY_REFRESH_INTERVAL"
     "--concurrency" "$CONCURRENCY"
     "--min-profit-bps" "$MIN_PROFIT_BPS"
-    "--transaction-timeout" "$TRANSACTION_TIMEOUT"
 )
 
 for registry in $REGISTRIES; do
@@ -209,7 +206,6 @@ fi
 
 # Add oracle price update arguments
 [ -n "$PYTH_HERMES_URL" ] && CMD_ARGS+=("--hermes-url" "$PYTH_HERMES_URL")
-CMD_ARGS+=("--redstone-gateway-url" "$REDSTONE_GATEWAY_URL")
 
 # Add Telegram notification arguments (use = syntax because chat IDs start with -)
 # TELEGRAM_BOT_TOKEN goes via the environment, not argv (see the SIGNER_KEY note above).

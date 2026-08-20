@@ -73,8 +73,6 @@ pub struct ServiceConfig {
     pub near_rpc_url: Option<String>,
     /// API key for the RPC endpoint, sent as an `Authorization` header
     pub near_rpc_api_key: Option<String>,
-    /// Transaction timeout in seconds
-    pub transaction_timeout: u64,
     /// Interval between liquidation scans in seconds
     pub liquidation_scan_interval: u64,
     /// Registry refresh interval in seconds
@@ -150,7 +148,6 @@ impl std::fmt::Debug for ServiceConfig {
             .field("network", &self.network)
             .field("near_rpc_url", &shown(self.near_rpc_url.as_ref()))
             .field("near_rpc_api_key", &shown(self.near_rpc_api_key.as_ref()))
-            .field("transaction_timeout", &self.transaction_timeout)
             .field("liquidation_scan_interval", &self.liquidation_scan_interval)
             .field("registry_refresh_interval", &self.registry_refresh_interval)
             .field("run_mode", &self.run_mode)

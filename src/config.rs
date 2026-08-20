@@ -126,10 +126,6 @@ pub struct Args {
     #[arg(long, env = "NEAR_RPC_API_KEY")]
     pub near_rpc_api_key: Option<String>,
 
-    /// Transaction timeout in seconds
-    #[arg(long, env = "TRANSACTION_TIMEOUT", default_value_t = 60)]
-    pub transaction_timeout: u64,
-
     /// Interval between liquidation scans in seconds
     #[arg(long, env = "LIQUIDATION_SCAN_INTERVAL", default_value_t = 600)]
     pub liquidation_scan_interval: u64,
@@ -236,17 +232,6 @@ pub struct Args {
     #[arg(long, env = "PYTH_HERMES_URL")]
     pub hermes_url: Option<Url>,
 
-    /// RedStone gateway URL. Currently unused: scan-side RedStone prices come
-    /// from the public price API (`--redstone-api-url`), and on-chain pushes
-    /// go through the proxy contract's own `update_prices` flow. Retained so
-    /// existing deployments passing it don't break.
-    #[arg(
-        long,
-        env = "REDSTONE_GATEWAY_URL",
-        default_value = "https://oracle-gateway-1.a.redstone.vip"
-    )]
-    pub redstone_gateway_url: String,
-
     /// RedStone public price API, used to compose proxy-oracle prices
     /// off-chain at scan time. Scan-side only — execution still prices
     /// through the on-chain oracle.
@@ -348,7 +333,6 @@ impl std::fmt::Debug for Args {
             .field("network", &self.network)
             .field("near_rpc_url", &self.near_rpc_url)
             .field("near_rpc_api_key", &shown(self.near_rpc_api_key.as_ref()))
-            .field("transaction_timeout", &self.transaction_timeout)
             .field("liquidation_scan_interval", &self.liquidation_scan_interval)
             .field("registry_refresh_interval", &self.registry_refresh_interval)
             .field("run_mode", &self.run_mode)
@@ -373,7 +357,6 @@ impl std::fmt::Debug for Args {
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field("hermes_url", &self.hermes_url)
-            .field("redstone_gateway_url", &self.redstone_gateway_url)
             .field("redstone_api_url", &self.redstone_api_url)
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
@@ -622,7 +605,6 @@ impl Args {
             network: self.network,
             near_rpc_url: self.near_rpc_url.clone(),
             near_rpc_api_key: self.near_rpc_api_key.clone(),
-            transaction_timeout: self.transaction_timeout,
             liquidation_scan_interval: self.liquidation_scan_interval,
             registry_refresh_interval: self.registry_refresh_interval,
             run_mode: self.effective_run_mode(),
@@ -695,7 +677,6 @@ mod tests {
             network: Network::Testnet,
             near_rpc_url: None,
             near_rpc_api_key: None,
-            transaction_timeout: 60,
             liquidation_scan_interval: 600,
             registry_refresh_interval: 3600,
             run_mode: RunMode::Loop,
@@ -716,7 +697,6 @@ mod tests {
             loop_liquidation: false,
             max_loop_iterations: 10,
             hermes_url: None,
-            redstone_gateway_url: "https://oracle-gateway-1.a.redstone.vip".to_string(),
             redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
             min_swap_value_usd: 10.0,
             batch_swap_on_cycle_start: true,
@@ -919,7 +899,6 @@ mod tests {
     fn test_build_config() {
         let mut args = create_test_args();
         args.near_rpc_url = Some("https://custom.rpc.url".to_string());
-        args.transaction_timeout = 90;
         args.liquidation_scan_interval = 300;
         args.registry_refresh_interval = 1800;
         args.concurrency = 5;
@@ -937,7 +916,6 @@ mod tests {
             config.near_rpc_url,
             Some("https://custom.rpc.url".to_string())
         );
-        assert_eq!(config.transaction_timeout, 90);
         assert_eq!(config.liquidation_scan_interval, 300);
         assert_eq!(config.registry_refresh_interval, 1800);
         assert_eq!(config.concurrency, 5);
@@ -1194,6 +1172,24 @@ mod tests {
             create_test_args().build_config().redstone_api_url.as_str(),
             "https://api.redstone.finance/"
         );
+    }
+
+    /// Both knobs were documented no-ops (nothing consumed either value), so
+    /// they are gone rather than silently accepted — a removed flag must fail
+    /// startup loudly, not swallow an operator's intent.
+    #[test]
+    fn removed_knobs_are_rejected_at_parse_time() {
+        for args in [
+            &["--transaction-timeout", "60"][..],
+            &["--redstone-gateway-url", "https://example.com"][..],
+        ] {
+            let err = try_parse_with(args).expect_err("removed flag must be rejected");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{args:?}"
+            );
+        }
     }
 
     #[test]

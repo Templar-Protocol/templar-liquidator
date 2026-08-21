@@ -374,7 +374,10 @@ impl std::fmt::Debug for Args {
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field("hermes_url", &self.hermes_url)
             .field("redstone_api_url", &self.redstone_api_url)
-            .field("lazer_api_url", &self.lazer_api_url)
+            .field(
+                "lazer_api_url",
+                &self.lazer_api_url.origin().ascii_serialization(),
+            )
             .field("lazer_api_token", &shown(self.lazer_api_token.as_ref()))
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)

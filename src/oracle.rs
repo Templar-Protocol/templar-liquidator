@@ -1395,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_carries_transformers_over_pricable_inners() {
+    fn plan_carries_transformers_over_priceable_inners() {
         let inner = OracleRequest::pyth(
             "pyth-oracle.near".parse().unwrap(),
             PriceIdentifier([0xBB; 32]),
@@ -1403,7 +1403,7 @@ mod tests {
         let plan = plan_offchain_sources([&transformer_source(inner)].into_iter())
             .into_iter()
             .next()
-            .expect("transformer over pyth is pricable off-chain");
+            .expect("transformer over pyth is priceable off-chain");
         match plan {
             OffchainPriceSource::Transformed { request, .. } => {
                 assert_eq!(request, OffchainRequest::Pyth(PriceIdentifier([0xBB; 32])));
@@ -1492,7 +1492,7 @@ mod tests {
         assert!(!publish_time_is_fresh(i64::MAX, now, 120));
     }
 
-    /// A transformer over a Lazer inner is fully pricable at scan time: the
+    /// A transformer over a Lazer inner is fully priceable at scan time: the
     /// transformer input is a view call and the Lazer underlying is an
     /// adapter view read. This is the linear-usdt collateral-feed shape —
     /// the case the Lazer leg exists for.
@@ -1503,7 +1503,7 @@ mod tests {
             plan_offchain_sources([&transformer_source(inner), &redstone_source()].into_iter())
                 .into_iter()
                 .next()
-                .expect("transformer over lazer is pricable off-chain");
+                .expect("transformer over lazer is priceable off-chain");
         match plan {
             OffchainPriceSource::Transformed { request, .. } => {
                 assert_eq!(

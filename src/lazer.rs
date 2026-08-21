@@ -97,8 +97,11 @@ fn value_as_i64(value: &near_sdk::serde_json::Value) -> Option<i64> {
 /// ([`crate::redstone::MAX_FUTURE_SKEW_MS`]), is skipped without discarding
 /// its fresh siblings — absent beats a wrong number. A feed missing its EMA
 /// mantissa, its exponent, or a usable EMA confidence is likewise skipped
-/// individually (the confidence gate is the easy one to miss when debugging
-/// an empty result against a response that visibly carries an EMA price).
+/// individually, as is one whose `feedUpdateTimestamp` is present but `null`
+/// or unparseable — its own age is then unknowable, so it fails closed
+/// rather than riding the envelope's assembly time (the confidence and
+/// timestamp gates are the easy ones to miss when debugging an empty result
+/// against a response that visibly carries an EMA price).
 pub(crate) fn parse_latest_price_response(
     body: &str,
     now_secs: i64,
@@ -214,10 +217,12 @@ pub struct LazerApiConfig {
 }
 
 impl std::fmt::Debug for LazerApiConfig {
-    /// Redacts the access token; the URL alone identifies the deployment.
+    /// Redacts the access token and renders only the URL's origin — a URL
+    /// can carry credentials in its userinfo or query components, and this
+    /// impl is what `ServiceConfig`'s `Debug` delegates to.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LazerApiConfig")
-            .field("url", &self.url.as_str())
+            .field("url", &self.url.origin().ascii_serialization())
             .field("token", &"<redacted>")
             .finish()
     }
@@ -283,7 +288,18 @@ impl std::fmt::Debug for LazerApiClient {
 }
 
 impl LazerApiClient {
+    /// Builds with a dedicated client that follows no redirects: the request
+    /// carries a bearer token, and an https→http redirect (even same-host)
+    /// would downgrade it to cleartext, bypassing the HTTPS invariant
+    /// [`LazerApiConfig::new`] enforces on the configured URL. A redirect
+    /// response therefore surfaces as a non-success status and prices
+    /// nothing. Falls back to the shared client only if the builder fails
+    /// (it has no failing configuration here, but `unwrap` is denied).
     pub(crate) fn new(http: reqwest::Client, config: LazerApiConfig) -> Self {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or(http);
         Self {
             http,
             base_url: config.url,
@@ -455,7 +471,7 @@ mod tests {
         );
     }
 
-    /// The endpooint must append to the configured URL's path, not replace
+    /// The endpoint must append to the configured URL's path, not replace
     /// its last segment — an operator routing through a gateway prefix
     /// (`https://gateway.example/lazer`) keeps that prefix.
     #[test]

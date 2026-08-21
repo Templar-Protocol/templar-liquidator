@@ -644,7 +644,17 @@ impl Args {
                 .clone()
                 .unwrap_or_else(|| self.network.hermes_url()),
             redstone_api_url: self.redstone_api_url.clone(),
-            lazer_api_url: self.lazer_api_url.clone(),
+            lazer_api_url: {
+                // A bearer token over plain http travels in cleartext; refuse
+                // at startup, where the operator sees it, rather than leaking
+                // the credential on the first scan.
+                assert!(
+                    self.lazer_api_token.is_none() || self.lazer_api_url.scheme() == "https",
+                    "LAZER_API_URL must be https when LAZER_API_TOKEN is set — the access token would otherwise travel in cleartext (got {})",
+                    self.lazer_api_url
+                );
+                self.lazer_api_url.clone()
+            },
             lazer_api_token: self.lazer_api_token.clone(),
             min_swap_value_usd: self.min_swap_value_usd,
             batch_swap_on_cycle_start: self.batch_swap_on_cycle_start,
@@ -1259,6 +1269,18 @@ mod tests {
         );
     }
 
+    /// The Lazer token is a bearer credential: sent over a plain-http
+    /// endpoint it travels in cleartext. Refused at startup, where the
+    /// operator sees it, rather than leaking on the first scan.
+    #[test]
+    #[should_panic(expected = "LAZER_API_URL must be https")]
+    fn lazer_token_over_http_is_refused_at_startup() {
+        let mut args = create_test_args();
+        args.lazer_api_token = Some("lazer-token-value".to_string());
+        args.lazer_api_url = "http://pyth-lazer.example.com".parse().unwrap();
+        let _ = args.build_config();
+    }
+
     #[test]
     fn debug_formatting_never_reveals_the_signer_key() {
         // `near_crypto`'s own Debug prints an ed25519 secret in full, so a
@@ -1268,6 +1290,7 @@ mod tests {
         let mut args = create_test_args();
         args.near_rpc_api_key = Some("rpc-api-key-value".to_string());
         args.oneclick_api_token = Some("oneclick-token-value".to_string());
+        args.lazer_api_token = Some("lazer-token-value".to_string());
         let rendered = format!("{:?}", args.build_config());
 
         let secret = TEST_SIGNER_KEY
@@ -1278,7 +1301,11 @@ mod tests {
             "signer key leaked into Debug output: {rendered}"
         );
         assert!(rendered.contains("<redacted>"));
-        for value in ["rpc-api-key-value", "oneclick-token-value"] {
+        for value in [
+            "rpc-api-key-value",
+            "oneclick-token-value",
+            "lazer-token-value",
+        ] {
             assert!(
                 !rendered.contains(value),
                 "{value} leaked into Debug output: {rendered}"
@@ -1296,6 +1323,7 @@ mod tests {
         let mut args = create_test_args();
         args.near_rpc_api_key = Some("rpc-api-key-value".to_string());
         args.oneclick_api_token = Some("oneclick-token-value".to_string());
+        args.lazer_api_token = Some("lazer-token-value".to_string());
         args.telegram_bot_token = Some("telegram-bot-token-value".to_string());
         args.telegram_chat_id = Some("-100123".to_string());
         let rendered = format!("{args:?}");
@@ -1311,6 +1339,7 @@ mod tests {
         for value in [
             "rpc-api-key-value",
             "oneclick-token-value",
+            "lazer-token-value",
             "telegram-bot-token-value",
         ] {
             assert!(

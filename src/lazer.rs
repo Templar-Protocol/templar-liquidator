@@ -132,18 +132,28 @@ pub(crate) fn parse_latest_price_response(
         // Freshness is per feed: `feedUpdateTimestamp` says when this feed
         // last updated, while the envelope timestamp only says when the
         // response was assembled — a dead feed must not ride a fresh
-        // envelope. The envelope fallback is warn-level, not debug: the
-        // property is explicitly requested, so its absence means upstream
-        // changed shape, and the envelope time is fresh by construction —
-        // silently degrading to it would reopen the dead-feed hole.
-        let per_feed_us = feed.feed_update_timestamp.as_ref().and_then(value_as_i64);
-        if per_feed_us.is_none() {
+        // envelope. Absent and malformed are different cases: absent falls
+        // back to the envelope at warn level (the property is explicitly
+        // requested, so absence means upstream changed shape, and the
+        // envelope time is fresh by construction — silently degrading would
+        // reopen the dead-feed hole); present-but-unparseable means the
+        // feed's own age is unknowable, so it fails closed and is skipped.
+        let publish_time_secs = if let Some(value) = &feed.feed_update_timestamp {
+            let Some(us) = value_as_i64(value) else {
+                tracing::warn!(
+                    feed_id = feed.price_feed_id,
+                    "Lazer feed carries a malformed feedUpdateTimestamp; skipping the feed"
+                );
+                continue;
+            };
+            us / 1_000_000
+        } else {
             tracing::warn!(
                 feed_id = feed.price_feed_id,
                 "Lazer feed carries no feedUpdateTimestamp despite it being requested; falling back to the envelope assembly time"
             );
-        }
-        let publish_time_secs = per_feed_us.map_or(envelope_secs, |us| us / 1_000_000);
+            envelope_secs
+        };
         if !crate::oracle::publish_time_is_fresh(publish_time_secs, now_secs, max_age_secs) {
             tracing::debug!(
                 feed_id = feed.price_feed_id,
@@ -316,6 +326,30 @@ mod tests {
         );
         let fresh = &prices[&9];
         assert_eq!(fresh.publish_time.as_secs(), NOW - 30);
+    }
+
+    /// A present-but-malformed `feedUpdateTimestamp` is not the same as an
+    /// absent one: absent falls back to the envelope (with a warning), but
+    /// an unparseable value means the feed's own age is unknowable — fail
+    /// closed and skip it rather than letting a fresh envelope vouch for it.
+    #[test]
+    fn malformed_per_feed_timestamp_skips_the_feed() {
+        let body = format!(
+            r#"{{"parsed":{{"timestampUs":"{env_us}","priceFeeds":[
+                {{"priceFeedId":7,"emaPrice":"100","emaConfidence":5,"exponent":-8,"feedUpdateTimestamp":true}},
+                {{"priceFeedId":9,"emaPrice":"200","emaConfidence":5,"exponent":-8}}
+            ]}}}}"#,
+            env_us = (NOW - 1) * 1_000_000,
+        );
+        let prices = parse_latest_price_response(&body, NOW, 60);
+        assert!(
+            !prices.contains_key(&7),
+            "malformed per-feed timestamp must fail closed, not fall back to the envelope"
+        );
+        assert!(
+            prices.contains_key(&9),
+            "absent field still falls back to the envelope"
+        );
     }
 
     #[test]

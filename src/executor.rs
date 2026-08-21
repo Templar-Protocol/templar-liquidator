@@ -512,7 +512,14 @@ impl LiquidationExecutor {
                             error: e.to_string(),
                         })
                     }
-                    _ => {
+                    // Named, not a wildcard: a new SwapErrorKind variant must
+                    // make an explicit funds-safety decision here to compile.
+                    crate::swap::SwapErrorKind::NetworkError { .. }
+                    | crate::swap::SwapErrorKind::ServerError { .. }
+                    | crate::swap::SwapErrorKind::RateLimited
+                    | crate::swap::SwapErrorKind::Timeout { .. }
+                    | crate::swap::SwapErrorKind::ValidationError { .. }
+                    | crate::swap::SwapErrorKind::Unknown { .. } => {
                         tracing::info!(
                             swap = %swap_name,
                             error = %e,

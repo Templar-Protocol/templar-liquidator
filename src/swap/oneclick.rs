@@ -783,7 +783,9 @@ impl OneClickSwap {
         if from_asset.clone().into_nep141().is_some() {
             self.ensure_storage_deposit(from_asset, &deposit_account)
                 .await
-                .map_err(|e| crate::swap::SwapError::from_app_error("Storage deposit", &e))?;
+                .map_err(|e| {
+                    crate::swap::SwapError::from_pre_deposit_app_error("Storage deposit", &e)
+                })?;
         } else {
             tracing::debug!(
                 token = %from_asset.contract_id(),
@@ -806,9 +808,8 @@ impl OneClickSwap {
             .map_err(|e| {
                 crate::swap::SwapError::new(
                     crate::swap::SwapErrorKind::Indeterminate {
-                        message: format!(
-                            "deposit transfer to {deposit_address} did not confirm: {e}"
-                        ),
+                        message: format!("deposit transfer did not confirm: {e}"),
+                        deposit_address: deposit_address.to_string(),
                     },
                     "Deposit",
                 )
@@ -829,7 +830,7 @@ impl OneClickSwap {
                 return Err(crate::swap::SwapError::new(
                     crate::swap::SwapErrorKind::Unknown {
                         message: format!(
-                            "Deposit transaction failed on-chain (funds retained): operation {} ended with status Failed",
+                            "Deposit transaction to {deposit_address} failed on-chain (funds retained): operation {} ended with status Failed",
                             operation.id.0
                         ),
                     },
@@ -851,8 +852,9 @@ impl OneClickSwap {
                 return Err(crate::swap::SwapError::new(
                     crate::swap::SwapErrorKind::Indeterminate {
                         message: format!(
-                            "deposit transfer to {deposit_address} was still {pending_status:?} when the gateway stopped waiting{tx}; it may yet land"
+                            "deposit transfer was still {pending_status:?} when the gateway stopped waiting{tx}; it may yet land"
                         ),
+                        deposit_address: deposit_address.to_string(),
                     },
                     "Deposit",
                 ));
@@ -865,9 +867,10 @@ impl OneClickSwap {
             crate::swap::SwapError::new(
                 crate::swap::SwapErrorKind::Indeterminate {
                     message: format!(
-                        "deposit operation {} to {deposit_address} succeeded without a transaction hash; funds moved but the transfer cannot be tracked",
+                        "deposit operation {} succeeded without a transaction hash; funds moved but the transfer cannot be tracked",
                         operation.id.0
                     ),
+                    deposit_address: deposit_address.to_string(),
                 },
                 "Deposit",
             )
@@ -1020,6 +1023,7 @@ impl OneClickSwap {
                     message: format!(
                         "deposit {tx_hash} is on-chain but notifying 1-Click failed: {e}"
                     ),
+                    deposit_address: deposit_address.to_string(),
                 },
                 "Deposit submit",
             )
@@ -1048,7 +1052,10 @@ impl OneClickSwap {
             );
             return Err(crate::swap::SwapError::new(
                 crate::swap::SwapErrorKind::Indeterminate {
-                    message: format!("deposit {tx_hash} is on-chain but 1-Click rejected the notification: {error_msg}"),
+                    message: format!(
+                        "deposit {tx_hash} is on-chain but 1-Click rejected the notification: {error_msg}"
+                    ),
+                    deposit_address: deposit_address.to_string(),
                 },
                 "Deposit submit",
             ));
@@ -1242,8 +1249,9 @@ impl OneClickSwap {
         Err(crate::swap::SwapError::new(
             crate::swap::SwapErrorKind::Indeterminate {
                 message: format!(
-                    "swap at deposit address {deposit_address} did not reach a terminal status within {max_wait_seconds}s; the deposit is on-chain and may still settle or refund"
+                    "swap did not reach a terminal status within {max_wait_seconds}s; the deposit is on-chain and may still settle or refund"
                 ),
+                deposit_address: deposit_address.to_string(),
             },
             "Poll swap status",
         ))

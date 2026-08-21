@@ -55,8 +55,15 @@ pub enum SwapErrorKind {
     /// re-running the operation would deposit again. Reconciliation is the
     /// next inventory refresh: balances are re-read from chain, so a late
     /// settlement or refund is reflected before anything sizes a new swap.
-    #[error("Swap outcome unknown: {message}")]
-    Indeterminate { message: String },
+    #[error("Swap outcome unknown (deposit address {deposit_address}): {message}")]
+    Indeterminate {
+        message: String,
+        /// Where the funds were sent — the 1-Click deposit address, or a
+        /// fork provider's equivalent reconciliation handle. This is the
+        /// datum an operator (or a future reconciliation job) keys on, so
+        /// it is a field, not prose inside `message`.
+        deposit_address: String,
+    },
 
     /// Unknown / uncategorized error (not retryable)
     #[error("Unknown error: {message}")]
@@ -144,8 +151,9 @@ impl SwapError {
     /// transfer is submitted** (quotes, storage registration — idempotent
     /// operations whose retry cannot double-spend inventory). Never produces
     /// `Indeterminate` — a phase at or after the deposit transfer must
-    /// classify its own errors instead of using this.
-    pub fn from_app_error(context: &str, error: &AppError) -> Self {
+    /// classify its own errors instead of using this; the name and
+    /// `pub(crate)` visibility exist so it cannot be reached for one.
+    pub(crate) fn from_pre_deposit_app_error(context: &str, error: &AppError) -> Self {
         let kind = match error {
             AppError::Rpc(crate::rpc::RpcError::TimeoutError(..)) => SwapErrorKind::Timeout {
                 message: error.to_string(),
@@ -337,6 +345,7 @@ mod tests {
                 Err(SwapError::new(
                     SwapErrorKind::Indeterminate {
                         message: "poll timed out after deposit".into(),
+                        deposit_address: "deposit.near".into(),
                     },
                     "1-Click swap",
                 ))
@@ -383,9 +392,59 @@ mod tests {
     #[test]
     fn indeterminate_is_not_retryable() {
         assert!(!SwapErrorKind::Indeterminate {
-            message: String::new()
+            message: String::new(),
+            deposit_address: String::new(),
         }
         .is_retryable());
+    }
+
+    /// A persistently retryable error is attempted exactly `max_attempts`
+    /// times, then the last error surfaces.
+    #[tokio::test]
+    async fn retryable_error_stops_at_max_attempts() {
+        let config = SwapRetryConfig {
+            max_attempts: 3,
+            base_delay_ms: 1,
+        };
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let result = swap_with_retry(&config, "test", || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async {
+                Err(SwapError::new(
+                    SwapErrorKind::NetworkError {
+                        message: "connection reset".into(),
+                    },
+                    "Quote request",
+                ))
+            }
+        })
+        .await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let err = result.expect_err("exhausted retries must surface an error");
+        assert!(matches!(err.kind, SwapErrorKind::NetworkError { .. }));
+    }
+
+    /// The pre-deposit classifier must never produce `Indeterminate`: that
+    /// kind asserts funds may have moved, which no pre-deposit phase can
+    /// cause — and producing it would be the signal the helper is being
+    /// reused post-deposit.
+    #[test]
+    fn pre_deposit_classifier_never_produces_indeterminate() {
+        let errors = [
+            AppError::Rpc(crate::rpc::RpcError::TimeoutError(30, 31)),
+            AppError::Rpc(crate::rpc::RpcError::WrongResponseKind("x".into())),
+            AppError::ValidationError("x".into()),
+            AppError::SerializationError("x".into()),
+        ];
+        for error in &errors {
+            let classified = SwapError::from_pre_deposit_app_error("Storage deposit", error);
+            assert!(
+                !matches!(classified.kind, SwapErrorKind::Indeterminate { .. }),
+                "pre-deposit classifier must never classify as Indeterminate"
+            );
+        }
     }
 
     #[test]

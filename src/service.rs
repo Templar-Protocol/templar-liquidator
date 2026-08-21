@@ -1054,7 +1054,18 @@ impl LiquidatorService {
                                 &e.to_string(),
                             );
                         }
-                        _ => {
+                        // Named, not a wildcard: a new SwapErrorKind variant
+                        // must make an explicit funds-safety and notification
+                        // decision here to compile. These re-attempt next
+                        // round (the batch loop re-runs over held balances)
+                        // and stay log-only, like every non-indeterminate
+                        // batch failure before this change.
+                        crate::swap::SwapErrorKind::NetworkError { .. }
+                        | crate::swap::SwapErrorKind::ServerError { .. }
+                        | crate::swap::SwapErrorKind::RateLimited
+                        | crate::swap::SwapErrorKind::Timeout { .. }
+                        | crate::swap::SwapErrorKind::ValidationError { .. }
+                        | crate::swap::SwapErrorKind::Unknown { .. } => {
                             tracing::info!(
                                 from = %asset_key,
                                 error = %e,

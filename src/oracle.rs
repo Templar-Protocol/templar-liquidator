@@ -1152,22 +1152,34 @@ impl OracleFetcher {
         for (price_id, candidates) in plans {
             let mut composed = None;
             for plan in candidates {
-                if let Some(price) = self
+                let Some(price) = self
                     .price_one_candidate(oracle, price_id, plan, &backends, max_age_secs)
                     .await
-                {
+                else {
+                    continue;
+                };
+                // Fail-closed at consumption, per candidate: the backend
+                // fetches and transformer view calls take real time, so a
+                // price that aged past the bound while they ran must not be
+                // inserted on the strength of an earlier clock sample — but
+                // the next candidate is already prefetched and may still be
+                // fresh, so staleness here costs the candidate, not the
+                // whole feed.
+                if publish_time_is_fresh(
+                    price.publish_time.as_secs(),
+                    unix_now_secs(),
+                    max_age_secs,
+                ) {
                     composed = Some(price);
                     break;
                 }
+                tracing::debug!(
+                    %oracle,
+                    ?price_id,
+                    "Candidate price aged past the freshness bound in flight, trying next"
+                );
             }
-            // Fail-closed at consumption: the backend fetches and transformer
-            // view calls take real time, so a price that aged past the bound
-            // while they ran must not be inserted on the strength of an
-            // earlier clock sample.
-            let now_secs = unix_now_secs();
-            match composed
-                .filter(|p| publish_time_is_fresh(p.publish_time.as_secs(), now_secs, max_age_secs))
-            {
+            match composed {
                 Some(price) => {
                     response.insert(price_id, Some(price));
                 }

@@ -865,7 +865,7 @@ impl OneClickSwap {
             crate::swap::SwapError::new(
                 crate::swap::SwapErrorKind::Indeterminate {
                     message: format!(
-                        "deposit operation {} succeeded without a transaction hash; funds moved but cannot be tracked",
+                        "deposit operation {} to {deposit_address} succeeded without a transaction hash; funds moved but the transfer cannot be tracked",
                         operation.id.0
                     ),
                 },

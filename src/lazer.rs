@@ -686,6 +686,157 @@ mod tests {
         assert!(!FetchFailure::Transport.is_feed_level_rejection());
     }
 
+    /// Scripted localhost HTTP server: serves canned (status, body)
+    /// responses in order and records each request body. Lets the split
+    /// logic run against real HTTP without a production seam — the client
+    /// struct is built directly (same module), which is also why these
+    /// tests can use a plain-http URL that `LazerApiConfig::new` would
+    /// rightly refuse.
+    async fn scripted_server(
+        responses: Vec<(u16, String)>,
+    ) -> (Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = requests.clone();
+        tokio::spawn(async move {
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let header_end = loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break None;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break Some(pos + 4);
+                    }
+                };
+                let Some(header_end) = header_end else { return };
+                let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+                let content_length: usize = headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                while buf.len() < header_end + content_length {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                log.lock().unwrap().push(
+                    String::from_utf8_lossy(&buf[header_end..header_end + content_length])
+                        .to_string(),
+                );
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (format!("http://{addr}").parse().unwrap(), requests)
+    }
+
+    fn test_client(base_url: Url) -> LazerApiClient {
+        LazerApiClient {
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            base_url,
+            token: "test-token".to_string(),
+        }
+    }
+
+    fn live_feed_body(feed_id: u32) -> String {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        format!(
+            r#"{{"parsed":{{"timestampUs":"{now_us}","priceFeeds":[
+                {{"priceFeedId":{feed_id},"emaPrice":"100","emaConfidence":5,"exponent":-8,"feedUpdateTimestamp":{now_us}}}
+            ]}}}}"#
+        )
+    }
+
+    fn request_channel_and_feeds(raw: &str) -> (String, Vec<u32>) {
+        let v: near_sdk::serde_json::Value = near_sdk::serde_json::from_str(raw).unwrap();
+        let feeds = v["priceFeedIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| u32::try_from(f.as_u64().unwrap()).unwrap())
+            .collect();
+        (v["channel"].as_str().unwrap().to_string(), feeds)
+    }
+
+    /// The core routing behavior: a 400 batch splits per feed in channel
+    /// order, a sibling that prices is preserved, and a feed rejected on
+    /// every channel is simply absent.
+    #[tokio::test]
+    async fn rejected_batch_splits_per_feed_and_preserves_siblings() {
+        let (url, requests) = scripted_server(vec![
+            (400, String::new()),     // batch [7, 11] on fixed_rate@200ms
+            (200, live_feed_body(7)), // feed 7 on fixed_rate@200ms
+            (403, String::new()),     // feed 11 on fixed_rate@200ms
+            (403, String::new()),     // feed 11 on real_time
+        ])
+        .await;
+        let prices = test_client(url).get_ema_prices(&[7, 11], 60).await;
+
+        assert!(prices.contains_key(&7), "priced sibling must be preserved");
+        assert!(
+            !prices.contains_key(&11),
+            "rejected-everywhere feed is absent"
+        );
+
+        let raw = requests.lock().unwrap().clone();
+        let parsed: Vec<_> = raw.iter().map(|r| request_channel_and_feeds(r)).collect();
+        assert_eq!(parsed[0], ("fixed_rate@200ms".to_string(), vec![7, 11]));
+        assert_eq!(parsed[1], ("fixed_rate@200ms".to_string(), vec![7]));
+        assert_eq!(parsed[2], ("fixed_rate@200ms".to_string(), vec![11]));
+        assert_eq!(parsed[3], ("real_time".to_string(), vec![11]));
+        assert_eq!(parsed.len(), 4);
+    }
+
+    /// A terminal failure mid-split aborts the pass: no further requests
+    /// are issued for the remaining feeds.
+    #[tokio::test]
+    async fn terminal_mid_split_failure_aborts_the_pass() {
+        let (url, requests) = scripted_server(vec![
+            (400, String::new()), // batch [7, 11]
+            (429, String::new()), // feed 7 on fixed_rate@200ms — terminal
+        ])
+        .await;
+        let prices = test_client(url).get_ema_prices(&[7, 11], 60).await;
+
+        assert!(prices.is_empty());
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "terminal failure must stop the split, not walk remaining feeds/channels"
+        );
+    }
+
+    /// A terminal batch failure never splits at all — one request total.
+    #[tokio::test]
+    async fn terminal_batch_failure_never_splits() {
+        let (url, requests) = scripted_server(vec![(401, String::new())]).await;
+        let prices = test_client(url).get_ema_prices(&[7, 11], 60).await;
+        assert!(prices.is_empty());
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
     #[test]
     fn garbage_prices_nothing() {
         assert!(parse_latest_price_response("not json", NOW, 60).is_empty());

@@ -108,6 +108,9 @@ pub struct ServiceConfig {
     pub hermes_url: url::Url,
     /// RedStone public price API for scan-side proxy price composition
     pub redstone_api_url: url::Url,
+    /// Lazer (Pyth Pro) price API endpoint + token, HTTPS-validated at
+    /// construction; the API leg is disabled when `None`
+    pub lazer_api: Option<crate::lazer::LazerApiConfig>,
     /// Minimum USD value to attempt a swap (JIT or batch)
     pub min_swap_value_usd: f64,
     /// Enable batch swap of accumulated collateral at round start
@@ -128,9 +131,12 @@ pub struct ServiceConfig {
 impl std::fmt::Debug for ServiceConfig {
     /// Redacts every field that carries credentials: the signer key, the RPC
     /// API key, the RPC URL (an authenticated endpoint embeds the key as a
-    /// query parameter) and the 1-Click token. Presence is still reported so a
-    /// dump remains useful for diagnosing configuration, without printing the
-    /// values. The Telegram token is held by the notifier, which redacts itself.
+    /// query parameter), and the 1-Click token. The Lazer token and URL are
+    /// held by [`crate::lazer::LazerApiConfig`], whose own `Debug` redacts
+    /// the token and trims the URL to its origin. Presence is still reported
+    /// so a dump remains useful for diagnosing configuration, without
+    /// printing the values. The Telegram token is held by the notifier,
+    /// which redacts itself.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         /// Reports whether an optional secret was supplied, never its value.
         fn shown(value: Option<&impl std::fmt::Debug>) -> &'static str {
@@ -166,6 +172,7 @@ impl std::fmt::Debug for ServiceConfig {
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field("hermes_url", &self.hermes_url)
             .field("redstone_api_url", &self.redstone_api_url)
+            .field("lazer_api", &self.lazer_api)
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
             .field("swap_retry_config", &self.swap_retry_config)
@@ -269,6 +276,7 @@ impl LiquidatorService {
             pyth_updates.clone(),
             config.hermes_url.clone(),
             config.redstone_api_url.clone(),
+            config.lazer_api.clone(),
             None,
         );
 
@@ -725,6 +733,7 @@ impl LiquidatorService {
                     self.config.max_loop_iterations,
                     self.config.hermes_url.clone(),
                     self.config.redstone_api_url.clone(),
+                    self.config.lazer_api.clone(),
                     self.config.swap_retry_config.clone(),
                     self.config.min_swap_value_usd,
                     Some(self.oracle_fetcher.proxy_oracle_cache()),

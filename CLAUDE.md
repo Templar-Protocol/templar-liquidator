@@ -61,11 +61,15 @@ One line per file in `src/`:
 - `inventory.rs` — `InventoryManager`: tracks available balances across all
   markets and assets so liquidations only proceed when inventory covers them.
 - `oracle.rs` — price fetching: Pyth via Hermes, LST feeds via
-  transformers, proxy feeds composed off-chain from their source configs
-  (on-chain cache as fallback). Execution-time pricing still goes through
-  the on-chain push (`update_onchain_prices`).
+  transformers, proxy feeds composed off-chain from their source configs in
+  order — Hermes, RedStone API, the token-gated Lazer API (adapter view read
+  without a token) — with the on-chain cache as fallback. Execution-time
+  pricing still goes through the on-chain push (`update_onchain_prices`).
 - `redstone.rs` — RedStone public price API client (`api.redstone.finance`),
   used only for scan-side proxy price composition.
+- `lazer.rs` — Lazer (Pyth Pro) price API client (Bearer-token, used only
+  when `LAZER_API_TOKEN` is set), for scan-side pricing of Lazer-sourced
+  proxy feeds.
 - `swap/mod.rs` — `SwapProvider` trait, the swap-provider extension seam.
 - `swap/provider.rs` — `SwapProviderImpl`, a concrete enum wrapping the
   shipped provider for dynamic dispatch (the trait itself has generic

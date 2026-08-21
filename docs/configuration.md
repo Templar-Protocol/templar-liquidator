@@ -76,6 +76,8 @@ All comma-delimited (`value_delimiter = ','` in clap — repeat the flag or comm
 |---|---|---|---|
 | `PYTH_HERMES_URL` | `--hermes-url` | network default (`https://hermes.pyth.network` mainnet / `https://hermes-beta.pyth.network` testnet) | Pyth Hermes endpoint for fetching latest price data. |
 | `REDSTONE_API_URL` | `--redstone-api-url` | `https://api.redstone.finance` | RedStone public price API, used to compose proxy-oracle prices off-chain at scan time (no gas, no keeper dependency). Scan-side only — execution still prices through the on-chain oracle. |
+| `LAZER_API_URL` | `--lazer-api-url` | `https://pyth-lazer.dourolabs.app` | Lazer (Pyth Pro) price API for scan-side proxy price composition. Only used when `LAZER_API_TOKEN` is set. Must be `https` when the token is set — a bearer token over plain http travels in cleartext, so the bot refuses to start. |
+| `LAZER_API_TOKEN` | `--lazer-api-token` | unset | Lazer access token (Lazer has no anonymous tier). When unset, the scan-time Lazer leg reads the on-chain Lazer adapter instead. |
 
 ## Notifications (Telegram)
 

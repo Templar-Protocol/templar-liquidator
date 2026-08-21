@@ -242,6 +242,24 @@ pub struct Args {
     )]
     pub redstone_api_url: Url,
 
+    /// Lazer (Pyth Pro) price API, used to compose Lazer-sourced
+    /// proxy-oracle prices off-chain at scan time. Only used when
+    /// `LAZER_API_TOKEN` is set — Lazer has no anonymous tier — and must be
+    /// `https` when it is (refused at startup: the bearer token would
+    /// travel in cleartext). Scan-side only — execution still prices
+    /// through the on-chain oracle.
+    #[arg(
+        long,
+        env = "LAZER_API_URL",
+        default_value = "https://pyth-lazer.dourolabs.app"
+    )]
+    pub lazer_api_url: Url,
+
+    /// Lazer (Pyth Pro) API access token. When unset, the scan-time Lazer
+    /// composition leg reads the on-chain Lazer adapter instead.
+    #[arg(long, env = "LAZER_API_TOKEN")]
+    pub lazer_api_token: Option<String>,
+
     /// Minimum USD value to attempt a swap (JIT or batch).
     /// Amounts below this threshold are skipped and left for batch swap.
     #[arg(long, env = "MIN_SWAP_VALUE_USD", default_value_t = 10.0)]
@@ -311,9 +329,12 @@ pub struct Args {
 }
 
 impl std::fmt::Debug for Args {
-    /// Redacts every field that carries credentials: the signer key and the
-    /// three token fields (`near_rpc_api_key`, `oneclick_api_token`,
-    /// `telegram_bot_token`). Presence is still reported for the optional
+    /// Redacts every field that carries credentials — the signer key and the
+    /// four token fields (`near_rpc_api_key`, `oneclick_api_token`,
+    /// `telegram_bot_token`, `lazer_api_token`) — and renders
+    /// `lazer_api_url` as its origin only: not itself a credential, but a
+    /// URL's userinfo/query components can carry one.
+    /// Presence is still reported for the optional
     /// ones so a dump remains useful for diagnosing configuration, without
     /// printing the values. Mirrors [`ServiceConfig`]'s hand-written `Debug`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -358,6 +379,11 @@ impl std::fmt::Debug for Args {
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field("hermes_url", &self.hermes_url)
             .field("redstone_api_url", &self.redstone_api_url)
+            .field(
+                "lazer_api_url",
+                &self.lazer_api_url.origin().ascii_serialization(),
+            )
+            .field("lazer_api_token", &shown(self.lazer_api_token.as_ref()))
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
             .field("swap_retry_attempts", &self.swap_retry_attempts)
@@ -626,6 +652,15 @@ impl Args {
                 .clone()
                 .unwrap_or_else(|| self.network.hermes_url()),
             redstone_api_url: self.redstone_api_url.clone(),
+            // The config type's constructor enforces HTTPS — a bearer token
+            // over plain http travels in cleartext. Refused at startup,
+            // where the operator sees it, rather than leaking the credential
+            // on the first scan; the message names the scheme only (a URL
+            // can carry credentials in its userinfo component).
+            lazer_api: self.lazer_api_token.clone().map(|token| {
+                crate::lazer::LazerApiConfig::new(self.lazer_api_url.clone(), token)
+                    .unwrap_or_else(|error| panic!("{error}"))
+            }),
             min_swap_value_usd: self.min_swap_value_usd,
             batch_swap_on_cycle_start: self.batch_swap_on_cycle_start,
             swap_retry_config: SwapRetryConfig {
@@ -698,6 +733,8 @@ mod tests {
             max_loop_iterations: 10,
             hermes_url: None,
             redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
+            lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
+            lazer_api_token: None,
             min_swap_value_usd: 10.0,
             batch_swap_on_cycle_start: true,
             swap_retry_attempts: 3,
@@ -1237,6 +1274,18 @@ mod tests {
         );
     }
 
+    /// The Lazer token is a bearer credential: sent over a plain-http
+    /// endpoint it travels in cleartext. Refused at startup, where the
+    /// operator sees it, rather than leaking on the first scan.
+    #[test]
+    #[should_panic(expected = "LAZER_API_URL must be https")]
+    fn lazer_token_over_http_is_refused_at_startup() {
+        let mut args = create_test_args();
+        args.lazer_api_token = Some("lazer-token-value".to_string());
+        args.lazer_api_url = "http://pyth-lazer.example.com".parse().unwrap();
+        let _ = args.build_config();
+    }
+
     #[test]
     fn debug_formatting_never_reveals_the_signer_key() {
         // `near_crypto`'s own Debug prints an ed25519 secret in full, so a
@@ -1246,6 +1295,7 @@ mod tests {
         let mut args = create_test_args();
         args.near_rpc_api_key = Some("rpc-api-key-value".to_string());
         args.oneclick_api_token = Some("oneclick-token-value".to_string());
+        args.lazer_api_token = Some("lazer-token-value".to_string());
         let rendered = format!("{:?}", args.build_config());
 
         let secret = TEST_SIGNER_KEY
@@ -1256,7 +1306,11 @@ mod tests {
             "signer key leaked into Debug output: {rendered}"
         );
         assert!(rendered.contains("<redacted>"));
-        for value in ["rpc-api-key-value", "oneclick-token-value"] {
+        for value in [
+            "rpc-api-key-value",
+            "oneclick-token-value",
+            "lazer-token-value",
+        ] {
             assert!(
                 !rendered.contains(value),
                 "{value} leaked into Debug output: {rendered}"
@@ -1274,6 +1328,7 @@ mod tests {
         let mut args = create_test_args();
         args.near_rpc_api_key = Some("rpc-api-key-value".to_string());
         args.oneclick_api_token = Some("oneclick-token-value".to_string());
+        args.lazer_api_token = Some("lazer-token-value".to_string());
         args.telegram_bot_token = Some("telegram-bot-token-value".to_string());
         args.telegram_chat_id = Some("-100123".to_string());
         let rendered = format!("{args:?}");
@@ -1289,6 +1344,7 @@ mod tests {
         for value in [
             "rpc-api-key-value",
             "oneclick-token-value",
+            "lazer-token-value",
             "telegram-bot-token-value",
         ] {
             assert!(

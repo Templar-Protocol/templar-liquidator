@@ -575,12 +575,17 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
             return Ok(None);
         }
 
-        let expected_minimum = collateral_to_borrow(
+        let Some(expected_minimum) = collateral_to_borrow(
             target_collateral,
             &price_pair,
             configuration.liquidation_maximum_spread,
-        )
-        .unwrap_or(0);
+        ) else {
+            tracing::warn!(
+                collateral_amount = %target_collateral,
+                "Could not calculate borrow amount from collateral"
+            );
+            return Ok(None);
+        };
 
         let amount_with_buffer = expected_minimum
             .saturating_add(((expected_minimum * SAFETY_BUFFER_BPS) / 10_000).max(1));
@@ -589,9 +594,10 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
         // requirement is rejected on-chain as too low, wasting a transaction
         // every round. If the fixed budget can't fund it, skip the position.
         if requires_full && amount_with_buffer > fixed_amount {
+            let asset_id = configuration.borrow_asset.to_string();
             tracing::warn!(
-                required = %amount_with_buffer,
-                fixed_amount = %fixed_amount,
+                required = %crate::format::format_amount(amount_with_buffer, decimals, &asset_id),
+                fixed_amount = %crate::format::format_amount(fixed_amount, decimals, &asset_id),
                 "Fixed budget cannot fund the required full liquidation, skipping"
             );
             return Ok(None);
@@ -696,6 +702,29 @@ mod tests {
                 "budget cannot fund a full liquidation; must skip (version {version:?}), got {result:?}"
             );
         }
+    }
+
+    /// A failed collateral→borrow conversion is not a fundable liquidation.
+    /// Collapsing it to zero would produce `amount_with_buffer = 1`, which
+    /// slips under both the full-liquidation guard and this market's
+    /// contract minimum of 1 — submitting a one-raw-unit offer for the whole
+    /// position that the contract rejects as too low.
+    #[test]
+    fn conversion_failure_skips_instead_of_offering_one_unit() {
+        let cfg = ibtc_config();
+        let prices = btc_usdc_prices(&cfg);
+        // Collateral so large that valuing it in borrow units overflows u128,
+        // making collateral_to_borrow return None on the full-liquidation path.
+        let pos = position(u128::MAX, 3_980_000);
+        let strategy = FixedAmountLiquidationStrategy::new(100.0, 50);
+
+        let result = strategy
+            .calculate_liquidation_amount(&pos, &prices, &cfg, U128(1_000_000_000_000), None)
+            .expect("no error");
+        assert!(
+            result.is_none(),
+            "unvaluable collateral must skip, got {result:?}"
+        );
     }
 
     /// Control: with partial support the same budget produces a partial

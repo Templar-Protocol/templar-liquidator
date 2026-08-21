@@ -44,7 +44,7 @@ The bot refuses to start without these three:
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
 | `PARTIAL_LIQUIDATION_PERCENTAGE` | `--partial-percentage` | unset (100% if neither strategy flag is set) | Percentage (1–100) of available inventory to deploy per liquidation. |
-| `FIXED_LIQUIDATION_AMOUNT_USD` | `--fixed-liquidation-amount-usd` | unset | Fixed USD amount to repay per liquidation. USD-denominated borrow assets only (no price lookup — assumes the borrow asset is a USD stablecoin). |
+| `FIXED_LIQUIDATION_AMOUNT_USD` | `--fixed-liquidation-amount-usd` | unset | Fixed USD amount to repay per liquidation. USD-denominated borrow assets only (no price lookup — assumes the borrow asset is a USD stablecoin). On markets requiring full liquidation (contract version < 1.1.0) it acts as an eligibility threshold, not a cap: positions whose full debt exceeds it are skipped. |
 | `MIN_PROFIT_BPS` | `--min-profit-bps` | `50` | Minimum profit margin, in basis points, required to submit a liquidation. |
 | `LOOP_LIQUIDATION` | `--loop-liquidation` | `false` | Repeatedly liquidate the same position (re-checking each iteration) until it's healthy or inventory runs out. Disabled in dry-run (position state never changes there, so re-checking is a no-op). |
 | `MAX_LOOP_ITERATIONS` | `--max-loop-iterations` | `10` | Safety cap on loop-liquidation iterations. |

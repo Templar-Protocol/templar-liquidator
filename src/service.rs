@@ -634,17 +634,27 @@ impl LiquidatorService {
                 // The parsed value rides along to the liquidator, so nothing
                 // fetches or parses it again — one read, one parser, one
                 // skip-if-unusable policy.
-                let Ok(version_string) = self
+                let version_string = match self
                     .client
                     .read(contract::GetVersion::new(market.clone()))
                     .await
-                    .map(|result| result.version_string)
-                else {
-                    tracing::info!(
-                        market = %market,
-                        "Contract missing NEP-330 metadata, skipping"
-                    );
-                    continue;
+                {
+                    Ok(result) => result.version_string,
+                    Err(e) => {
+                        if crate::rpc::gateway_is_method_not_found(&e) {
+                            tracing::info!(
+                                market = %market,
+                                "Contract missing NEP-330 metadata, skipping"
+                            );
+                        } else {
+                            tracing::warn!(
+                                market = %market,
+                                error = %e,
+                                "Failed to read contract version, skipping until next refresh"
+                            );
+                        }
+                        continue;
+                    }
                 };
                 let Some(version) = crate::scanner::parse_semver(&version_string) else {
                     tracing::warn!(
@@ -654,11 +664,13 @@ impl LiquidatorService {
                     );
                     continue;
                 };
-                if version < crate::scanner::MarketScanner::MIN_SUPPORTED_VERSION {
+                let (min_major, min_minor, min_patch) =
+                    crate::scanner::MarketScanner::MIN_SUPPORTED_VERSION;
+                if version < (min_major, min_minor, min_patch) {
                     tracing::info!(
                         market = %market,
                         version = %version_string,
-                        min_required = "1.0.0",
+                        min_required = %format!("{min_major}.{min_minor}.{min_patch}"),
                         "Skipping market - unsupported version"
                     );
                     continue;

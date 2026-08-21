@@ -566,7 +566,7 @@ impl Liquidator {
         }
     }
 
-    /// Get reference to the scanner (for compatibility checks)
+    /// Get reference to the scanner (position fetching / liquidation checks)
     pub fn scanner(&self) -> &scanner::MarketScanner {
         &self.scanner
     }

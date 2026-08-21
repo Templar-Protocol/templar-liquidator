@@ -244,8 +244,10 @@ pub struct Args {
 
     /// Lazer (Pyth Pro) price API, used to compose Lazer-sourced
     /// proxy-oracle prices off-chain at scan time. Only used when
-    /// `LAZER_API_TOKEN` is set — Lazer has no anonymous tier. Scan-side
-    /// only — execution still prices through the on-chain oracle.
+    /// `LAZER_API_TOKEN` is set — Lazer has no anonymous tier — and must be
+    /// `https` when it is (refused at startup: the bearer token would
+    /// travel in cleartext). Scan-side only — execution still prices
+    /// through the on-chain oracle.
     #[arg(
         long,
         env = "LAZER_API_URL",

@@ -277,11 +277,13 @@ pub(crate) struct LazerApiClient {
 }
 
 impl std::fmt::Debug for LazerApiClient {
-    /// Redacts the access token; the URL alone identifies the deployment.
+    /// Redacts the access token and renders only the URL's origin, same as
+    /// [`LazerApiConfig`]'s `Debug` — a URL can carry credentials in its
+    /// userinfo or query components.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LazerApiClient")
             .field("http", &self.http)
-            .field("base_url", &self.base_url.as_str())
+            .field("base_url", &self.base_url.origin().ascii_serialization())
             .field("token", &"<redacted>")
             .finish()
     }
@@ -313,7 +315,6 @@ impl LazerApiClient {
     pub(crate) async fn get_ema_prices(
         &self,
         feed_ids: &[u32],
-        now_secs: i64,
         max_age_secs: u32,
     ) -> HashMap<u32, pyth::Price> {
         if feed_ids.is_empty() {
@@ -352,7 +353,11 @@ impl LazerApiClient {
             return HashMap::new();
         }
         match response.text().await {
-            Ok(text) => parse_latest_price_response(&text, now_secs, max_age_secs),
+            // Clock sampled after the round-trip, so in-flight HTTP latency
+            // counts against the update's age — same rule as every other leg.
+            Ok(text) => {
+                parse_latest_price_response(&text, crate::oracle::unix_now_secs(), max_age_secs)
+            }
             Err(error) => {
                 tracing::warn!(%error, "Failed to read Lazer latest_price response");
                 HashMap::new()

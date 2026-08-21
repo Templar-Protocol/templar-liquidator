@@ -124,7 +124,7 @@ pub(crate) fn publish_time_is_fresh(
 /// Seconds since the epoch, `0` if the clock predates it — which makes every
 /// quote look future-dated and fail freshness, the safe (fail-closed)
 /// direction for a pricing path.
-fn unix_now_secs() -> i64 {
+pub(crate) fn unix_now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs().cast_signed())
@@ -995,9 +995,7 @@ impl OracleFetcher {
                 .collect::<HashSet<u32>>()
                 .into_iter()
                 .collect();
-            let api_prices = api
-                .get_ema_prices(&all_ids, unix_now_secs(), max_age_secs)
-                .await;
+            let api_prices = api.get_ema_prices(&all_ids, max_age_secs).await;
             for (adapter, feed_ids) in &mut wanted {
                 feed_ids.retain(|feed_id| match api_prices.get(feed_id) {
                     Some(price) => {

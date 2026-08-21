@@ -140,8 +140,10 @@ pub trait SwapProvider: Send + Sync {
     ///
     /// Must return `false` for any pair the provider structurally cannot
     /// service: [`OneClickSwap`] requires at least one leg to be NEP-245
-    /// (`intents.near`-wrapped) and, once its supported-token cache is
-    /// populated, both asset ids to appear in it.
+    /// (`intents.near`-wrapped) and both asset ids to appear in its
+    /// supported-token cache. An empty cache — the token list couldn't be
+    /// fetched — declines every pair rather than allowing them through; it
+    /// reloads on the next registry refresh.
     ///
     /// This is called before a swap is attempted, so returning `true` for a
     /// pair the provider cannot actually route doesn't fail closed — it defers

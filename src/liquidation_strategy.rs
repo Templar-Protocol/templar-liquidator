@@ -321,15 +321,6 @@ impl PercentageLiquidationStrategy {
             min_profit_margin_bps,
         }
     }
-
-    /// Creates a strategy that uses 50% of available funds (recommended default).
-    #[must_use]
-    pub fn default_partial() -> Self {
-        Self {
-            target_percentage: 50,
-            min_profit_margin_bps: 50, // 0.5% profit margin
-        }
-    }
 }
 
 impl LiquidationStrategy for PercentageLiquidationStrategy {

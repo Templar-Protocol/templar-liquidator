@@ -4,6 +4,19 @@
 //! for clear, concise logging using actual asset IDs and decimals from
 //! market configuration.
 
+/// Display precision for a token amount: 2 places for coarse assets, the
+/// asset's own decimals up to `full_up_to`, `fallback` beyond that. The one
+/// precision policy shared by every formatting function here.
+fn display_precision(decimals: i32, full_up_to: i32, fallback: usize) -> usize {
+    if (0..=2).contains(&decimals) {
+        2
+    } else if (3..=full_up_to).contains(&decimals) {
+        usize::try_from(decimals).unwrap_or(fallback)
+    } else {
+        fallback
+    }
+}
+
 /// Derive a short human-readable ticker from a full asset ID.
 ///
 /// Recognizes common patterns:
@@ -91,9 +104,10 @@ pub fn short_asset_name(asset_id: &str) -> String {
         }
     }
 
-    // Check Stellar OMNI token suffixes
+    // Check Stellar OMNI token suffixes — anchored at the end of the id so
+    // a different token whose id merely embeds the fragment doesn't alias.
     for &(suffix, name) in STELLAR_TOKENS {
-        if inner.contains(suffix) {
+        if inner.ends_with(suffix) {
             return name.to_string();
         }
     }
@@ -137,12 +151,7 @@ pub fn format_amount_short(amount: u128, decimals: i32, asset_id: &str) -> Strin
     let value = amount as f64 / divisor;
     let name = short_asset_name(asset_id);
 
-    // Use fewer decimal places for readability
-    let precision = match decimals {
-        0..=2 => 2,
-        3..=6 => decimals as usize,
-        _ => 6,
-    };
+    let precision = display_precision(decimals, 6, 6);
 
     format!("{value:.precision$} {name}")
 }
@@ -164,11 +173,7 @@ pub fn format_profit_short(
     };
     let name = short_asset_name(asset_id);
 
-    let precision = match decimals {
-        0..=2 => 2,
-        3..=6 => decimals as usize,
-        _ => 6,
-    };
+    let precision = display_precision(decimals, 6, 6);
 
     format!("{profit_value:+.precision$} {name} ({profit_pct:+.1}%)")
 }
@@ -195,13 +200,7 @@ pub fn format_amount(amount: u128, decimals: i32, asset_id: &str) -> String {
     let divisor = 10f64.powi(decimals);
     let value = amount as f64 / divisor;
 
-    // Determine precision based on decimals to show meaningful digits
-    // decimals is always non-negative in practice (from oracle config)
-    let precision = match decimals {
-        0..=2 => 2,
-        3..=10 => decimals as usize,
-        _ => 8,
-    };
+    let precision = display_precision(decimals, 10, 8);
 
     format!("{value:.precision$} [{asset_id}] ({amount} raw)")
 }
@@ -233,11 +232,7 @@ pub fn format_profit(
     };
 
     // decimals is always non-negative in practice (from oracle config)
-    let precision = match decimals {
-        0..=2 => 2,
-        3..=10 => decimals as usize,
-        _ => 8,
-    };
+    let precision = display_precision(decimals, 10, 8);
 
     format!("{profit_value:+.precision$} [{asset_id}] ({profit_pct:+.1}%) [{net_profit:+} raw]")
 }
@@ -255,6 +250,29 @@ pub fn format_iteration(current: u32, max: u32) -> String {
         format!("{current}/{max} (final)")
     } else {
         format!("{current}/{max}")
+    }
+}
+
+#[cfg(test)]
+mod anchoring_tests {
+    use super::*;
+
+    /// Stellar ids match by suffix — anchored at the end of the id, so a
+    /// different token whose id merely embeds the fragment doesn't alias.
+    #[test]
+    fn stellar_suffix_must_anchor_at_end() {
+        assert_eq!(
+            short_asset_name(
+                "nep245:v2_1.omni.hot.tg:1100_111bzQBB65GxAPAVoxqmMcgYo5oS3txhqs1Uh1cgahKQUeTUq1TJu"
+            ),
+            "USDC"
+        );
+        assert_ne!(
+            short_asset_name(
+                "nep245:v2_1.omni.hot.tg:111bzQBB65GxAPAVoxqmMcgYo5oS3txhqs1Uh1cgahKQUeTUq1TJu-forked"
+            ),
+            "USDC"
+        );
     }
 }
 

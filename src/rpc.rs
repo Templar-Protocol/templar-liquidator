@@ -37,24 +37,42 @@ pub enum RpcError {
     /// Failed to deserialize response
     #[error("Failed to deserialize response: {0}")]
     DeserializeError(#[from] near_sdk::serde_json::Error),
-    /// Timeout exceeded
-    #[error("Timeout exceeded after {0}s (waited {1}s)")]
-    TimeoutError(u64, u64),
+    /// Timeout exceeded. Carries the underlying error's rendering — the
+    /// layers that produce timeouts (the gateway) don't surface configured
+    /// or elapsed durations, so none are invented here.
+    #[error("Timeout exceeded: {0}")]
+    TimeoutError(String),
     /// No outcome for transaction
     #[error("No outcome for transaction: {0}")]
     NoOutcome(String),
 }
 
+/// Whole-token matcher over an unstructured error rendering: the text is
+/// split on every non-alphanumeric character and `token` must equal one of
+/// the resulting segments. This is what keeps "429" from matching inside a
+/// hex feed id, and `MethodNotFound` matchable across upstream punctuation
+/// changes. Until the gateway exposes structured error kinds, every
+/// error-message classification in this crate goes through this one matcher.
+pub(crate) fn has_error_token(text: &str, token: &str) -> bool {
+    text.trim()
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|part| part == token)
+}
+
+/// Returns `true` if an error rendering indicates HTTP 429 / rate limiting.
+///
+/// "429" and "TooManyRequests" are matched as whole tokens — a hex id that
+/// merely contains the digits 429 must not put a market to sleep for 60s.
+/// "rate limit" stays a phrase match: it contains a space, which no id can.
+pub(crate) fn message_indicates_rate_limit(message: &str) -> bool {
+    has_error_token(message, "429")
+        || has_error_token(message, "toomanyrequests")
+        || message.to_lowercase().contains("rate limit")
+}
+
 impl RpcError {
     pub fn is_method_not_found(&self) -> bool {
-        fn has_error_token(vm_error: &str, token: &str) -> bool {
-            vm_error
-                .trim()
-                .to_lowercase()
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .any(|part| part == token)
-        }
-
         // NEAR currently exposes this as an unstructured VM error string; switch
         // to a structured field if the RPC API starts returning one.
         matches!(
@@ -74,14 +92,6 @@ impl RpcError {
 /// `MethodResolveError` tokens — the same detection the structured
 /// [`RpcError::is_method_not_found`] performs.
 pub fn gateway_is_method_not_found(error: &GatewayError) -> bool {
-    fn has_error_token(vm_error: &str, token: &str) -> bool {
-        vm_error
-            .trim()
-            .to_lowercase()
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|part| part == token)
-    }
-
     let message = error.to_string();
     has_error_token(&message, "methodnotfound") || has_error_token(&message, "methodresolveerror")
 }
@@ -91,9 +101,7 @@ impl From<GatewayError> for RpcError {
         let message = error.to_string();
         let lowered = message.to_lowercase();
         if lowered.contains("timeout") || lowered.contains("timed out") {
-            // The gateway does not surface the configured/elapsed seconds, so
-            // report zero for both — the notifier only classifies on the variant.
-            RpcError::TimeoutError(0, 0)
+            RpcError::TimeoutError(message)
         } else {
             RpcError::WrongResponseKind(message)
         }
@@ -137,6 +145,30 @@ pub struct Standard {
 }
 
 #[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    /// "429" must match as a whole token, not as a substring — a hex feed id
+    /// or account hash containing the digits 429 is not a rate limit.
+    #[test]
+    fn rate_limit_detection_is_token_anchored() {
+        assert!(message_indicates_rate_limit(
+            "handler error: 429 Too Many Requests"
+        ));
+        assert!(message_indicates_rate_limit("TooManyRequests"));
+        assert!(message_indicates_rate_limit(
+            "provider replied: rate limit exceeded"
+        ));
+        assert!(!message_indicates_rate_limit(
+            "oracle prices missing for feed 0xbb429acc11ff"
+        ));
+        assert!(!message_indicates_rate_limit(
+            "account a429b.near not found"
+        ));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -157,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_timeout_error_display() {
-        let error = RpcError::TimeoutError(60, 65);
+        let error = RpcError::TimeoutError("timed out after 60s (waited 65s)".into());
         let display = format!("{error}");
         assert!(display.contains("60"));
         assert!(display.contains("65"));
@@ -166,10 +198,7 @@ mod tests {
     #[test]
     fn test_gateway_error_maps_to_timeout() {
         let error = GatewayError::NearTransaction("request timed out after 30s".to_string());
-        assert!(matches!(
-            RpcError::from(error),
-            RpcError::TimeoutError(_, _)
-        ));
+        assert!(matches!(RpcError::from(error), RpcError::TimeoutError(_)));
     }
 
     #[test]

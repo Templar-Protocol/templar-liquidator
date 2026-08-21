@@ -155,7 +155,7 @@ impl SwapError {
     /// `pub(crate)` visibility exist so it cannot be reached for one.
     pub(crate) fn from_pre_deposit_app_error(context: &str, error: &AppError) -> Self {
         let kind = match error {
-            AppError::Rpc(crate::rpc::RpcError::TimeoutError(..)) => SwapErrorKind::Timeout {
+            AppError::Rpc(crate::rpc::RpcError::TimeoutError(_)) => SwapErrorKind::Timeout {
                 message: error.to_string(),
             },
             AppError::Rpc(_) => SwapErrorKind::NetworkError {
@@ -194,10 +194,15 @@ impl Default for SwapRetryConfig {
 }
 
 impl SwapRetryConfig {
-    /// Calculate delay for a given attempt (1-indexed).
+    /// Calculate delay for a given attempt (1-indexed): 1×, 2×, 4×, … the
+    /// base delay. Saturates instead of overflowing — the shift is undefined
+    /// at 64 bits and the multiplication can wrap, either of which would
+    /// panic mid-retry under a large configured attempt count.
     fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        let multiplier = 1u64 << attempt.saturating_sub(1); // 1, 2, 4, …
-        Duration::from_millis(self.base_delay_ms * multiplier)
+        let multiplier = 1u64
+            .checked_shl(attempt.saturating_sub(1))
+            .unwrap_or(u64::MAX);
+        Duration::from_millis(self.base_delay_ms.saturating_mul(multiplier))
     }
 }
 
@@ -433,7 +438,9 @@ mod tests {
     #[test]
     fn pre_deposit_classifier_never_produces_indeterminate() {
         let errors = [
-            AppError::Rpc(crate::rpc::RpcError::TimeoutError(30, 31)),
+            AppError::Rpc(crate::rpc::RpcError::TimeoutError(
+                "timed out after 30s".into(),
+            )),
             AppError::Rpc(crate::rpc::RpcError::WrongResponseKind("x".into())),
             AppError::ValidationError("x".into()),
             AppError::SerializationError("x".into()),
@@ -445,6 +452,20 @@ mod tests {
                 "pre-deposit classifier must never classify as Indeterminate"
             );
         }
+    }
+
+    /// A large configured attempt count must not overflow the shift or the
+    /// multiplication — the delay saturates instead of panicking mid-retry.
+    #[test]
+    fn backoff_delay_saturates_instead_of_overflowing() {
+        let config = SwapRetryConfig {
+            max_attempts: 200,
+            base_delay_ms: u64::MAX / 2,
+        };
+        // Shift alone overflows at attempt 65; the multiplication overflows
+        // far earlier with a large base. Both must saturate.
+        let d = config.delay_for_attempt(200);
+        assert!(d >= config.delay_for_attempt(1));
     }
 
     #[test]

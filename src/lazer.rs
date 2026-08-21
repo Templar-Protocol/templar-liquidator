@@ -41,8 +41,10 @@ struct LazerFeedPoint {
     feed_update_timestamp: Option<near_sdk::serde_json::Value>,
 }
 
-/// The `parsed` object of a `latest_price` response: one update timestamp
-/// (microseconds since the epoch, as a decimal string) covering every feed.
+/// The `parsed` object of a `latest_price` response: the envelope's own
+/// assembly timestamp (microseconds since the epoch, as a decimal string),
+/// which prices a feed only as the fallback when that feed carries no
+/// `feedUpdateTimestamp` of its own.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LazerParsedPayload {
@@ -66,11 +68,13 @@ fn value_as_i64(value: &near_sdk::serde_json::Value) -> Option<i64> {
 }
 
 /// Parses a `latest_price` response into per-feed EMA prices, enforcing the
-/// market's freshness bound: an update older than `max_age_secs`, or further
-/// ahead of `now_secs` than clock skew explains
-/// ([`crate::redstone::MAX_FUTURE_SKEW_MS`]), prices nothing — absent beats
-/// a wrong number. Feeds missing their EMA mantissa or exponent are skipped
-/// individually.
+/// market's freshness bound per feed: a feed older than `max_age_secs`, or
+/// further ahead of `now_secs` than clock skew explains
+/// ([`crate::redstone::MAX_FUTURE_SKEW_MS`]), is skipped without discarding
+/// its fresh siblings — absent beats a wrong number. A feed missing its EMA
+/// mantissa, its exponent, or a usable EMA confidence is likewise skipped
+/// individually (the confidence gate is the easy one to miss when debugging
+/// an empty result against a response that visibly carries an EMA price).
 pub(crate) fn parse_latest_price_response(
     body: &str,
     now_secs: i64,
@@ -128,12 +132,18 @@ pub(crate) fn parse_latest_price_response(
         // Freshness is per feed: `feedUpdateTimestamp` says when this feed
         // last updated, while the envelope timestamp only says when the
         // response was assembled — a dead feed must not ride a fresh
-        // envelope. Envelope time is the fallback when the field is absent.
-        let publish_time_secs = feed
-            .feed_update_timestamp
-            .as_ref()
-            .and_then(value_as_i64)
-            .map_or(envelope_secs, |us| us / 1_000_000);
+        // envelope. The envelope fallback is warn-level, not debug: the
+        // property is explicitly requested, so its absence means upstream
+        // changed shape, and the envelope time is fresh by construction —
+        // silently degrading to it would reopen the dead-feed hole.
+        let per_feed_us = feed.feed_update_timestamp.as_ref().and_then(value_as_i64);
+        if per_feed_us.is_none() {
+            tracing::warn!(
+                feed_id = feed.price_feed_id,
+                "Lazer feed carries no feedUpdateTimestamp despite it being requested; falling back to the envelope assembly time"
+            );
+        }
+        let publish_time_secs = per_feed_us.map_or(envelope_secs, |us| us / 1_000_000);
         if !crate::oracle::publish_time_is_fresh(publish_time_secs, now_secs, max_age_secs) {
             tracing::debug!(
                 feed_id = feed.price_feed_id,

@@ -132,9 +132,10 @@ pub struct ServiceConfig {
 impl std::fmt::Debug for ServiceConfig {
     /// Redacts every field that carries credentials: the signer key, the RPC
     /// API key, the RPC URL (an authenticated endpoint embeds the key as a
-    /// query parameter) and the 1-Click token. Presence is still reported so a
-    /// dump remains useful for diagnosing configuration, without printing the
-    /// values. The Telegram token is held by the notifier, which redacts itself.
+    /// query parameter), the 1-Click token, and the Lazer token. Presence is
+    /// still reported so a dump remains useful for diagnosing configuration,
+    /// without printing the values. The Telegram token is held by the
+    /// notifier, which redacts itself.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         /// Reports whether an optional secret was supplied, never its value.
         fn shown(value: Option<&impl std::fmt::Debug>) -> &'static str {

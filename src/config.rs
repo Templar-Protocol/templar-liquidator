@@ -329,9 +329,12 @@ pub struct Args {
 }
 
 impl std::fmt::Debug for Args {
-    /// Redacts every field that carries credentials: the signer key and the
+    /// Redacts every field that carries credentials — the signer key and the
     /// four token fields (`near_rpc_api_key`, `oneclick_api_token`,
-    /// `telegram_bot_token`, `lazer_api_token`). Presence is still reported for the optional
+    /// `telegram_bot_token`, `lazer_api_token`) — and renders
+    /// `lazer_api_url` as its origin only: not itself a credential, but a
+    /// URL's userinfo/query components can carry one.
+    /// Presence is still reported for the optional
     /// ones so a dump remains useful for diagnosing configuration, without
     /// printing the values. Mirrors [`ServiceConfig`]'s hand-written `Debug`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

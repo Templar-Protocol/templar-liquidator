@@ -342,6 +342,9 @@ impl LazerApiClient {
         {
             Ok(response) => response,
             Err(error) => {
+                // `reqwest::Error`'s Display embeds the request URL, whose
+                // userinfo/query components this module treats as sensitive.
+                let error = error.without_url();
                 tracing::warn!(%error, "Lazer latest_price request failed");
                 return HashMap::new();
             }
@@ -359,6 +362,7 @@ impl LazerApiClient {
                 parse_latest_price_response(&text, crate::oracle::unix_now_secs(), max_age_secs)
             }
             Err(error) => {
+                let error = error.without_url();
                 tracing::warn!(%error, "Failed to read Lazer latest_price response");
                 HashMap::new()
             }

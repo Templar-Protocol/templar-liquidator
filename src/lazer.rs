@@ -257,6 +257,44 @@ fn latest_price_endpoint(base: &Url) -> Option<Url> {
     Some(url)
 }
 
+/// Channels tried in order. `fixed_rate@200ms` first: it is the
+/// widely-carried cadence (still 300× inside a 60s market bound), while
+/// `real_time` is not carried by every feed — and the live API rejects a
+/// whole batch over one feed that lacks the requested channel. `real_time`
+/// remains the per-feed retry for any feed that turns out not to carry the
+/// fixed rate.
+pub(crate) const PRICE_CHANNELS: [&str; 2] = ["fixed_rate@200ms", "real_time"];
+
+/// Why one `latest_price` request priced nothing: the API rejected it (with
+/// the status that says how — 400 is a channel the feeds don't carry, 403 an
+/// unknown feed id), or the transport failed before any status existed.
+#[derive(Debug, Clone, Copy)]
+enum FetchFailure {
+    Http(reqwest::StatusCode),
+    Transport,
+}
+
+impl std::fmt::Display for FetchFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http(status) => write!(f, "http {status}"),
+            Self::Transport => write!(f, "transport error"),
+        }
+    }
+}
+
+/// One `latest_price` request body: the given feeds on the given channel,
+/// parsed EMA projection only (no signed payload formats).
+fn latest_price_request_body(feed_ids: &[u32], channel: &str) -> near_sdk::serde_json::Value {
+    near_sdk::serde_json::json!({
+        "priceFeedIds": feed_ids,
+        "properties": ["emaPrice", "emaConfidence", "exponent", "feedUpdateTimestamp"],
+        "formats": [],
+        "parsed": true,
+        "channel": channel,
+    })
+}
+
 /// Client for the Lazer price service. Constructed only when an access token
 /// is configured — Lazer has no anonymous tier, so without one the Lazer
 /// composition leg reads the on-chain adapter instead.
@@ -303,9 +341,15 @@ impl LazerApiClient {
         })
     }
 
-    /// Fetches the latest EMA prices for `feed_ids` in one request. Returns
-    /// only the feeds it could price fresh; any error prices nothing (the
-    /// caller falls back to the on-chain adapter read).
+    /// Fetches the latest EMA prices for `feed_ids`: one batched request on
+    /// the widely-carried channel first; if the API rejects the batch (it
+    /// rejects a whole batch over ONE feed lacking the channel — 400 — or
+    /// one unknown feed id — 403), each feed retries individually across
+    /// [`PRICE_CHANNELS`] so one bad feed cannot zero its siblings. Returns
+    /// only the feeds it could price fresh; anything unpriced falls back to
+    /// the on-chain adapter read in the caller. No error-body parsing
+    /// anywhere — feed-level fault isolation comes from splitting the
+    /// batch, not from reading upstream message text.
     pub(crate) async fn get_ema_prices(
         &self,
         feed_ids: &[u32],
@@ -318,18 +362,63 @@ impl LazerApiClient {
             tracing::warn!("Invalid Lazer API URL (cannot be a base)");
             return HashMap::new();
         };
-        let body = near_sdk::serde_json::json!({
-            "priceFeedIds": feed_ids,
-            "properties": ["emaPrice", "emaConfidence", "exponent", "feedUpdateTimestamp"],
-            "formats": [],
-            "parsed": true,
-            "channel": "real_time",
-        });
+
+        match self
+            .fetch_channel_prices(&url, feed_ids, PRICE_CHANNELS[0], max_age_secs)
+            .await
+        {
+            Ok(prices) => prices,
+            Err(failure) => {
+                tracing::debug!(
+                    %failure,
+                    feeds = feed_ids.len(),
+                    "Lazer batch rejected; retrying feeds individually across channels"
+                );
+                let mut prices = HashMap::new();
+                for &feed_id in feed_ids {
+                    for channel in PRICE_CHANNELS {
+                        match self
+                            .fetch_channel_prices(&url, &[feed_id], channel, max_age_secs)
+                            .await
+                        {
+                            Ok(single) if !single.is_empty() => {
+                                prices.extend(single);
+                                break;
+                            }
+                            Ok(_) => break, // priced nothing (stale/malformed) — channel was fine
+                            Err(failure) => {
+                                tracing::debug!(feed_id, channel, %failure, "Lazer feed rejected on channel");
+                            }
+                        }
+                    }
+                }
+                if prices.is_empty() {
+                    tracing::warn!(
+                        feeds = feed_ids.len(),
+                        "Lazer API priced no feeds on any channel; deferring to adapter reads"
+                    );
+                }
+                prices
+            }
+        }
+    }
+
+    /// One `latest_price` POST for `feed_ids` on `channel`. `Err` says why
+    /// the request priced nothing — an HTTP rejection with its status, or a
+    /// transport-level failure with no status to report (no sentinel
+    /// numbers).
+    async fn fetch_channel_prices(
+        &self,
+        url: &Url,
+        feed_ids: &[u32],
+        channel: &str,
+        max_age_secs: u32,
+    ) -> Result<HashMap<u32, pyth::Price>, FetchFailure> {
         let response = match self
             .http
-            .post(url)
+            .post(url.clone())
             .bearer_auth(&self.token)
-            .json(&body)
+            .json(&latest_price_request_body(feed_ids, channel))
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
@@ -340,27 +429,27 @@ impl LazerApiClient {
                 // userinfo/query components this module treats as sensitive.
                 let error = error.without_url();
                 tracing::warn!(%error, "Lazer latest_price request failed");
-                return HashMap::new();
+                return Err(FetchFailure::Transport);
             }
         };
         if !response.status().is_success() {
             // Status only, never the body: an upstream error page can
             // reflect the request — bearer token included — and no
             // truncation redacts that.
-            let status = response.status();
-            tracing::warn!(%status, "Lazer latest_price returned an error");
-            return HashMap::new();
+            return Err(FetchFailure::Http(response.status()));
         }
         match response.text().await {
             // Clock sampled after the round-trip, so in-flight HTTP latency
             // counts against the update's age — same rule as every other leg.
-            Ok(text) => {
-                parse_latest_price_response(&text, crate::oracle::unix_now_secs(), max_age_secs)
-            }
+            Ok(text) => Ok(parse_latest_price_response(
+                &text,
+                crate::oracle::unix_now_secs(),
+                max_age_secs,
+            )),
             Err(error) => {
                 let error = error.without_url();
                 tracing::warn!(%error, "Failed to read Lazer latest_price response");
-                HashMap::new()
+                Err(FetchFailure::Transport)
             }
         }
     }
@@ -513,6 +602,20 @@ mod tests {
             "token".to_string(),
         )
         .is_ok());
+    }
+
+    /// The batch requests `fixed_rate@200ms`, not `real_time`: not every
+    /// Lazer feed carries the real-time channel (the live API 400s the whole
+    /// batch over one such feed), while 200ms is the widely-carried cadence
+    /// and sits far inside any market freshness bound.
+    #[test]
+    fn request_body_uses_the_widely_carried_channel() {
+        let body = latest_price_request_body(&[1, 11], PRICE_CHANNELS[0]);
+        assert_eq!(body["channel"], "fixed_rate@200ms");
+        assert_eq!(body["priceFeedIds"], near_sdk::serde_json::json!([1, 11]));
+        assert_eq!(body["parsed"], true);
+        let retry = latest_price_request_body(&[1], PRICE_CHANNELS[1]);
+        assert_eq!(retry["channel"], "real_time");
     }
 
     #[test]

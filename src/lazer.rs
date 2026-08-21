@@ -281,11 +281,11 @@ impl FetchFailure {
     /// Everything else (auth, rate limiting, server errors, transport)
     /// would fail identically per feed, so splitting only multiplies dead
     /// requests against a struggling endpoint.
-    fn is_feed_level_rejection(&self) -> bool {
+    fn is_feed_level_rejection(self) -> bool {
         match self {
             Self::Http(status) => {
-                *status == reqwest::StatusCode::BAD_REQUEST
-                    || *status == reqwest::StatusCode::FORBIDDEN
+                status == reqwest::StatusCode::BAD_REQUEST
+                    || status == reqwest::StatusCode::FORBIDDEN
             }
             Self::Transport => false,
         }

@@ -274,6 +274,24 @@ enum FetchFailure {
     Transport,
 }
 
+impl FetchFailure {
+    /// True for the two rejections the API issues over individual feeds in
+    /// a batch — 400 (a feed lacks the requested channel) and 403 (an
+    /// unknown feed id) — where splitting the batch isolates the bad feed.
+    /// Everything else (auth, rate limiting, server errors, transport)
+    /// would fail identically per feed, so splitting only multiplies dead
+    /// requests against a struggling endpoint.
+    fn is_feed_level_rejection(&self) -> bool {
+        match self {
+            Self::Http(status) => {
+                *status == reqwest::StatusCode::BAD_REQUEST
+                    || *status == reqwest::StatusCode::FORBIDDEN
+            }
+            Self::Transport => false,
+        }
+    }
+}
+
 impl std::fmt::Display for FetchFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -368,7 +386,14 @@ impl LazerApiClient {
             .await
         {
             Ok(prices) => prices,
-            Err(failure) => {
+            // Feed-level rejections split the batch so one bad feed cannot
+            // zero its siblings. Anything else — auth, rate limiting, 5xx,
+            // transport — would fail identically per feed: it costs exactly
+            // one request, warns with the reason, and defers to the adapter
+            // reads (splitting here would fire 2×N guaranteed-dead requests
+            // at a struggling endpoint, each with a 10s timeout, inside the
+            // scan round that /healthz readiness keys on).
+            Err(failure) if failure.is_feed_level_rejection() => {
                 tracing::debug!(
                     %failure,
                     feeds = feed_ids.len(),
@@ -394,11 +419,20 @@ impl LazerApiClient {
                 }
                 if prices.is_empty() {
                     tracing::warn!(
+                        %failure,
                         feeds = feed_ids.len(),
                         "Lazer API priced no feeds on any channel; deferring to adapter reads"
                     );
                 }
                 prices
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    %failure,
+                    feeds = feed_ids.len(),
+                    "Lazer latest_price failed; deferring to adapter reads"
+                );
+                HashMap::new()
             }
         }
     }
@@ -616,6 +650,26 @@ mod tests {
         assert_eq!(body["parsed"], true);
         let retry = latest_price_request_body(&[1], PRICE_CHANNELS[1]);
         assert_eq!(retry["channel"], "real_time");
+    }
+
+    /// Only the two feed-level rejections split the batch: 400 (a feed
+    /// lacks the requested channel) and 403 (an unknown feed id). Auth
+    /// failures, rate limits, server errors, and transport failures would
+    /// fail identically per feed — splitting would multiply dead requests
+    /// against a struggling or unusable endpoint.
+    #[test]
+    fn only_feed_level_rejections_split_the_batch() {
+        assert!(FetchFailure::Http(reqwest::StatusCode::BAD_REQUEST).is_feed_level_rejection());
+        assert!(FetchFailure::Http(reqwest::StatusCode::FORBIDDEN).is_feed_level_rejection());
+        assert!(!FetchFailure::Http(reqwest::StatusCode::UNAUTHORIZED).is_feed_level_rejection());
+        assert!(
+            !FetchFailure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS).is_feed_level_rejection()
+        );
+        assert!(
+            !FetchFailure::Http(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+                .is_feed_level_rejection()
+        );
+        assert!(!FetchFailure::Transport.is_feed_level_rejection());
     }
 
     #[test]

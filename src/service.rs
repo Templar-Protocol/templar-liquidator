@@ -1003,23 +1003,7 @@ impl LiquidatorService {
                 let provider = provider.clone();
                 let coll = coll.clone();
                 let borrow = borrow.clone();
-                async move {
-                    provider
-                        .swap(&coll, &borrow, swap_amount)
-                        .await
-                        .map_err(|e| {
-                            // Classify the AppError into SwapError
-                            let msg = e.to_string();
-                            let kind = if msg.contains("Amount is too low") {
-                                crate::swap::SwapErrorKind::AmountTooLow { message: msg }
-                            } else if msg.contains("Failed to get quote") {
-                                crate::swap::SwapErrorKind::QuoteFailed { message: msg }
-                            } else {
-                                crate::swap::SwapErrorKind::Unknown { message: msg }
-                            };
-                            crate::swap::SwapError::new(kind, "Batch swap")
-                        })
-                }
+                async move { provider.swap(&coll, &borrow, swap_amount).await }
             })
             .await;
 
@@ -1033,24 +1017,61 @@ impl LiquidatorService {
                     swapped += 1;
                 }
                 Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("Amount too low") {
-                        tracing::debug!(
-                            from = %asset_key,
-                            error = %e,
-                            "Batch swap skipped - amount too low for provider"
-                        );
-                    } else if msg.contains("Quote failed") {
-                        tracing::debug!(
-                            from = %asset_key,
-                            "No swap route available for asset, skipping batch swap"
-                        );
-                    } else {
-                        tracing::info!(
-                            from = %asset_key,
-                            error = %e,
-                            "Batch swap failed, will retry next cycle"
-                        );
+                    match &e.kind {
+                        crate::swap::SwapErrorKind::AmountTooLow { .. } => {
+                            tracing::debug!(
+                                from = %asset_key,
+                                error = %e,
+                                "Batch swap skipped - amount too low for provider"
+                            );
+                        }
+                        crate::swap::SwapErrorKind::QuoteFailed { .. } => {
+                            tracing::debug!(
+                                from = %asset_key,
+                                "No swap route available for asset, skipping batch swap"
+                            );
+                        }
+                        crate::swap::SwapErrorKind::Indeterminate { .. } => {
+                            // Not "will retry": the balance re-read next round
+                            // decides — a settled swap leaves nothing to
+                            // re-swap, a refund reappears in the balance.
+                            tracing::warn!(
+                                from = %asset_key,
+                                error = %e,
+                                "Batch swap outcome unknown - funds may have moved; next round's balance refresh reconciles"
+                            );
+                            self.config.notifier.notify_swap_failed(
+                                "batch",
+                                &crate::format::short_asset_name(&asset_key),
+                                &crate::format::short_asset_name(
+                                    &info.target_borrow_asset.to_string(),
+                                ),
+                                &crate::format::format_amount_short(
+                                    balance.0,
+                                    info.decimals,
+                                    &asset_key,
+                                ),
+                                &e.to_string(),
+                            );
+                        }
+                        // Named, not a wildcard: a new SwapErrorKind variant
+                        // must make an explicit funds-safety and notification
+                        // decision here to compile. These re-attempt next
+                        // round (the batch loop re-runs over held balances)
+                        // and stay log-only, like every non-indeterminate
+                        // batch failure before this change.
+                        crate::swap::SwapErrorKind::NetworkError { .. }
+                        | crate::swap::SwapErrorKind::ServerError { .. }
+                        | crate::swap::SwapErrorKind::RateLimited
+                        | crate::swap::SwapErrorKind::Timeout { .. }
+                        | crate::swap::SwapErrorKind::ValidationError { .. }
+                        | crate::swap::SwapErrorKind::Unknown { .. } => {
+                            tracing::info!(
+                                from = %asset_key,
+                                error = %e,
+                                "Batch swap failed, will retry next cycle"
+                            );
+                        }
                     }
                     skipped += 1;
                 }

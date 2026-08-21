@@ -57,7 +57,7 @@ impl SwapProvider for SwapProviderImpl {
         from_asset: &FungibleAsset<F>,
         to_asset: &FungibleAsset<T>,
         amount: FungibleAssetAmount<F>,
-    ) -> AppResult<()> {
+    ) -> Result<(), super::SwapError> {
         let Self::OneClick(provider) = self;
         provider.swap(from_asset, to_asset, amount).await
     }

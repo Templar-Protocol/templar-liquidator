@@ -33,6 +33,12 @@ struct LazerFeedPoint {
     ema_confidence: Option<near_sdk::serde_json::Value>,
     #[serde(default)]
     exponent: Option<i16>,
+    /// Microseconds, a bare JSON number (`TimestampUs` is transparent over
+    /// `u64`, unlike the string-encoded envelope timestamp); accepted as
+    /// string too. When this feed last actually updated — the envelope
+    /// timestamp only says when the response was assembled.
+    #[serde(default)]
+    feed_update_timestamp: Option<near_sdk::serde_json::Value>,
 }
 
 /// The `parsed` object of a `latest_price` response: one update timestamp
@@ -47,6 +53,16 @@ struct LazerParsedPayload {
 #[derive(serde::Deserialize)]
 struct LazerLatestPriceResponse {
     parsed: Option<LazerParsedPayload>,
+}
+
+/// Extracts an integer that upstream serializes inconsistently — some fields
+/// arrive as bare JSON numbers, others through a to-string helper.
+fn value_as_i64(value: &near_sdk::serde_json::Value) -> Option<i64> {
+    match value {
+        near_sdk::serde_json::Value::Number(n) => n.as_i64(),
+        near_sdk::serde_json::Value::String(s) => s.parse::<i64>().ok(),
+        _ => None,
+    }
 }
 
 /// Parses a `latest_price` response into per-feed EMA prices, enforcing the
@@ -69,7 +85,7 @@ pub(crate) fn parse_latest_price_response(
         tracing::warn!("Lazer latest_price response has no parsed payload");
         return prices;
     };
-    let Some(publish_time_secs) = parsed
+    let Some(envelope_secs) = parsed
         .timestamp_us
         .parse::<i64>()
         .ok()
@@ -78,19 +94,6 @@ pub(crate) fn parse_latest_price_response(
         tracing::warn!(timestamp = %parsed.timestamp_us, "Unparseable Lazer update timestamp");
         return prices;
     };
-    let Some(age_secs) = now_secs.checked_sub(publish_time_secs) else {
-        return prices;
-    };
-    if age_secs > i64::from(max_age_secs)
-        || age_secs < -(crate::redstone::MAX_FUTURE_SKEW_MS / 1000)
-    {
-        tracing::debug!(
-            publish_time = publish_time_secs,
-            age_secs,
-            "Lazer update is stale or future-dated, pricing nothing"
-        );
-        return prices;
-    }
 
     for feed in parsed.price_feeds {
         let (Some(ema), Some(expo)) = (feed.ema_price.as_deref(), feed.exponent) else {
@@ -107,15 +110,38 @@ pub(crate) fn parse_latest_price_response(
             );
             continue;
         };
-        let conf = feed
+        // Confidence is requested, so a feed answering without a usable one
+        // is malformed — skipped, not zero-filled (zero would read as
+        // maximally confident to any consumer that inspects it).
+        let Some(conf) = feed
             .ema_confidence
             .as_ref()
-            .and_then(|c| match c {
-                near_sdk::serde_json::Value::Number(n) => n.as_u64(),
-                near_sdk::serde_json::Value::String(s) => s.parse::<u64>().ok(),
-                _ => None,
-            })
-            .unwrap_or(0);
+            .and_then(value_as_i64)
+            .and_then(|c| u64::try_from(c).ok())
+        else {
+            tracing::debug!(
+                feed_id = feed.price_feed_id,
+                "Lazer feed missing or malformed EMA confidence"
+            );
+            continue;
+        };
+        // Freshness is per feed: `feedUpdateTimestamp` says when this feed
+        // last updated, while the envelope timestamp only says when the
+        // response was assembled — a dead feed must not ride a fresh
+        // envelope. Envelope time is the fallback when the field is absent.
+        let publish_time_secs = feed
+            .feed_update_timestamp
+            .as_ref()
+            .and_then(value_as_i64)
+            .map_or(envelope_secs, |us| us / 1_000_000);
+        if !crate::oracle::publish_time_is_fresh(publish_time_secs, now_secs, max_age_secs) {
+            tracing::debug!(
+                feed_id = feed.price_feed_id,
+                publish_time = publish_time_secs,
+                "Lazer feed is stale or future-dated, skipping"
+            );
+            continue;
+        }
         prices.insert(
             feed.price_feed_id,
             pyth::Price {
@@ -179,7 +205,7 @@ impl LazerApiClient {
         };
         let body = near_sdk::serde_json::json!({
             "priceFeedIds": feed_ids,
-            "properties": ["emaPrice", "emaConfidence", "exponent"],
+            "properties": ["emaPrice", "emaConfidence", "exponent", "feedUpdateTimestamp"],
             "formats": [],
             "parsed": true,
             "channel": "real_time",
@@ -256,6 +282,30 @@ mod tests {
         assert!(
             parse_latest_price_response(&response((NOW + 300) * 1_000_000), NOW, 60).is_empty()
         );
+    }
+
+    /// The envelope timestamp says when the response was assembled; a feed
+    /// whose own `feedUpdateTimestamp` is old must not ride a fresh
+    /// envelope past the freshness bound. A feed without the per-feed field
+    /// falls back to the envelope time.
+    #[test]
+    fn per_feed_timestamp_overrides_the_envelope() {
+        let body = format!(
+            r#"{{"parsed":{{"timestampUs":"{env_us}","priceFeeds":[
+                {{"priceFeedId":7,"emaPrice":"100","emaConfidence":5,"exponent":-8,"feedUpdateTimestamp":{stale_us}}},
+                {{"priceFeedId":9,"emaPrice":"200","emaConfidence":5,"exponent":-8,"feedUpdateTimestamp":{fresh_us}}}
+            ]}}}}"#,
+            env_us = (NOW - 1) * 1_000_000,
+            stale_us = (NOW - 2000) * 1_000_000,
+            fresh_us = (NOW - 30) * 1_000_000,
+        );
+        let prices = parse_latest_price_response(&body, NOW, 60);
+        assert!(
+            !prices.contains_key(&7),
+            "stale per-feed timestamp must not ride a fresh envelope"
+        );
+        let fresh = &prices[&9];
+        assert_eq!(fresh.publish_time.as_secs(), NOW - 30);
     }
 
     #[test]

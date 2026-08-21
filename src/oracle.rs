@@ -108,7 +108,11 @@ pub(crate) enum OffchainPriceSource {
 /// a future-dated quote has negative age and passes every staleness bound).
 /// Composed proxy prices must pass this bot-side — the on-chain read they
 /// replace enforces the same bound on-chain.
-fn publish_time_is_fresh(publish_time_secs: i64, now_secs: i64, max_age_secs: u32) -> bool {
+pub(crate) fn publish_time_is_fresh(
+    publish_time_secs: i64,
+    now_secs: i64,
+    max_age_secs: u32,
+) -> bool {
     // Checked: a timestamp extreme enough to overflow the subtraction is
     // upstream junk and reads as not-fresh, never a panic or wrap.
     let Some(age_secs) = now_secs.checked_sub(publish_time_secs) else {

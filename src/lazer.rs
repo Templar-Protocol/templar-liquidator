@@ -400,7 +400,7 @@ impl LazerApiClient {
                     "Lazer batch rejected; retrying feeds individually across channels"
                 );
                 let mut prices = HashMap::new();
-                for &feed_id in feed_ids {
+                'split: for &feed_id in feed_ids {
                     for channel in PRICE_CHANNELS {
                         match self
                             .fetch_channel_prices(&url, &[feed_id], channel, max_age_secs)
@@ -411,8 +411,22 @@ impl LazerApiClient {
                                 break;
                             }
                             Ok(_) => break, // priced nothing (stale/malformed) — channel was fine
-                            Err(failure) => {
+                            // Expected mid-split: this feed lacks this
+                            // channel (or is unknown) — try its next channel.
+                            Err(failure) if failure.is_feed_level_rejection() => {
                                 tracing::debug!(feed_id, channel, %failure, "Lazer feed rejected on channel");
+                            }
+                            // Terminal mid-split (auth, rate limit, 5xx,
+                            // transport): every further request would fail
+                            // the same way, each with up to a 10s timeout.
+                            // Keep what already priced, abort the rest.
+                            Err(failure) => {
+                                tracing::warn!(
+                                    %failure,
+                                    feed_id,
+                                    "Lazer split pass hit a terminal failure; keeping recovered prices, deferring the rest to adapter reads"
+                                );
+                                break 'split;
                             }
                         }
                     }

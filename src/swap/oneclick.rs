@@ -818,17 +818,40 @@ impl OneClickSwap {
 
         match operation.status {
             OperationStatus::Succeeded => {}
-            failed_status => {
+            // Definitive: executed on chain with a failed final outcome — the
+            // transfer reverted and the tokens stayed with us.
+            OperationStatus::Failed => {
                 tracing::error!(
                     operation_id = %operation.id.0,
-                    status = ?failed_status,
-                    "Deposit transaction failed"
+                    deposit_address = %deposit_address,
+                    "Deposit transaction failed on-chain (funds retained)"
                 );
                 return Err(crate::swap::SwapError::new(
                     crate::swap::SwapErrorKind::Unknown {
                         message: format!(
-                            "Deposit transaction failed: operation {} ended with status {failed_status:?}",
+                            "Deposit transaction failed on-chain (funds retained): operation {} ended with status Failed",
                             operation.id.0
+                        ),
+                    },
+                    "Deposit",
+                ));
+            }
+            // Pending/InProgress: the gateway stopped waiting before finality.
+            // The transfer may still land, so this is indeterminate, not failed.
+            pending_status => {
+                let tx = operation
+                    .latest_tx_hash()
+                    .map_or(String::new(), |h| format!(" (tx {h})"));
+                tracing::error!(
+                    operation_id = %operation.id.0,
+                    status = ?pending_status,
+                    deposit_address = %deposit_address,
+                    "Deposit transfer did not reach finality before the gateway stopped waiting"
+                );
+                return Err(crate::swap::SwapError::new(
+                    crate::swap::SwapErrorKind::Indeterminate {
+                        message: format!(
+                            "deposit transfer to {deposit_address} was still {pending_status:?} when the gateway stopped waiting{tx}; it may yet land"
                         ),
                     },
                     "Deposit",

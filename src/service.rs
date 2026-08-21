@@ -1040,6 +1040,19 @@ impl LiquidatorService {
                                 error = %e,
                                 "Batch swap outcome unknown - funds may have moved; next round's balance refresh reconciles"
                             );
+                            self.config.notifier.notify_swap_failed(
+                                "batch",
+                                &crate::format::short_asset_name(&asset_key),
+                                &crate::format::short_asset_name(
+                                    &info.target_borrow_asset.to_string(),
+                                ),
+                                &crate::format::format_amount_short(
+                                    balance.0,
+                                    info.decimals,
+                                    &asset_key,
+                                ),
+                                &e.to_string(),
+                            );
                         }
                         _ => {
                             tracing::info!(

@@ -40,9 +40,12 @@ pub enum SwapErrorKind {
     #[error("Validation error: {message}")]
     ValidationError { message: String },
 
-    /// Timed out in a phase where no funds have moved (retryable). A
-    /// timeout *after* funds may have moved must be `Indeterminate` instead
-    /// — retrying a whole swap whose deposit already landed double-spends.
+    /// Timed out before the swap's deposit transfer was submitted
+    /// (retryable — the pre-deposit phases are idempotent: re-running a
+    /// quote or a storage registration cannot double-spend inventory, even
+    /// though storage registration bonds a small amount of NEAR). A timeout
+    /// at or after the deposit transfer must be `Indeterminate` instead —
+    /// retrying a whole swap whose deposit already landed double-spends.
     #[error("Timeout: {message}")]
     Timeout { message: String },
 
@@ -137,9 +140,11 @@ impl SwapError {
         self.kind.is_amount_too_low()
     }
 
-    /// Classifies an [`AppError`] from a phase where **no funds have moved**
-    /// (quotes, storage registration). Never produces `Indeterminate` — a
-    /// funds-moving phase must classify its own errors instead of using this.
+    /// Classifies an [`AppError`] from a phase **before the swap's deposit
+    /// transfer is submitted** (quotes, storage registration — idempotent
+    /// operations whose retry cannot double-spend inventory). Never produces
+    /// `Indeterminate` — a phase at or after the deposit transfer must
+    /// classify its own errors instead of using this.
     pub fn from_app_error(context: &str, error: &AppError) -> Self {
         let kind = match error {
             AppError::Rpc(crate::rpc::RpcError::TimeoutError(..)) => SwapErrorKind::Timeout {

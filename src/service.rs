@@ -910,6 +910,15 @@ impl LiquidatorService {
         let mut swapped = 0u32;
         let mut skipped = 0u32;
 
+        // Loop-invariant: without a provider nothing can swap, so the pass
+        // aborts up front — including the dry-run preview, which would only
+        // narrate swaps that structurally cannot happen — rather than
+        // returning mid-loop with part of the bookkeeping done.
+        let Some(ref swap_provider) = self.oneclick_provider else {
+            tracing::debug!("No swap provider, skipping batch swap");
+            return;
+        };
+
         for (collateral_asset, balance) in &holdings {
             let asset_key = collateral_asset.to_string();
 
@@ -976,11 +985,6 @@ impl LiquidatorService {
                 swapped += 1;
                 continue;
             }
-
-            let Some(ref swap_provider) = self.oneclick_provider else {
-                tracing::debug!("No swap provider, skipping batch swap");
-                return;
-            };
 
             tracing::info!(
                 from = %asset_key,
@@ -1241,13 +1245,27 @@ async fn list_deployments(
 /// multiple markets to prefer swapping into USDC for better liquidity. If no
 /// variant is recognized, batch swap still works but may pick a less liquid target.
 fn is_usdc_asset(asset: &FungibleAsset<BorrowAsset>) -> bool {
+    /// Exact ids of known USDC variants, lowercase, as they appear as one
+    /// `:`-delimited segment of an asset id. Strictly exact comparison — no
+    /// name-based fallback, because any pattern loose enough to catch an
+    /// unknown legitimate USDC also catches `usdc.<anything>.near` squatters.
+    /// A fork preferring its own USDC contract adds it here.
+    const KNOWN_USDC_IDS: &[&str] = &[
+        // Native NEAR USDC
+        "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        // ETH USDC (OMNI bridge)
+        "eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near",
+        // Solana USDC (OMNI bridge)
+        "sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near",
+        // Stellar USDC (HOT bridge)
+        "1100_111bzqbb65gxapavoxqmmcgyo5os3txhqs1uh1cgahkquetuq1tju",
+        // Plain-named variants (testnets, mocks)
+        "usdc.near",
+        "usdc.fakes.testnet",
+    ];
     let s = asset.to_string().to_lowercase();
-    s.contains("usdc")
-        || s.contains("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") // ETH USDC
-        || s.contains("17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1") // native NEAR USDC
-        || s.contains("5ce3bf3a31af18be40ba30f721101b4341690186") // Solana USDC
-        || s.contains("1100_111bzqbb65gxapavoxqmmcgyo5os3txhqs1uh1cgahkquetujq1tju")
-    // Stellar USDC
+    s.split(':')
+        .any(|segment| KNOWN_USDC_IDS.contains(&segment))
 }
 
 /// Reports whether a market's configured asset decimals are usable.
@@ -1263,10 +1281,35 @@ fn decimals_are_sane(borrow_decimals: i32, collateral_decimals: i32) -> bool {
 
 /// Check if an error is a rate limit error
 fn is_rate_limit_error(error: &LiquidatorError) -> bool {
-    let error_msg = error.to_string();
-    error_msg.contains("TooManyRequests")
-        || error_msg.contains("429")
-        || error_msg.contains("rate limit")
+    crate::rpc::message_indicates_rate_limit(&error.to_string())
+}
+
+#[cfg(test)]
+mod usdc_tests {
+    use super::*;
+
+    fn asset(s: &str) -> FungibleAsset<BorrowAsset> {
+        s.parse().expect("asset id parses")
+    }
+
+    /// USDC recognition must anchor on whole id segments, not substrings — a
+    /// token whose name merely contains "usdc" is not USDC.
+    #[test]
+    fn usdc_detection_is_segment_anchored() {
+        assert!(is_usdc_asset(&asset(
+            "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"
+        )));
+        assert!(is_usdc_asset(&asset(
+            "nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near"
+        )));
+        assert!(is_usdc_asset(&asset("nep141:usdc.near")));
+        assert!(is_usdc_asset(&asset(
+            "nep245:v2_1.omni.hot.tg:1100_111bzQBB65GxAPAVoxqmMcgYo5oS3txhqs1Uh1cgahKQUeTUq1TJu"
+        )));
+        assert!(!is_usdc_asset(&asset("nep141:notusdc.near")));
+        assert!(!is_usdc_asset(&asset("nep141:usdcoin-scam.near")));
+        assert!(!is_usdc_asset(&asset("nep141:usdc.scam.near")));
+    }
 }
 
 #[cfg(test)]

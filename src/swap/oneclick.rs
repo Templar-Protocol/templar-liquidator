@@ -50,6 +50,15 @@ const POLL_INTERVAL_SECONDS: u64 = 10;
 /// Maximum time to wait for swap completion in seconds (4 minutes)
 const MAX_SWAP_WAIT_SECONDS: u64 = 240;
 
+/// NEAR sent to create a fresh implicit deposit account. One yoctoNEAR
+/// suffices: NEP-448 zero-balance accounts (protocol v53) waive storage
+/// staking for accounts using ≤ 770 bytes, which covers an implicit
+/// account's record plus its full-access key (~182 bytes). Everything sent
+/// here is an unrecovered per-swap cost to an address this bot does not
+/// control, so send the minimum — what matters is that creation *failures*
+/// stop the swap before the token deposit (see the status match below).
+const IMPLICIT_ACCOUNT_FUNDING: NearToken = NearToken::from_yoctonear(1);
+
 /// Swap type for the 1-Click API
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -728,50 +737,65 @@ impl OneClickSwap {
                     "Deposit",
                 ));
             }
-            // For implicit accounts, we need to ensure they exist first
-            // by sending a small amount of NEAR to create the account.
+            // Implicit accounts must exist before they can receive tokens;
+            // see IMPLICIT_ACCOUNT_FUNDING for why one yoctoNEAR suffices.
             AccountType::NearImplicitAccount => {
                 tracing::debug!(
                     deposit_account = %deposit_account,
                     "Creating implicit account"
                 );
 
-                // Send 1 yoctoNEAR to create the implicit account (minimum amount needed).
-                // Don't fail if the account already exists.
                 match self
                     .client
                     .execute(tx::Transfer {
                         receiver_id: deposit_account.clone(),
-                        amount: NearToken::from_yoctonear(1),
+                        amount: IMPLICIT_ACCOUNT_FUNDING,
                     })
                     .await
                 {
-                    Ok(result) => {
-                        // A non-success status (the account already exists is a
-                        // success) means creation failed; the later token deposit
-                        // would then be refunded, which refund detection catches,
-                        // but surface it loudly rather than logging "created".
-                        if result.operation.status == OperationStatus::Succeeded {
-                            tracing::debug!(deposit_account = %deposit_account, "Implicit account created");
-                        } else {
-                            tracing::warn!(
-                                deposit_account = %deposit_account,
-                                status = ?result.operation.status,
-                                "Implicit account creation did not succeed; proceeding (refund detection backstops)"
-                            );
-                        }
-
+                    Ok(result) if result.operation.status == OperationStatus::Succeeded => {
+                        tracing::debug!(deposit_account = %deposit_account, "Implicit account funded");
                         // Wait for account creation to propagate (1-2 blocks)
                         // This prevents race conditions with storage registration
                         tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
                     }
+                    // A transfer to an existing account succeeds, so failure
+                    // here means the account could not be created — the token
+                    // deposit that follows would bounce. Stop instead of
+                    // proceeding toward a guaranteed refund. This is still the
+                    // pre-deposit phase: no inventory has moved, and a retry
+                    // at worst re-sends the small NEAR funding amount — so
+                    // ambiguous outcomes classify retryable, and only an
+                    // on-chain revert is terminal.
+                    Ok(result) if result.operation.status == OperationStatus::Failed => {
+                        return Err(crate::swap::SwapError::new(
+                            crate::swap::SwapErrorKind::Unknown {
+                                message: "implicit deposit-account creation failed on-chain"
+                                    .to_string(),
+                            },
+                            "Deposit",
+                        ));
+                    }
+                    Ok(result) => {
+                        return Err(crate::swap::SwapError::new(
+                            crate::swap::SwapErrorKind::Timeout {
+                                message: format!(
+                                    "implicit deposit-account creation was still {:?} when the gateway stopped waiting",
+                                    result.operation.status
+                                ),
+                            },
+                            "Deposit",
+                        ));
+                    }
                     Err(e) => {
-                        // If account already exists, that's fine
-                        tracing::warn!(
-                            deposit_account = %deposit_account,
-                            error = %e,
-                            "Failed to create implicit account (may already exist)"
-                        );
+                        return Err(crate::swap::SwapError::new(
+                            crate::swap::SwapErrorKind::NetworkError {
+                                message: format!(
+                                    "implicit deposit-account creation did not confirm: {e}"
+                                ),
+                            },
+                            "Deposit",
+                        ));
                     }
                 }
             }
@@ -1258,6 +1282,19 @@ impl OneClickSwap {
     }
 }
 
+/// Whether the supported-token cache admits a pair. An empty cache fails
+/// closed: it means `/v0/tokens` could not be fetched, and the trait contract
+/// prefers declining a routable pair over deferring the failure to after the
+/// collateral is already received. The cache is re-fetched on every registry
+/// refresh, so an empty cache self-heals without a restart.
+fn token_cache_allows(
+    cache: &std::collections::HashSet<String>,
+    from_id: &str,
+    to_id: &str,
+) -> bool {
+    !cache.is_empty() && cache.contains(from_id) && cache.contains(to_id)
+}
+
 #[async_trait::async_trait]
 impl SwapProvider for OneClickSwap {
     #[tracing::instrument(skip(self), level = "debug", fields(
@@ -1379,32 +1416,35 @@ impl SwapProvider for OneClickSwap {
         }
 
         // Check against the cached supported tokens list from /v0/tokens.
-        // If the cache is empty (not yet loaded), allow the swap to proceed —
-        // a quote failure will surface the issue at runtime.
+        // An empty cache (the list couldn't be fetched) declines every pair —
+        // the trait contract prefers false negatives over deferring the
+        // failure to after the collateral is already received. The cache is
+        // re-fetched on every registry refresh, so this self-heals.
         let cache = self
             .supported_tokens
             .read()
             .unwrap_or_else(|e| e.into_inner());
         if cache.is_empty() {
-            return true;
+            tracing::warn!(
+                "1-Click supported-token list unavailable; declining all pairs until the next registry refresh reloads it"
+            );
+            return false;
         }
 
         let from_id = Self::to_oneclick_asset_id(from_asset);
         let to_id = Self::to_oneclick_asset_id(to_asset);
-        let from_ok = cache.contains(&from_id);
-        let to_ok = cache.contains(&to_id);
-
-        if !from_ok || !to_ok {
+        let allowed = token_cache_allows(&cache, &from_id, &to_id);
+        if !allowed {
             tracing::debug!(
                 from = %from_id,
                 to = %to_id,
-                from_supported = from_ok,
-                to_supported = to_ok,
+                from_supported = cache.contains(&from_id),
+                to_supported = cache.contains(&to_id),
                 "1-Click does not support one or both tokens"
             );
         }
 
-        from_ok && to_ok
+        allowed
     }
 
     async fn ensure_storage_registration<F: AssetClass>(
@@ -1415,5 +1455,35 @@ impl SwapProvider for OneClickSwap {
         // Delegate to the existing ensure_storage_deposit method
         self.ensure_storage_deposit(token_contract, account_id)
             .await
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// An empty cache means the supported-token list could not be fetched.
+    /// The trait contract prefers false negatives: decline every pair rather
+    /// than deferring failures to after the collateral is already received.
+    /// The cache reloads on every registry refresh, so this self-heals.
+    #[test]
+    fn empty_token_cache_fails_closed() {
+        let empty = HashSet::new();
+        assert!(!token_cache_allows(
+            &empty,
+            "nep141:a.near",
+            "nep141:b.near"
+        ));
+
+        let mut cache = HashSet::new();
+        cache.insert("nep141:a.near".to_string());
+        cache.insert("nep141:b.near".to_string());
+        assert!(token_cache_allows(&cache, "nep141:a.near", "nep141:b.near"));
+        assert!(!token_cache_allows(
+            &cache,
+            "nep141:a.near",
+            "nep141:c.near"
+        ));
     }
 }

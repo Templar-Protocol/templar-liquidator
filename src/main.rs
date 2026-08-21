@@ -3,19 +3,37 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    tracing_subscriber::registry()
-        .with(
-            fmt::layer()
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_line_number(false)
-                .with_file(false),
-        )
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,templar_liquidator=debug")),
-        )
-        .init();
+    // LOG_FORMAT=json emits one JSON object per line for log aggregators
+    // (Loki, CloudWatch, …); anything else keeps the human-readable format.
+    let json_logs = std::env::var("LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    let env_filter = || {
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info,templar_liquidator=debug"))
+    };
+    if json_logs {
+        tracing_subscriber::registry()
+            .with(
+                fmt::layer()
+                    .json()
+                    .with_target(false)
+                    .with_thread_ids(false)
+                    .with_line_number(false)
+                    .with_file(false),
+            )
+            .with(env_filter())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(
+                fmt::layer()
+                    .with_target(false)
+                    .with_thread_ids(false)
+                    .with_line_number(false)
+                    .with_file(false),
+            )
+            .with(env_filter())
+            .init();
+    }
 
     // Parse arguments and build configuration
     let args = Args::parse_args();

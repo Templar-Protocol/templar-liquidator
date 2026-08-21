@@ -113,9 +113,12 @@ pub trait SwapProvider: Send + Sync {
     /// exceeded, or the swap settles as anything other than a full fill
     /// (refund, partial deposit, or on-chain failure). Classification drives
     /// retry policy, so an implementation must choose kinds honestly — above
-    /// all: any failure at or after the point where funds may have left the
-    /// account MUST be [`SwapErrorKind::Indeterminate`], never a retryable
-    /// kind. Retrying a swap whose deposit already landed spends the funds
+    /// all: any failure at or after the point where the *swapped* funds may
+    /// have left the account (the deposit transfer) MUST be
+    /// [`SwapErrorKind::Indeterminate`], never a retryable kind. Small
+    /// fixed-cost NEAR bonds before that point (storage registration,
+    /// deposit-account funding) are retry-safe and classify as ordinary
+    /// transient errors. Retrying a swap whose deposit already landed spends the funds
     /// twice; `Indeterminate` is never auto-retried, and the next inventory
     /// refresh re-reads chain balances so a late settlement or refund is
     /// reflected before anything sizes a new swap.
@@ -140,8 +143,10 @@ pub trait SwapProvider: Send + Sync {
     ///
     /// Must return `false` for any pair the provider structurally cannot
     /// service: [`OneClickSwap`] requires at least one leg to be NEP-245
-    /// (`intents.near`-wrapped) and, once its supported-token cache is
-    /// populated, both asset ids to appear in it.
+    /// (`intents.near`-wrapped) and both asset ids to appear in its
+    /// supported-token cache. An empty cache — the token list couldn't be
+    /// fetched — declines every pair rather than allowing them through; it
+    /// reloads on the next registry refresh.
     ///
     /// This is called before a swap is attempted, so returning `true` for a
     /// pair the provider cannot actually route doesn't fail closed — it defers

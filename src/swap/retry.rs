@@ -155,7 +155,7 @@ impl SwapError {
     /// `pub(crate)` visibility exist so it cannot be reached for one.
     pub(crate) fn from_pre_deposit_app_error(context: &str, error: &AppError) -> Self {
         let kind = match error {
-            AppError::Rpc(crate::rpc::RpcError::TimeoutError(..)) => SwapErrorKind::Timeout {
+            AppError::Rpc(crate::rpc::RpcError::TimeoutError(_)) => SwapErrorKind::Timeout {
                 message: error.to_string(),
             },
             AppError::Rpc(_) => SwapErrorKind::NetworkError {
@@ -193,11 +193,23 @@ impl Default for SwapRetryConfig {
     }
 }
 
+/// Upper bound on a single retry delay. Doubling backoff crosses any
+/// realistic threshold within a handful of attempts; without a cap, a large
+/// configured base and attempt count saturate to u64::MAX milliseconds —
+/// which doesn't panic, it parks the retry loop for centuries.
+const MAX_BACKOFF_DELAY: Duration = Duration::from_secs(300);
+
 impl SwapRetryConfig {
-    /// Calculate delay for a given attempt (1-indexed).
+    /// Calculate delay for a given attempt (1-indexed): 1×, 2×, 4×, … the
+    /// base delay, capped at [`MAX_BACKOFF_DELAY`]. Saturating arithmetic —
+    /// the shift is undefined at 64 bits and the multiplication can wrap,
+    /// either of which would panic mid-retry under a large configured
+    /// attempt count.
     fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        let multiplier = 1u64 << attempt.saturating_sub(1); // 1, 2, 4, …
-        Duration::from_millis(self.base_delay_ms * multiplier)
+        let multiplier = 1u64
+            .checked_shl(attempt.saturating_sub(1))
+            .unwrap_or(u64::MAX);
+        Duration::from_millis(self.base_delay_ms.saturating_mul(multiplier)).min(MAX_BACKOFF_DELAY)
     }
 }
 
@@ -433,7 +445,9 @@ mod tests {
     #[test]
     fn pre_deposit_classifier_never_produces_indeterminate() {
         let errors = [
-            AppError::Rpc(crate::rpc::RpcError::TimeoutError(30, 31)),
+            AppError::Rpc(crate::rpc::RpcError::TimeoutError(
+                "timed out after 30s".into(),
+            )),
             AppError::Rpc(crate::rpc::RpcError::WrongResponseKind("x".into())),
             AppError::ValidationError("x".into()),
             AppError::SerializationError("x".into()),
@@ -445,6 +459,28 @@ mod tests {
                 "pre-deposit classifier must never classify as Indeterminate"
             );
         }
+    }
+
+    /// A large configured attempt count must not overflow the shift or the
+    /// multiplication, and the resulting delay must be capped — a saturated
+    /// u64::MAX milliseconds would park the retry loop for centuries, which
+    /// is a hang with extra steps.
+    #[test]
+    fn backoff_delay_saturates_and_is_capped() {
+        let config = SwapRetryConfig {
+            max_attempts: 200,
+            base_delay_ms: u64::MAX / 2,
+        };
+        // Shift alone overflows at attempt 65; the multiplication overflows
+        // far earlier with a large base. No panic, and never above the cap.
+        assert!(config.delay_for_attempt(200) <= MAX_BACKOFF_DELAY);
+        assert!(config.delay_for_attempt(1) <= MAX_BACKOFF_DELAY);
+        // Sane configs are unaffected by the cap.
+        let sane = SwapRetryConfig {
+            max_attempts: 3,
+            base_delay_ms: 2000,
+        };
+        assert_eq!(sane.delay_for_attempt(3), Duration::from_millis(8000));
     }
 
     #[test]

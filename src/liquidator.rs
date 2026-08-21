@@ -362,7 +362,7 @@ impl LiquidatorError {
     pub fn notification_kind(&self) -> NotificationKind {
         match self {
             Self::TransactionFailed(msg) => classify_transaction_failure(msg),
-            Self::LiquidationTransactionError(rpc::RpcError::TimeoutError(_, _)) => {
+            Self::LiquidationTransactionError(rpc::RpcError::TimeoutError(_)) => {
                 NotificationKind::TxTimeout
             }
             Self::LiquidationTransactionError(_) | Self::MissingTransactionHash(_) => {
@@ -1396,7 +1396,9 @@ mod tests {
 
     #[test]
     fn test_error_phase_scan() {
-        let err = LiquidatorError::FetchBorrowStatus(rpc::RpcError::TimeoutError(30, 30));
+        let err = LiquidatorError::FetchBorrowStatus(rpc::RpcError::TimeoutError(
+            "timed out after 30s".into(),
+        ));
         assert_eq!(err.phase(), ErrorPhase::Scan);
     }
 
@@ -1461,7 +1463,9 @@ mod tests {
 
     #[test]
     fn test_notification_kind_tx_submission_timeout() {
-        let err = LiquidatorError::LiquidationTransactionError(rpc::RpcError::TimeoutError(30, 30));
+        let err = LiquidatorError::LiquidationTransactionError(rpc::RpcError::TimeoutError(
+            "timed out after 30s".into(),
+        ));
         assert_eq!(err.notification_kind(), NotificationKind::TxTimeout);
     }
 
@@ -1480,8 +1484,10 @@ mod tests {
             NotificationKind::InsufficientBalance,
         );
         assert_eq!(
-            LiquidatorError::FetchBorrowStatus(rpc::RpcError::TimeoutError(30, 30))
-                .notification_kind(),
+            LiquidatorError::FetchBorrowStatus(rpc::RpcError::TimeoutError(
+                "timed out after 30s".into()
+            ))
+            .notification_kind(),
             NotificationKind::FetchBorrowStatus,
         );
     }

@@ -57,7 +57,7 @@ serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0.18"
 tokio = { version = "1.51.0", features = ["full"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = "2.5"
 
 # ── Templar crates: ONE uniform rev for every crate (mixed revs make Cargo

@@ -1224,10 +1224,14 @@ impl Liquidator {
                 .filter(|id| !matches!(oracle_response.get(*id), Some(Some(_))))
                 .map(|id| hex::encode(id.0))
                 .collect();
+            // The ids stay in the structured field only: the service
+            // classifies error *messages* by substring, and a hex id
+            // containing "429" would misread as a rate limit.
+            tracing::warn!(missing = ?missing, "Oracle prices missing or stale");
             return Err(LiquidatorError::PriceFetchError(
-                rpc::RpcError::WrongResponseKind(format!(
-                    "oracle prices missing or stale for feed(s) {missing:?}"
-                )),
+                rpc::RpcError::WrongResponseKind(
+                    "oracle prices missing or stale for the market's feed pair".to_string(),
+                ),
             ));
         }
 

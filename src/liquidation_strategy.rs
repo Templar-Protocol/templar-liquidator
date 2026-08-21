@@ -145,9 +145,10 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     /// * `oracle_response` - Current price oracle data
     /// * `configuration` - Market configuration
     /// * `available_balance` - Available inventory balance in the borrow asset
-    /// * `market_version` - Market contract version (e.g., `Some((1, 0, 0))`).
-    ///   `None` when the market exposes no NEP-330 metadata; treat that the same
-    ///   as the oldest supported version rather than assuming partial support.
+    /// * `market_version` - Market contract version. Gate partial support on
+    ///   [`crate::scanner::supports_partial_liquidation`], never on equality
+    ///   with a specific version; `None` (no NEP-330 metadata) is treated as
+    ///   the oldest supported version — full liquidation required.
     ///
     /// # Errors
     /// Returns an error if price pair retrieval fails or position calculations fail.
@@ -374,8 +375,10 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
             return Ok(None);
         };
 
-        // v1.0.0 markets require liquidating ALL collateral (no partial support)
-        let target_collateral = if market_version == Some((1, 0, 0)) {
+        // Pre-partial markets (version < 1.1.0, or unknown) require
+        // liquidating ALL collateral.
+        let requires_full = !crate::scanner::supports_partial_liquidation(market_version);
+        let target_collateral = if requires_full {
             position.collateral_asset_deposit.into()
         } else {
             min_with_cap_buffer(collateral_amount, liquidatable_collateral.into())
@@ -405,11 +408,11 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
             theoretical_amount.saturating_add((theoretical_amount * SAFETY_BUFFER_BPS) / 10_000);
 
         if final_amount > available_u128 {
-            if market_version == Some((1, 0, 0)) {
+            if requires_full {
                 tracing::warn!(
                     required = %final_amount,
                     available = %available_u128,
-                    "v1.0.0 market requires full collateral liquidation but insufficient balance"
+                    "Market requires full collateral liquidation but insufficient balance"
                 );
             } else {
                 tracing::warn!(
@@ -554,8 +557,10 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
             return Ok(None);
         };
 
-        // v1.0.0 markets require liquidating ALL collateral
-        let target_collateral = if market_version == Some((1, 0, 0)) {
+        // Pre-partial markets (version < 1.1.0, or unknown) require
+        // liquidating ALL collateral.
+        let requires_full = !crate::scanner::supports_partial_liquidation(market_version);
+        let target_collateral = if requires_full {
             position.collateral_asset_deposit.into()
         } else {
             let safe_collateral = (max_collateral * (10_000 - SAFETY_BUFFER_BPS)) / 10_000;
@@ -570,15 +575,33 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
             return Ok(None);
         }
 
-        let expected_minimum = collateral_to_borrow(
+        let Some(expected_minimum) = collateral_to_borrow(
             target_collateral,
             &price_pair,
             configuration.liquidation_maximum_spread,
-        )
-        .unwrap_or(0);
+        ) else {
+            tracing::warn!(
+                collateral_amount = %target_collateral,
+                "Could not calculate borrow amount from collateral"
+            );
+            return Ok(None);
+        };
 
         let amount_with_buffer = expected_minimum
             .saturating_add(((expected_minimum * SAFETY_BUFFER_BPS) / 10_000).max(1));
+
+        // A full liquidation cannot be capped: an offer below the full
+        // requirement is rejected on-chain as too low, wasting a transaction
+        // every round. If the fixed budget can't fund it, skip the position.
+        if requires_full && amount_with_buffer > fixed_amount {
+            let asset_id = configuration.borrow_asset.to_string();
+            tracing::warn!(
+                required = %crate::format::format_amount(amount_with_buffer, decimals, &asset_id),
+                fixed_amount = %crate::format::format_amount(fixed_amount, decimals, &asset_id),
+                "Fixed budget cannot fund the required full liquidation, skipping"
+            );
+            return Ok(None);
+        }
 
         // Cap at fixed_amount (the maximum we're willing to send)
         let final_amount = std::cmp::min(amount_with_buffer, fixed_amount);
@@ -593,11 +616,11 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
             return Ok(None);
         }
 
-        if market_version == Some((1, 0, 0)) && final_amount > available_u128 {
+        if requires_full && final_amount > available_u128 {
             tracing::warn!(
                 required = %final_amount,
                 available = %available_u128,
-                "v1.0.0 market requires full collateral liquidation but insufficient balance"
+                "Market requires full collateral liquidation but insufficient balance"
             );
             return Ok(None);
         }
@@ -617,6 +640,118 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real mainnet fixtures: the ibtc-usdc market config (BTC collateral,
+    /// 8 decimals; USDC borrow, 6 decimals; 5% spread) and a borrow position
+    /// in that market's own JSON shape.
+    const IBTC_CONFIG_JSON: &str = r#"{"time_chunk_configuration":{"BlockTimestampMs":{"divisor":"600000"}},"borrow_asset":{"Nep141":"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"},"collateral_asset":{"Nep245":{"contract_id":"intents.near","token_id":"nep141:btc.omft.near"}},"price_oracle_configuration":{"account_id":"pyth-oracle.near","collateral_asset_price_id":"e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43","collateral_asset_decimals":8,"borrow_asset_price_id":"eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a","borrow_asset_decimals":6,"price_maximum_age_s":60},"borrow_mcr_maintenance":"1.25","borrow_mcr_liquidation":"1.19999999999999999999999999999999999999","borrow_asset_maximum_usage_ratio":"0.99000000000000000000000000000000000001","borrow_origination_fee":{"Proportional":"0.00099999999999999999999999999999999999"},"borrow_interest_rate_strategy":{"Piecewise":{"base":"0","optimal":"0.90000000000000000000000000000000000001","rate_1":"0.08888888888888888888888888888888888889","rate_2":"2.40000000000000000000000000000000000001"}},"borrow_maximum_duration_ms":null,"borrow_range":{"minimum":"1","maximum":null},"supply_range":{"minimum":"40000","maximum":null},"supply_withdrawal_range":{"minimum":"40000","maximum":null},"supply_withdrawal_fee":{"fee":{"Flat":"0"},"duration":"0","behavior":"Fixed"},"yield_weights":{"supply":1,"static":{"revenue.tmplr.near":1,"rewards.tmplr.near":1}},"protocol_account_id":"revenue.tmplr.near","liquidation_maximum_spread":"0.05000000000000000000000000000000000001"}"#;
+
+    fn ibtc_config() -> MarketConfiguration {
+        near_sdk::serde_json::from_str(IBTC_CONFIG_JSON).expect("fixture parses")
+    }
+
+    fn position(collateral_raw: u128, principal_raw: u128) -> BorrowPosition {
+        near_sdk::serde_json::from_str(&format!(
+            r#"{{"started_at_block_timestamp_ms":"1758939235082",
+                 "collateral_asset_deposit":"{collateral_raw}",
+                 "borrow_asset_principal":"{principal_raw}",
+                 "borrow_asset_fees":{{"total":"0","fraction_as_u128_dividend":"0","next_snapshot_index":0,"amortized":"0"}}}}"#
+        ))
+        .expect("position fixture parses")
+    }
+
+    fn btc_usdc_prices(cfg: &MarketConfiguration) -> OracleResponse {
+        let price = |mantissa: i64| templar_common::oracle::pyth::Price {
+            price: near_sdk::json_types::I64(mantissa),
+            conf: near_sdk::json_types::U64(0),
+            expo: -8,
+            publish_time: templar_common::oracle::pyth::PythTimestamp::from_secs(1_755_600_000),
+        };
+        let mut r = OracleResponse::new();
+        let poc = &cfg.price_oracle_configuration;
+        // BTC ≈ $64,350; USDC ≈ $1.00
+        r.insert(
+            poc.collateral_asset_price_id,
+            Some(price(6_435_000_000_000)),
+        );
+        r.insert(poc.borrow_asset_price_id, Some(price(100_000_000)));
+        r
+    }
+
+    /// A full-liquidation market (no partial support) requires repaying for
+    /// ALL the collateral; a fixed budget below that requirement must skip
+    /// the position, not submit an offer capped at the budget — the contract
+    /// rejects such an offer as too low, wasting a transaction every round.
+    /// `(1, 0, 5)` pins the version-gating half: any pre-partial version —
+    /// not just exactly (1, 0, 0) — takes the full-liquidation path.
+    #[test]
+    fn fixed_budget_below_full_requirement_skips_instead_of_underfunding() {
+        let cfg = ibtc_config();
+        let prices = btc_usdc_prices(&cfg);
+        // 1 BTC of collateral: full liquidation needs ≈ $61k of USDC; the
+        // strategy's budget is $100.
+        let pos = position(100_000_000, 3_980_000);
+        let strategy = FixedAmountLiquidationStrategy::new(100.0, 50);
+
+        for version in [None, Some((1, 0, 0)), Some((1, 0, 5))] {
+            let result = strategy
+                .calculate_liquidation_amount(&pos, &prices, &cfg, U128(1_000_000_000_000), version)
+                .expect("no error");
+            assert!(
+                result.is_none(),
+                "budget cannot fund a full liquidation; must skip (version {version:?}), got {result:?}"
+            );
+        }
+    }
+
+    /// A failed collateral→borrow conversion is not a fundable liquidation.
+    /// Collapsing it to zero would produce `amount_with_buffer = 1`, which
+    /// slips under both the full-liquidation guard and this market's
+    /// contract minimum of 1 — submitting a one-raw-unit offer for the whole
+    /// position that the contract rejects as too low.
+    #[test]
+    fn conversion_failure_skips_instead_of_offering_one_unit() {
+        let cfg = ibtc_config();
+        let prices = btc_usdc_prices(&cfg);
+        // Collateral so large that valuing it in borrow units overflows u128,
+        // making collateral_to_borrow return None on the full-liquidation path.
+        let pos = position(u128::MAX, 3_980_000);
+        let strategy = FixedAmountLiquidationStrategy::new(100.0, 50);
+
+        let result = strategy
+            .calculate_liquidation_amount(&pos, &prices, &cfg, U128(1_000_000_000_000), None)
+            .expect("no error");
+        assert!(
+            result.is_none(),
+            "unvaluable collateral must skip, got {result:?}"
+        );
+    }
+
+    /// Control: with partial support the same budget produces a partial
+    /// liquidation within the fixed amount (plus safety buffer).
+    #[test]
+    fn fixed_budget_partial_liquidation_stays_within_budget() {
+        let cfg = ibtc_config();
+        let prices = btc_usdc_prices(&cfg);
+        let pos = position(100_000_000, 3_980_000);
+        let strategy = FixedAmountLiquidationStrategy::new(100.0, 50);
+
+        let (repay, collateral) = strategy
+            .calculate_liquidation_amount(
+                &pos,
+                &prices,
+                &cfg,
+                U128(1_000_000_000_000),
+                Some((1, 1, 0)),
+            )
+            .expect("no error")
+            .expect("partial liquidation is fundable");
+        assert!(
+            repay.0 <= 100_000_000,
+            "repay {repay:?} within the $100 budget"
+        );
+        assert!(collateral.0 > 0 && collateral.0 < 100_000_000);
+    }
 
     #[test]
     fn test_partial_strategy_creation() {

@@ -5,10 +5,11 @@
 //! - LST oracles with price transformers
 //! - Proxy oracles — composed off-chain at scan time from each feed's
 //!   configured source (Hermes for Pyth sources, the RedStone public price
-//!   API via [`crate::redstone`] for RedStone sources, transformer inputs by
-//!   free view call), with the proxy's on-chain price cache as fallback for
-//!   anything not composable off-chain (e.g. Lazer sources). Every composed
-//!   price is bounded by the market's freshness window before use.
+//!   API via [`crate::redstone`] for RedStone sources, a free adapter view
+//!   read for Lazer sources, transformer inputs by free view call), with the
+//!   proxy's on-chain price cache as fallback for feeds whose leg fails or
+//!   reads stale. Every composed price is bounded by the market's freshness
+//!   window before use.
 //!
 //! Execution-time pricing is separate and unchanged: the market contract
 //! reads its own on-chain oracle, which this module refreshes via
@@ -64,14 +65,17 @@ struct HermesParsedPrice {
 
 // ── Off-chain proxy price composition ────────────────────────────────────────
 
-/// A proxy source request the bot can price without any on-chain oracle
-/// state: Pyth via Hermes, RedStone via the public price API
-/// ([`crate::redstone`]). Lazer never classifies — a Lazer feed lives only in
-/// its on-chain adapter contract, which is a cache someone must push to.
+/// A proxy source request the bot can price at scan time without the proxy's
+/// own on-chain cache: Pyth via Hermes, RedStone via the public price API
+/// ([`crate::redstone`]), Lazer via a free view read of its adapter contract.
+/// The Lazer adapter is still a push-fed store — the view read prices the
+/// feed only while someone maintains those pushes; a stale adapter fails
+/// freshness and falls back to the proxy cache like every other leg.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OffchainRequest {
     Pyth(PriceIdentifier),
     RedStone(String),
+    Lazer { oracle_id: AccountId, feed_id: u32 },
 }
 
 /// One proxy feed's scan-time pricing plan: a direct off-chain source, or a
@@ -110,6 +114,20 @@ fn unix_now_secs() -> i64 {
         .map_or(0, |d| d.as_secs().cast_signed())
 }
 
+/// Projects a stored Lazer feed to its EMA price — the same projection the
+/// on-chain proxy's `Lazer` source consumes, and consistent with the Hermes
+/// leg (which also feeds EMA) — rejecting it under the market's freshness
+/// bound like every other composed leg. The adapter applies no age filter on
+/// reads, so the bound is enforced entirely here.
+fn lazer_feed_to_fresh_price(
+    feed: &templar_common::oracle::lazer::FeedData,
+    now_secs: i64,
+    max_age_secs: u32,
+) -> Option<pyth::Price> {
+    feed.to_ema_price()
+        .filter(|price| publish_time_is_fresh(price.publish_time.as_secs(), now_secs, max_age_secs))
+}
+
 /// True when every requested feed has a `Some` price in the response.
 ///
 /// Deliberately a caller-side decision, not enforced inside
@@ -134,13 +152,57 @@ fn retain_fresh(response: &mut OracleResponse, now_secs: i64, max_age_secs: u32)
     });
 }
 
-/// Classifies an [`OracleRequest`] as off-chain pricable, or `None` for Lazer.
-fn classify_offchain_request(request: &OracleRequest) -> Option<OffchainRequest> {
+/// Classifies an [`OracleRequest`] as its scan-time pricing request. Every
+/// source kind classifies; what varies is where the price comes from.
+fn classify_offchain_request(request: &OracleRequest) -> OffchainRequest {
     match request {
-        OracleRequest::Pyth(req) => Some(OffchainRequest::Pyth(req.price_id)),
-        OracleRequest::RedStone(req) => Some(OffchainRequest::RedStone(req.price_id.to_string())),
-        OracleRequest::Lazer(_) => None,
+        OracleRequest::Pyth(req) => OffchainRequest::Pyth(req.price_id),
+        OracleRequest::RedStone(req) => OffchainRequest::RedStone(req.price_id.to_string()),
+        OracleRequest::Lazer(req) => OffchainRequest::Lazer {
+            oracle_id: req.oracle_id.clone(),
+            feed_id: req.feed_id,
+        },
     }
+}
+
+/// Deduplicates the plans' underlying requests into one want-list per
+/// backend. Set-based; the order of a batch request carries no meaning.
+#[allow(clippy::type_complexity)]
+fn collect_offchain_wants(
+    plans: &[(PriceIdentifier, OffchainPriceSource)],
+) -> (
+    Vec<PriceIdentifier>,
+    Vec<String>,
+    HashMap<AccountId, HashSet<u32>>,
+) {
+    let mut pyth_id_set: HashSet<PriceIdentifier> = HashSet::new();
+    let mut redstone_symbol_set: HashSet<String> = HashSet::new();
+    let mut lazer_wanted: HashMap<AccountId, HashSet<u32>> = HashMap::new();
+    for (_, plan) in plans {
+        let request = match plan {
+            OffchainPriceSource::Direct(request)
+            | OffchainPriceSource::Transformed { request, .. } => request,
+        };
+        match request {
+            OffchainRequest::Pyth(id) => {
+                pyth_id_set.insert(*id);
+            }
+            OffchainRequest::RedStone(symbol) => {
+                redstone_symbol_set.insert(symbol.clone());
+            }
+            OffchainRequest::Lazer { oracle_id, feed_id } => {
+                lazer_wanted
+                    .entry(oracle_id.clone())
+                    .or_default()
+                    .insert(*feed_id);
+            }
+        }
+    }
+    (
+        pyth_id_set.into_iter().collect(),
+        redstone_symbol_set.into_iter().collect(),
+        lazer_wanted,
+    )
 }
 
 /// Picks the first source in the proxy's configured order that can be priced
@@ -152,27 +214,16 @@ fn classify_offchain_request(request: &OracleRequest) -> Option<OffchainRequest>
 /// because scan-time prices are advisory — execution still pushes fresh prices
 /// on-chain and the market contract re-validates against its own oracle.
 pub(crate) fn plan_offchain_source<'a>(
-    sources: impl Iterator<Item = &'a Source>,
+    mut sources: impl Iterator<Item = &'a Source>,
 ) -> Option<OffchainPriceSource> {
-    for source in sources {
-        match source {
-            Source::Request(request) => {
-                if let Some(request) = classify_offchain_request(request) {
-                    return Some(OffchainPriceSource::Direct(request));
-                }
-            }
-            Source::Transformer(transformer) => {
-                if let Some(request) = classify_offchain_request(&transformer.request) {
-                    return Some(OffchainPriceSource::Transformed {
-                        request,
-                        call: transformer.call.clone(),
-                        action: transformer.action.clone(),
-                    });
-                }
-            }
-        }
-    }
-    None
+    sources.next().map(|source| match source {
+        Source::Request(request) => OffchainPriceSource::Direct(classify_offchain_request(request)),
+        Source::Transformer(transformer) => OffchainPriceSource::Transformed {
+            request: classify_offchain_request(&transformer.request),
+            call: transformer.call.clone(),
+            action: transformer.action.clone(),
+        },
+    })
 }
 
 // ── Shared types ─────────────────────────────────────────────────────────────
@@ -880,7 +931,7 @@ impl OracleFetcher {
                         tracing::debug!(
                             %oracle,
                             ?price_id,
-                            "No off-chain pricable source for feed (e.g. Lazer-only), deferring to on-chain cache"
+                            "Feed has no configured sources, deferring to on-chain cache"
                         );
                     }
                 }
@@ -890,6 +941,54 @@ impl OracleFetcher {
             }
         }
         plans
+    }
+
+    /// View-reads each wanted Lazer adapter once and projects its stored
+    /// feeds to prices. Freshness is enforced here (the adapter applies no
+    /// age filter on reads); a stale or absent feed is simply unpriced and
+    /// falls back to the proxy's on-chain cache.
+    async fn fetch_lazer_adapter_prices(
+        &self,
+        wanted: HashMap<AccountId, HashSet<u32>>,
+        now_secs: i64,
+        max_age_secs: u32,
+    ) -> HashMap<(AccountId, u32), pyth::Price> {
+        let mut prices = HashMap::new();
+        for (adapter, feed_ids) in wanted {
+            let feed_ids: Vec<u32> = feed_ids.into_iter().collect();
+            match self
+                .client
+                .read(templar_gateway_methods_spec::lazer::GetFeedsData {
+                    oracle_id: adapter.clone(),
+                    feed_ids,
+                })
+                .await
+            {
+                Ok(result) => {
+                    for (feed_id, feed) in result.feeds {
+                        match feed
+                            .as_ref()
+                            .and_then(|f| lazer_feed_to_fresh_price(f, now_secs, max_age_secs))
+                        {
+                            Some(price) => {
+                                prices.insert((adapter.clone(), feed_id), price);
+                            }
+                            None => {
+                                tracing::debug!(
+                                    %adapter,
+                                    feed_id,
+                                    "Lazer adapter feed absent or stale, deferring to on-chain cache"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%adapter, %error, "Failed to read Lazer adapter feeds");
+                }
+            }
+        }
+        prices
     }
 
     /// Composes proxy-oracle prices off-chain from each feed's configured
@@ -910,26 +1009,10 @@ impl OracleFetcher {
             return OracleResponse::new();
         }
 
-        // Batch the underlying fetches: one Hermes call, one RedStone call.
-        // Set-based dedup; the order of a batch request carries no meaning.
-        let mut pyth_id_set: HashSet<PriceIdentifier> = HashSet::new();
-        let mut redstone_symbol_set: HashSet<String> = HashSet::new();
-        for (_, plan) in &plans {
-            let request = match plan {
-                OffchainPriceSource::Direct(request)
-                | OffchainPriceSource::Transformed { request, .. } => request,
-            };
-            match request {
-                OffchainRequest::Pyth(id) => {
-                    pyth_id_set.insert(*id);
-                }
-                OffchainRequest::RedStone(symbol) => {
-                    redstone_symbol_set.insert(symbol.clone());
-                }
-            }
-        }
-        let pyth_ids: Vec<PriceIdentifier> = pyth_id_set.into_iter().collect();
-        let redstone_symbols: Vec<String> = redstone_symbol_set.into_iter().collect();
+        // Batch the underlying fetches: one Hermes call, one RedStone call,
+        // one adapter view read per Lazer adapter account.
+        let (pyth_ids, redstone_symbols, lazer_wanted) = collect_offchain_wants(&plans);
+        let now_secs = unix_now_secs();
         let pyth_prices = if pyth_ids.is_empty() {
             OracleResponse::new()
         } else {
@@ -941,9 +1024,11 @@ impl OracleFetcher {
             .redstone_api
             .get_prices(&redstone_symbols, max_age_secs)
             .await;
+        let lazer_prices = self
+            .fetch_lazer_adapter_prices(lazer_wanted, now_secs, max_age_secs)
+            .await;
 
         // Compose each feed, applying its transformer when one is configured.
-        let now_secs = unix_now_secs();
         let mut response = OracleResponse::new();
         for (price_id, plan) in plans {
             let (request, transform) = match plan {
@@ -977,6 +1062,10 @@ impl OracleFetcher {
                     })
                 }
                 OffchainRequest::RedStone(symbol) => redstone_prices.get(symbol).cloned(),
+                // Freshness already enforced at the adapter read above.
+                OffchainRequest::Lazer { oracle_id, feed_id } => {
+                    lazer_prices.get(&(oracle_id.clone(), *feed_id)).cloned()
+                }
             };
             let Some(underlying) = underlying else {
                 tracing::debug!(%oracle, ?price_id, ?request, "Underlying source returned no usable price");
@@ -1105,23 +1194,57 @@ mod tests {
         );
     }
 
+    /// A Lazer source is pricable at scan time: its adapter is an on-chain
+    /// store the bot can view-read for free. A Lazer-only feed (the
+    /// linear-usdt shape) must therefore produce a plan instead of falling
+    /// straight to the proxy's own cache.
     #[test]
-    fn plan_skips_lazer_sources() {
-        // Lazer feeds live only in their on-chain adapter — no off-chain API —
-        // so the planner must pass over them to the next source rather than
-        // failing the whole feed.
+    fn plan_classifies_lazer_sources() {
         let plan = plan_offchain_source([&lazer_source(), &redstone_source()].into_iter())
-            .expect("redstone source is pricable off-chain");
+            .expect("lazer source is pricable via its adapter view read");
         assert_eq!(
             plan,
-            OffchainPriceSource::Direct(OffchainRequest::RedStone("LTC".to_string()))
+            OffchainPriceSource::Direct(OffchainRequest::Lazer {
+                oracle_id: "pyth-lazer.near".parse().unwrap(),
+                feed_id: 7,
+            })
         );
     }
 
     #[test]
-    fn plan_returns_none_when_no_source_is_pricable() {
-        assert!(plan_offchain_source([&lazer_source()].into_iter()).is_none());
+    fn plan_returns_none_when_no_source_is_configured() {
         assert!(plan_offchain_source([].into_iter()).is_none());
+    }
+
+    fn lazer_feed(publish_secs: u64) -> templar_common::oracle::lazer::FeedData {
+        near_sdk::serde_json::from_str(&format!(
+            r#"{{"price":"123456","conf":"50",
+                 "ema":{{"price":"120000","conf":"40"}},
+                 "expo":-8,"publish_time_ns":"{}"}}"#,
+            publish_secs * 1_000_000_000
+        ))
+        .expect("feed fixture parses")
+    }
+
+    /// The Lazer leg projects the EMA price — the same projection the
+    /// on-chain proxy's Lazer source consumes, and consistent with the
+    /// Hermes leg (which also feeds EMA) — and enforces the market's
+    /// freshness bound like every other composed leg.
+    #[test]
+    fn lazer_feed_projects_fresh_ema_and_rejects_stale() {
+        let now = 1_700_000_000_i64;
+
+        let fresh = lazer_feed(1_699_999_990);
+        let price = lazer_feed_to_fresh_price(&fresh, now, 60).expect("10s old is fresh");
+        assert_eq!(price.price.0, 120_000);
+        assert_eq!(price.conf.0, 40);
+        assert_eq!(price.expo, -8);
+
+        let stale = lazer_feed(1_699_998_000);
+        assert!(
+            lazer_feed_to_fresh_price(&stale, now, 60).is_none(),
+            "2000s old against a 60s bound must be unpriced"
+        );
     }
 
     #[test]
@@ -1220,15 +1343,27 @@ mod tests {
         assert!(!publish_time_is_fresh(i64::MAX, now, 120));
     }
 
+    /// A transformer over a Lazer inner is fully pricable at scan time: the
+    /// transformer input is a view call and the Lazer underlying is an
+    /// adapter view read. This is the linear-usdt collateral-feed shape —
+    /// the case the Lazer leg exists for.
     #[test]
-    fn plan_skips_transformers_over_lazer_inners() {
+    fn plan_carries_transformers_over_lazer_inners() {
         let inner = OracleRequest::lazer("pyth-lazer.near".parse().unwrap(), 9);
         let plan =
             plan_offchain_source([&transformer_source(inner), &redstone_source()].into_iter())
-                .expect("falls through to the redstone source");
-        assert_eq!(
-            plan,
-            OffchainPriceSource::Direct(OffchainRequest::RedStone("LTC".to_string()))
-        );
+                .expect("transformer over lazer is pricable off-chain");
+        match plan {
+            OffchainPriceSource::Transformed { request, .. } => {
+                assert_eq!(
+                    request,
+                    OffchainRequest::Lazer {
+                        oracle_id: "pyth-lazer.near".parse().unwrap(),
+                        feed_id: 9,
+                    }
+                );
+            }
+            other @ OffchainPriceSource::Direct(_) => panic!("expected Transformed, got {other:?}"),
+        }
     }
 }

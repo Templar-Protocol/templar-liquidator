@@ -257,16 +257,6 @@ fn latest_price_endpoint(base: &Url) -> Option<Url> {
     Some(url)
 }
 
-/// Char-boundary-safe cap on upstream text bound for the logs — an error
-/// page must not inflate every scan's log output or panic mid-truncation.
-fn truncate_for_log(text: String) -> String {
-    if text.chars().count() <= 512 {
-        text
-    } else {
-        text.chars().take(512).collect()
-    }
-}
-
 /// Client for the Lazer price service. Constructed only when an access token
 /// is configured — Lazer has no anonymous tier, so without one the Lazer
 /// composition leg reads the on-chain adapter instead.
@@ -291,22 +281,26 @@ impl std::fmt::Debug for LazerApiClient {
 
 impl LazerApiClient {
     /// Builds with a dedicated client that follows no redirects: the request
-    /// carries a bearer token, and an https→http redirect (even same-host)
-    /// would downgrade it to cleartext, bypassing the HTTPS invariant
-    /// [`LazerApiConfig::new`] enforces on the configured URL. A redirect
-    /// response therefore surfaces as a non-success status and prices
-    /// nothing. Falls back to the shared client only if the builder fails
-    /// (it has no failing configuration here, but `unwrap` is denied).
-    pub(crate) fn new(http: reqwest::Client, config: LazerApiConfig) -> Self {
+    /// carries a bearer token, and following a redirect with it would hand
+    /// routing decisions to the server (reqwest strips `Authorization` when
+    /// host, port, or scheme change, but a same-origin redirect keeps it) —
+    /// a redirect response instead surfaces as a non-success status and
+    /// prices nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if the no-redirect client cannot be built — falling back
+    /// to a redirect-following client would silently void the contract; the
+    /// caller disables the API leg instead and the adapter read takes over.
+    pub(crate) fn new(config: LazerApiConfig) -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or(http);
-        Self {
+            .build()?;
+        Ok(Self {
             http,
             base_url: config.url,
             token: config.token,
-        }
+        })
     }
 
     /// Fetches the latest EMA prices for `feed_ids` in one request. Returns
@@ -350,9 +344,11 @@ impl LazerApiClient {
             }
         };
         if !response.status().is_success() {
+            // Status only, never the body: an upstream error page can
+            // reflect the request — bearer token included — and no
+            // truncation redacts that.
             let status = response.status();
-            let text = truncate_for_log(response.text().await.unwrap_or_default());
-            tracing::warn!(%status, response = %text, "Lazer latest_price returned an error");
+            tracing::warn!(%status, "Lazer latest_price returned an error");
             return HashMap::new();
         }
         match response.text().await {
@@ -517,17 +513,6 @@ mod tests {
             "token".to_string(),
         )
         .is_ok());
-    }
-
-    /// Log truncation must be char-boundary-safe: a multi-byte character
-    /// straddling the limit must not panic.
-    #[test]
-    fn log_truncation_is_char_safe() {
-        let s = "é".repeat(400);
-        let t = truncate_for_log(s);
-        assert!(t.chars().count() <= 512);
-        let short = truncate_for_log("ok".to_string());
-        assert_eq!(short, "ok");
     }
 
     #[test]

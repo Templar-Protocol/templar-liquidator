@@ -314,8 +314,18 @@ impl OracleFetcher {
             }),
             hermes_url,
             redstone_api: crate::redstone::RedStoneApiClient::new(redstone_api_url),
-            lazer_api: lazer_api
-                .map(|config| crate::lazer::LazerApiClient::new(http_client.clone(), config)),
+            lazer_api: lazer_api.and_then(|config| {
+                match crate::lazer::LazerApiClient::new(config) {
+                    Ok(client) => Some(client),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "Could not build the no-redirect Lazer API client; disabling the API leg (adapter reads still price Lazer feeds)"
+                        );
+                        None
+                    }
+                }
+            }),
             http_client,
         }
     }

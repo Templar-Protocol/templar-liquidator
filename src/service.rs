@@ -581,7 +581,11 @@ impl LiquidatorService {
             );
 
             // Filter deployments using registry metadata, then fetch market configs
-            let mut market_configs = Vec::new();
+            let mut market_configs: Vec<(
+                AccountId,
+                templar_common::market::MarketConfiguration,
+                (u32, u32, u32),
+            )> = Vec::new();
             for market in &all_markets {
                 // Step 0: Skip ignored markets before any RPC calls
                 if self.config.ignored_markets.contains(market) {
@@ -626,42 +630,36 @@ impl LiquidatorService {
                     }
                 };
 
-                // Step 2: Check contract version using NEP-330
-                let version_result = self
+                // Step 2: Read and parse the contract version once (NEP-330).
+                // The parsed value rides along to the liquidator, so nothing
+                // fetches or parses it again — one read, one parser, one
+                // skip-if-unusable policy.
+                let Ok(version_string) = self
                     .client
                     .read(contract::GetVersion::new(market.clone()))
                     .await
-                    .ok()
-                    .map(|result| result.version_string);
-
-                if let Some(version) = version_result {
-                    let parts: Vec<&str> = version.split('.').collect();
-                    let is_supported = if let [maj, min, _patch] = parts.as_slice() {
-                        let major = maj.parse::<u32>().unwrap_or(0);
-                        let minor = min.parse::<u32>().unwrap_or(0);
-                        (major, minor) >= (1, 0)
-                    } else {
-                        tracing::warn!(
-                            market = %market,
-                            version = %version,
-                            "Invalid semver format, skipping"
-                        );
-                        false
-                    };
-
-                    if !is_supported {
-                        tracing::info!(
-                            market = %market,
-                            version = %version,
-                            min_required = "1.0.0",
-                            "Skipping market - unsupported version"
-                        );
-                        continue;
-                    }
-                } else {
+                    .map(|result| result.version_string)
+                else {
                     tracing::info!(
                         market = %market,
                         "Contract missing NEP-330 metadata, skipping"
+                    );
+                    continue;
+                };
+                let Some(version) = crate::scanner::parse_semver(&version_string) else {
+                    tracing::warn!(
+                        market = %market,
+                        version = %version_string,
+                        "Invalid semver format, skipping"
+                    );
+                    continue;
+                };
+                if version < crate::scanner::MarketScanner::MIN_SUPPORTED_VERSION {
+                    tracing::info!(
+                        market = %market,
+                        version = %version_string,
+                        min_required = "1.0.0",
+                        "Skipping market - unsupported version"
                     );
                     continue;
                 }
@@ -676,7 +674,7 @@ impl LiquidatorService {
                 let (should_process, filter_reason) = self.should_process_market(&config);
 
                 if should_process {
-                    market_configs.push((market.clone(), config));
+                    market_configs.push((market.clone(), config, version));
                 } else {
                     tracing::info!(
                         market = %market,
@@ -690,19 +688,18 @@ impl LiquidatorService {
             // Discover assets from all market configurations
             {
                 let mut inventory_guard = self.inventory.write().await;
-                inventory_guard.discover_assets(market_configs.iter().map(|(_, config)| config));
+                inventory_guard.discover_assets(market_configs.iter().map(|(_, config, _)| config));
                 inventory_guard
-                    .discover_collateral_assets(market_configs.iter().map(|(_, config)| config));
+                    .discover_collateral_assets(market_configs.iter().map(|(_, config, _)| config));
             }
 
             // Create liquidators for each market
             let mut supported_markets = HashMap::new();
-            let mut unsupported_markets = Vec::new();
 
-            for (market, config) in market_configs {
+            for (market, config, version) in market_configs {
                 tracing::debug!(market = %market, "Creating liquidator for market");
 
-                let mut liquidator = Liquidator::new(
+                let liquidator = Liquidator::new(
                     &self.client,
                     &self.pyth_updates,
                     &self.inventory,
@@ -720,28 +717,10 @@ impl LiquidatorService {
                     self.config.min_swap_value_usd,
                     Some(self.oracle_fetcher.proxy_oracle_cache()),
                     self.config.notifier.clone(),
+                    Some(version),
                 );
 
-                // Fetch market version for version-specific liquidation logic
-                liquidator.fetch_market_version().await;
-
-                // Test market compatibility
-                match liquidator.scanner().check_market_compatibility().await {
-                    Ok(()) => {
-                        supported_markets.insert(market, liquidator);
-                    }
-                    Err(_) => {
-                        unsupported_markets.push(market);
-                    }
-                }
-            }
-
-            if !unsupported_markets.is_empty() {
-                tracing::debug!(
-                    unsupported_count = unsupported_markets.len(),
-                    unsupported = ?unsupported_markets,
-                    "Filtered out unsupported markets"
-                );
+                supported_markets.insert(market, liquidator);
             }
 
             self.markets = supported_markets;

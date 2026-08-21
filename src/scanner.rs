@@ -9,10 +9,33 @@ use templar_common::{
     oracle::pyth::OracleResponse,
 };
 use templar_gateway_client::SigningClient;
-use templar_gateway_methods_spec::{contract, market};
+use templar_gateway_methods_spec::market;
 use templar_gateway_types::common::Pagination;
 
 use crate::{rpc::RpcError, LiquidatorError, LiquidatorResult};
+
+/// Parses a `major.minor.patch` NEP-330 version string. Exactly three
+/// numeric parts; anything else is `None` — the one semver parser every
+/// version consumer shares, so policies can't drift.
+pub(crate) fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// Whether a market's contract version supports partial liquidation
+/// (>= [`MarketScanner::MIN_PARTIAL_LIQUIDATION_VERSION`]). `None` — an
+/// unknown version — is treated as the oldest supported, i.e. full
+/// liquidation required: assuming partial support would submit requests a
+/// pre-1.1 market rejects on-chain.
+pub fn supports_partial_liquidation(version: Option<(u32, u32, u32)>) -> bool {
+    version.is_some_and(|v| v >= MarketScanner::MIN_PARTIAL_LIQUIDATION_VERSION)
+}
 
 /// Type alias for borrow positions map
 pub type BorrowPositions = HashMap<AccountId, BorrowPosition>;
@@ -23,7 +46,6 @@ pub type BorrowPositions = HashMap<AccountId, BorrowPosition>;
 /// - Fetching all borrow positions from a market
 /// - Checking liquidation status of positions
 /// - Pagination handling for large markets
-/// - Market version compatibility checking (NEP-330)
 pub struct MarketScanner {
     client: SigningClient,
     market: AccountId,
@@ -153,131 +175,32 @@ impl MarketScanner {
             Some(_) | None => Ok(None),
         }
     }
+}
 
-    /// Fetches the contract version via NEP-330 metadata.
-    ///
-    /// Returns `None` if the contract doesn't implement NEP-330 or the read fails.
-    async fn get_contract_version(&self) -> Option<String> {
-        match self
-            .client
-            .read(contract::GetVersion::new(self.market.clone()))
-            .await
-        {
-            Ok(result) => Some(result.version_string),
-            Err(_) => None,
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_semver_accepts_only_three_numeric_parts() {
+        assert_eq!(parse_semver("1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_semver("0.1.0"), Some((0, 1, 0)));
+        assert_eq!(parse_semver("1.2"), None);
+        assert_eq!(parse_semver("1.2.3.4"), None);
+        assert_eq!(parse_semver("1.x.3"), None);
+        assert_eq!(parse_semver(""), None);
     }
 
-    /// Checks market compatibility by verifying its contract version.
-    ///
-    /// Fetches the NEP-330 version once (if the contract implements it) and
-    /// checks that it's >= `Self::MIN_SUPPORTED_VERSION`. A market with no
-    /// NEP-330 metadata is assumed compatible and left for the market
-    /// contract itself to reject if it actually isn't.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the market's version is supported (or unknown).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the market reports a version below
-    /// `Self::MIN_SUPPORTED_VERSION`, or an unparseable version string.
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub async fn check_market_compatibility(&self) -> LiquidatorResult<()> {
-        let Some(version_string) = self.get_contract_version().await else {
-            // No NEP-330 metadata - assume compatible and let market contract reject if incompatible
-            tracing::debug!(
-                market = %self.market,
-                "Contract missing NEP-330 metadata, assuming compatibility"
-            );
-            return Ok(());
-        };
-
-        // Parse semver (e.g., "1.2.3" or "0.1.0")
-        let parts: Vec<&str> = version_string.split('.').collect();
-        let (major, minor, patch) = if let [maj, min, pat] = parts.as_slice() {
-            let major = maj.parse::<u32>().unwrap_or(0);
-            let minor = min.parse::<u32>().unwrap_or(0);
-            let patch = pat.parse::<u32>().unwrap_or(0);
-            (major, minor, patch)
-        } else {
-            tracing::info!(
-                market = %self.market,
-                version = %version_string,
-                "Invalid semver format, skipping market"
-            );
-            return Err(LiquidatorError::StrategyError(format!(
-                "Invalid version format: {version_string}"
-            )));
-        };
-
-        // Check basic compatibility
-        let is_compatible = (major, minor, patch) >= Self::MIN_SUPPORTED_VERSION;
-        if !is_compatible {
-            let (min_major, min_minor, min_patch) = Self::MIN_SUPPORTED_VERSION;
-            tracing::info!(
-                market = %self.market,
-                version = %version_string,
-                min_version = %format!("{min_major}.{min_minor}.{min_patch}"),
-                "Skipping market - unsupported contract version"
-            );
-            return Err(LiquidatorError::StrategyError(format!(
-                "Market version {version_string} < {min_major}.{min_minor}.{min_patch}"
-            )));
-        }
-
-        tracing::debug!(
-            market = %self.market,
-            version = %version_string,
-            "Market is compatible"
-        );
-        Ok(())
-    }
-
-    /// Tests if the market is compatible by verifying its version via NEP-330.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the market version is not supported.
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub async fn test_market_compatibility(&self) -> LiquidatorResult<()> {
-        self.check_market_compatibility().await
-    }
-
-    /// Gets the market version via NEP-330 contract metadata.
-    ///
-    /// Fetches the contract version and parses it as a semver tuple.
-    /// Used to enable version-specific liquidation logic (v1.0 vs v1.1+).
-    ///
-    /// # Returns
-    ///
-    /// `Some((major, minor, patch))` if version metadata is available and parseable,
-    /// `None` if the contract doesn't support NEP-330 or version format is invalid.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let version = scanner.get_market_version().await;
-    /// match version {
-    ///     Some((1, 0, 0)) => println!("v1.0 market"),
-    ///     Some((1, 1, _)) => println!("v1.1+ market"),
-    ///     None => println!("Unknown version"),
-    /// }
-    /// ```
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub async fn get_market_version(&self) -> Option<(u32, u32, u32)> {
-        let version_string = self.get_contract_version().await?;
-
-        // Parse semver (e.g., "1.2.3" or "0.1.0")
-        let parts: Vec<&str> = version_string.split('.').collect();
-        if let [maj, min, pat] = parts.as_slice() {
-            let major = maj.parse::<u32>().ok()?;
-            let minor = min.parse::<u32>().ok()?;
-            let patch = pat.parse::<u32>().ok()?;
-            Some((major, minor, patch))
-        } else {
-            None
-        }
+    /// Partial liquidation requires >= MIN_PARTIAL_LIQUIDATION_VERSION. An
+    /// equality check against (1, 0, 0) would silently route any *other*
+    /// pre-partial version — (1, 0, 5), or an unknown version — down the
+    /// partial path a market that old rejects on-chain.
+    #[test]
+    fn partial_support_gates_on_the_minimum_version_not_equality() {
+        assert!(!supports_partial_liquidation(None));
+        assert!(!supports_partial_liquidation(Some((1, 0, 0))));
+        assert!(!supports_partial_liquidation(Some((1, 0, 5))));
+        assert!(supports_partial_liquidation(Some((1, 1, 0))));
+        assert!(supports_partial_liquidation(Some((2, 0, 0))));
     }
 }

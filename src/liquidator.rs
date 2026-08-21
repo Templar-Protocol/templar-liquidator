@@ -500,11 +500,12 @@ impl Liquidator {
     /// * `market_config` - Market configuration
     /// * `strategy` - Liquidation strategy
     /// * `collateral_strategy` - Collateral management strategy
-    /// * `timeout` - Transaction timeout in seconds
     /// * `dry_run` - If true, scan and log without executing liquidations
     /// * `swap_provider` - Optional swap provider for collateral swaps
     /// * `loop_liquidation` - Enable loop liquidation until position is healthy
     /// * `max_loop_iterations` - Maximum iterations for loop liquidation (safety limit)
+    /// * `market_version` - Parsed NEP-330 version, fetched once during
+    ///   registry refresh; selects full- vs partial-liquidation sizing
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: &SigningClient,
@@ -524,6 +525,7 @@ impl Liquidator {
         min_swap_value_usd: f64,
         proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
         notifier: crate::notifier::SharedNotifier,
+        market_version: Option<(u32, u32, u32)>,
     ) -> Self {
         let scanner = scanner::MarketScanner::new(client.clone(), market.clone());
         let oracle_fetcher = oracle::OracleFetcher::new(
@@ -559,7 +561,7 @@ impl Liquidator {
             strategy,
             loop_liquidation,
             max_loop_iterations,
-            market_version: None,
+            market_version,
             notifier,
         }
     }
@@ -572,29 +574,6 @@ impl Liquidator {
     /// Get reference to the market configuration
     pub fn market_configuration(&self) -> &MarketConfiguration {
         &self.market_config
-    }
-
-    /// Fetches and caches the market version via NEP-330 contract metadata.
-    ///
-    /// This should be called once after creating the Liquidator to enable version-specific
-    /// liquidation logic. The version determines whether to use total collateral (v1.0)
-    /// or liquidatable collateral (v1.1+) for liquidation calculations.
-    ///
-    /// If the market doesn't provide NEP-330 metadata, assumes v1.0 for safety.
-    pub async fn fetch_market_version(&mut self) {
-        self.market_version = self.scanner.get_market_version().await;
-        if let Some((major, minor, patch)) = self.market_version {
-            tracing::debug!(
-                market = %self.market,
-                version = %format!("{major}.{minor}.{patch}"),
-                "Fetched market version"
-            );
-        } else {
-            tracing::debug!(
-                market = %self.market,
-                "Market version unavailable (no NEP-330 metadata), assuming v1.0"
-            );
-        }
     }
 
     /// Get formatted asset info for logging (decimals and asset IDs from configuration)
@@ -814,15 +793,16 @@ impl Liquidator {
                 return Ok(LiquidationOutcome::Skipped);
             }
 
-            // v1.0.0 markets: use full position (no partial support)
-            // v1.1.0+ markets: adjust position to liquidatable collateral for strategy calculation
-            let adjusted_position = if self.market_version == Some((1, 0, 0)) {
-                position.clone()
-            } else {
-                let mut adj = position.clone();
-                adj.collateral_asset_deposit = liquidatable_collateral;
-                adj
-            };
+            // Markets with partial-liquidation support size against the
+            // liquidatable portion; older markets get the full position.
+            let adjusted_position =
+                if crate::scanner::supports_partial_liquidation(self.market_version) {
+                    let mut adj = position.clone();
+                    adj.collateral_asset_deposit = liquidatable_collateral;
+                    adj
+                } else {
+                    position.clone()
+                };
 
             let (_, _, coll_dec, coll_asset) = self.asset_info();
             tracing::info!(

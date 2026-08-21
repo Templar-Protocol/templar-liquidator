@@ -272,6 +272,10 @@ pub struct OracleFetcher {
     /// RedStone public price API, for composing proxy prices off-chain at
     /// scan time.
     redstone_api: crate::redstone::RedStoneApiClient,
+    /// Lazer (Pyth Pro) price API, for composing Lazer-sourced proxy prices
+    /// off-chain at scan time. `None` when no access token is configured —
+    /// the Lazer leg then reads the on-chain adapter instead.
+    lazer_api: Option<crate::lazer::LazerApiClient>,
 }
 
 impl OracleFetcher {
@@ -287,8 +291,10 @@ impl OracleFetcher {
         pyth_updates: PythUpdatesClient,
         hermes_url: Url,
         redstone_api_url: Url,
+        lazer_api: Option<(Url, String)>,
         proxy_oracle_cache: Option<ProxyOracleCache>,
     ) -> Self {
+        let http_client = reqwest::Client::new();
         Self {
             client,
             pyth_updates,
@@ -296,9 +302,12 @@ impl OracleFetcher {
             proxy_oracle_cache: proxy_oracle_cache.unwrap_or_else(|| {
                 std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()))
             }),
-            http_client: reqwest::Client::new(),
             hermes_url,
             redstone_api: crate::redstone::RedStoneApiClient::new(redstone_api_url),
+            lazer_api: lazer_api.map(|(url, token)| {
+                crate::lazer::LazerApiClient::new(http_client.clone(), url, token)
+            }),
+            http_client,
         }
     }
 
@@ -959,10 +968,46 @@ impl OracleFetcher {
         plans
     }
 
+    /// Prices the wanted Lazer feeds: from the Lazer price API when an
+    /// access token is configured (fresh, independent of anyone pushing the
+    /// adapter), then the on-chain adapter view read for whatever the API
+    /// didn't cover. Both legs enforce the market's freshness bound; a feed
+    /// neither leg can price falls through to the feed's next source.
+    async fn fetch_lazer_prices(
+        &self,
+        mut wanted: HashMap<AccountId, HashSet<u32>>,
+        max_age_secs: u32,
+    ) -> HashMap<(AccountId, u32), pyth::Price> {
+        let mut prices = HashMap::new();
+        if let Some(api) = &self.lazer_api {
+            let all_ids: Vec<u32> = wanted
+                .values()
+                .flat_map(|ids| ids.iter().copied())
+                .collect::<HashSet<u32>>()
+                .into_iter()
+                .collect();
+            let api_prices = api
+                .get_ema_prices(&all_ids, unix_now_secs(), max_age_secs)
+                .await;
+            for (adapter, feed_ids) in &mut wanted {
+                feed_ids.retain(|feed_id| match api_prices.get(feed_id) {
+                    Some(price) => {
+                        prices.insert((adapter.clone(), *feed_id), price.clone());
+                        false
+                    }
+                    None => true,
+                });
+            }
+            wanted.retain(|_, feed_ids| !feed_ids.is_empty());
+        }
+        prices.extend(self.fetch_lazer_adapter_prices(wanted, max_age_secs).await);
+        prices
+    }
+
     /// View-reads each wanted Lazer adapter once and projects its stored
     /// feeds to prices. Freshness is enforced here (the adapter applies no
     /// age filter on reads); a stale or absent feed is simply unpriced and
-    /// falls back to the proxy's on-chain cache.
+    /// falls back to the feed's next source, then the proxy's on-chain cache.
     async fn fetch_lazer_adapter_prices(
         &self,
         wanted: HashMap<AccountId, HashSet<u32>>,
@@ -1093,9 +1138,7 @@ impl OracleFetcher {
             .redstone_api
             .get_prices(&redstone_symbols, max_age_secs)
             .await;
-        let lazer_prices = self
-            .fetch_lazer_adapter_prices(lazer_wanted, max_age_secs)
-            .await;
+        let lazer_prices = self.fetch_lazer_prices(lazer_wanted, max_age_secs).await;
         let backends = FetchedBackends {
             pyth: pyth_prices,
             redstone: redstone_prices,

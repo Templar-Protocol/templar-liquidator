@@ -242,6 +242,22 @@ pub struct Args {
     )]
     pub redstone_api_url: Url,
 
+    /// Lazer (Pyth Pro) price API, used to compose Lazer-sourced
+    /// proxy-oracle prices off-chain at scan time. Only used when
+    /// `LAZER_API_TOKEN` is set — Lazer has no anonymous tier. Scan-side
+    /// only — execution still prices through the on-chain oracle.
+    #[arg(
+        long,
+        env = "LAZER_API_URL",
+        default_value = "https://pyth-lazer.dourolabs.app"
+    )]
+    pub lazer_api_url: Url,
+
+    /// Lazer (Pyth Pro) API access token. When unset, the scan-time Lazer
+    /// composition leg reads the on-chain Lazer adapter instead.
+    #[arg(long, env = "LAZER_API_TOKEN")]
+    pub lazer_api_token: Option<String>,
+
     /// Minimum USD value to attempt a swap (JIT or batch).
     /// Amounts below this threshold are skipped and left for batch swap.
     #[arg(long, env = "MIN_SWAP_VALUE_USD", default_value_t = 10.0)]
@@ -358,6 +374,8 @@ impl std::fmt::Debug for Args {
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field("hermes_url", &self.hermes_url)
             .field("redstone_api_url", &self.redstone_api_url)
+            .field("lazer_api_url", &self.lazer_api_url)
+            .field("lazer_api_token", &shown(self.lazer_api_token.as_ref()))
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
             .field("swap_retry_attempts", &self.swap_retry_attempts)
@@ -626,6 +644,8 @@ impl Args {
                 .clone()
                 .unwrap_or_else(|| self.network.hermes_url()),
             redstone_api_url: self.redstone_api_url.clone(),
+            lazer_api_url: self.lazer_api_url.clone(),
+            lazer_api_token: self.lazer_api_token.clone(),
             min_swap_value_usd: self.min_swap_value_usd,
             batch_swap_on_cycle_start: self.batch_swap_on_cycle_start,
             swap_retry_config: SwapRetryConfig {
@@ -698,6 +718,8 @@ mod tests {
             max_loop_iterations: 10,
             hermes_url: None,
             redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
+            lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
+            lazer_api_token: None,
             min_swap_value_usd: 10.0,
             batch_swap_on_cycle_start: true,
             swap_retry_attempts: 3,

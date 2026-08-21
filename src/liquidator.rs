@@ -88,6 +88,7 @@ pub mod executor;
 pub mod format;
 pub mod http;
 pub mod inventory;
+pub mod lazer;
 pub mod liquidation_strategy;
 pub mod metrics;
 pub mod notifier;
@@ -521,6 +522,7 @@ impl Liquidator {
         max_loop_iterations: u32,
         hermes_url: url::Url,
         redstone_api_url: url::Url,
+        lazer_api: Option<(url::Url, String)>,
         swap_retry_config: crate::swap::SwapRetryConfig,
         min_swap_value_usd: f64,
         proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
@@ -533,6 +535,7 @@ impl Liquidator {
             pyth_updates.clone(),
             hermes_url,
             redstone_api_url,
+            lazer_api,
             proxy_oracle_cache,
         );
         let executor = executor::LiquidationExecutor::new(

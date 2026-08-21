@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::time::sleep;
 
-use crate::rpc::{AppError, AppResult};
+use crate::rpc::AppError;
 
 /// Classification of swap errors for retry decisions.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -40,9 +40,20 @@ pub enum SwapErrorKind {
     #[error("Validation error: {message}")]
     ValidationError { message: String },
 
-    /// Swap timed out waiting for completion (retryable)
+    /// Timed out in a phase where no funds have moved (retryable). A
+    /// timeout *after* funds may have moved must be `Indeterminate` instead
+    /// — retrying a whole swap whose deposit already landed double-spends.
     #[error("Timeout: {message}")]
     Timeout { message: String },
+
+    /// The outcome is unknown and funds may already have moved: the failure
+    /// happened at or after the deposit transaction was submitted (deposit
+    /// RPC error, notify failure, status polling timed out). Never retried —
+    /// re-running the operation would deposit again. Reconciliation is the
+    /// next inventory refresh: balances are re-read from chain, so a late
+    /// settlement or refund is reflected before anything sizes a new swap.
+    #[error("Swap outcome unknown: {message}")]
+    Indeterminate { message: String },
 
     /// Unknown / uncategorized error (not retryable)
     #[error("Unknown error: {message}")]
@@ -125,6 +136,23 @@ impl SwapError {
     pub fn is_amount_too_low(&self) -> bool {
         self.kind.is_amount_too_low()
     }
+
+    /// Classifies an [`AppError`] from a phase where **no funds have moved**
+    /// (quotes, storage registration). Never produces `Indeterminate` — a
+    /// funds-moving phase must classify its own errors instead of using this.
+    pub fn from_app_error(context: &str, error: &AppError) -> Self {
+        let kind = match error {
+            AppError::Rpc(crate::rpc::RpcError::TimeoutError(..)) => SwapErrorKind::Timeout {
+                message: error.to_string(),
+            },
+            AppError::Rpc(_) => SwapErrorKind::NetworkError {
+                message: error.to_string(),
+            },
+            AppError::ValidationError(m) => SwapErrorKind::ValidationError { message: m.clone() },
+            AppError::SerializationError(m) => SwapErrorKind::Unknown { message: m.clone() },
+        };
+        Self::new(kind, context)
+    }
 }
 
 /// Convert `SwapError` into `AppError` so it can flow through existing error paths.
@@ -163,17 +191,19 @@ impl SwapRetryConfig {
 /// Execute an async swap operation with retry logic for transient errors.
 ///
 /// Only errors where `SwapError::is_retryable()` returns true are retried.
-/// Non-retryable errors (amount-too-low, validation) are returned immediately.
+/// Non-retryable errors — amount-too-low, validation, and above all
+/// [`SwapErrorKind::Indeterminate`] (funds may have moved) — are returned
+/// immediately.
 ///
 /// # Errors
 ///
-/// Returns the last `SwapError` (converted to `AppError`) if all retries are exhausted
-/// or a non-retryable error is encountered.
+/// Returns the last `SwapError` if all retries are exhausted or a
+/// non-retryable error is encountered.
 pub async fn swap_with_retry<F, Fut>(
     config: &SwapRetryConfig,
     swap_name: &str,
     mut operation: F,
-) -> AppResult<()>
+) -> Result<(), SwapError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<(), SwapError>>,
@@ -196,21 +226,19 @@ where
                 sleep(delay).await;
                 last_error = Some(e);
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         }
     }
 
     // Should not normally reach here, but be safe
-    Err(last_error
-        .unwrap_or_else(|| {
-            SwapError::new(
-                SwapErrorKind::Unknown {
-                    message: "Retry loop exhausted".into(),
-                },
-                swap_name.to_string(),
-            )
-        })
-        .into())
+    Err(last_error.unwrap_or_else(|| {
+        SwapError::new(
+            SwapErrorKind::Unknown {
+                message: "Retry loop exhausted".into(),
+            },
+            swap_name.to_string(),
+        )
+    }))
 }
 
 #[cfg(test)]
@@ -284,6 +312,75 @@ mod tests {
         let kind = SwapErrorKind::from_oneclick_response(429, "Too Many Requests");
         assert!(kind.is_retryable());
         assert!(matches!(kind, SwapErrorKind::RateLimited));
+    }
+
+    /// An indeterminate error means funds may already have moved (the deposit
+    /// was submitted before the failure). Re-running the operation would
+    /// deposit again — a double-spend — so the retry wrapper must return it
+    /// without a second attempt, no matter how many attempts remain.
+    #[tokio::test]
+    async fn indeterminate_outcome_is_never_retried() {
+        let config = SwapRetryConfig {
+            max_attempts: 3,
+            base_delay_ms: 1,
+        };
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let result = swap_with_retry(&config, "test", || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async {
+                Err(SwapError::new(
+                    SwapErrorKind::Indeterminate {
+                        message: "poll timed out after deposit".into(),
+                    },
+                    "1-Click swap",
+                ))
+            }
+        })
+        .await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let err = result.expect_err("indeterminate must surface as an error");
+        assert!(matches!(err.kind, SwapErrorKind::Indeterminate { .. }));
+    }
+
+    /// Transient errors before any funds move stay retryable: the wrapper
+    /// re-runs the operation and returns the eventual success.
+    #[tokio::test]
+    async fn transient_error_is_retried_to_success() {
+        let config = SwapRetryConfig {
+            max_attempts: 3,
+            base_delay_ms: 1,
+        };
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let result = swap_with_retry(&config, "test", || {
+            let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Err(SwapError::new(
+                        SwapErrorKind::NetworkError {
+                            message: "connection reset".into(),
+                        },
+                        "Quote request",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn indeterminate_is_not_retryable() {
+        assert!(!SwapErrorKind::Indeterminate {
+            message: String::new()
+        }
+        .is_retryable());
     }
 
     #[test]

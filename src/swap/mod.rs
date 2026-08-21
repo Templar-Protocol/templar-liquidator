@@ -108,18 +108,23 @@ pub trait SwapProvider: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns `AppError` if:
-    /// - The transaction fails to execute
-    /// - The slippage exceeds acceptable limits
-    /// - The deadline is exceeded
-    /// - The swap settles as anything other than a full fill (refund, partial
-    ///   deposit, or on-chain failure)
+    /// Returns a classified [`SwapError`] if the transaction fails to
+    /// execute, slippage exceeds acceptable limits, the deadline is
+    /// exceeded, or the swap settles as anything other than a full fill
+    /// (refund, partial deposit, or on-chain failure). Classification drives
+    /// retry policy, so an implementation must choose kinds honestly — above
+    /// all: any failure at or after the point where funds may have left the
+    /// account MUST be [`SwapErrorKind::Indeterminate`], never a retryable
+    /// kind. Retrying a swap whose deposit already landed spends the funds
+    /// twice; `Indeterminate` is never auto-retried, and the next inventory
+    /// refresh re-reads chain balances so a late settlement or refund is
+    /// reflected before anything sizes a new swap.
     async fn swap<F: AssetClass, T: AssetClass>(
         &self,
         from_asset: &FungibleAsset<F>,
         to_asset: &FungibleAsset<T>,
         amount: FungibleAssetAmount<F>,
-    ) -> AppResult<()>;
+    ) -> Result<(), SwapError>;
 
     /// Returns the name of the swap provider for logging and debugging.
     fn provider_name(&self) -> &'static str;

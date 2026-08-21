@@ -452,7 +452,7 @@ impl OneClickSwap {
         from_asset: &FungibleAsset<F>,
         to_asset: &FungibleAsset<T>,
         input_amount: FungibleAssetAmount<F>,
-    ) -> AppResult<QuoteResponse> {
+    ) -> Result<QuoteResponse, crate::swap::SwapError> {
         let from_asset_id = Self::to_oneclick_asset_id(from_asset);
         let to_asset_id = Self::to_oneclick_asset_id(to_asset);
         let recipient = self.our_account().to_string();
@@ -539,7 +539,12 @@ impl OneClickSwap {
         let status = response.status();
         let response_text = response.text().await.map_err(|e| {
             tracing::error!(?e, "Failed to read response");
-            AppError::ValidationError(format!("Failed to read response: {e}"))
+            crate::swap::SwapError::new(
+                crate::swap::SwapErrorKind::NetworkError {
+                    message: format!("Failed to read response: {e}"),
+                },
+                "Quote request",
+            )
         })?;
 
         if !status.is_success() {
@@ -551,13 +556,18 @@ impl OneClickSwap {
                 retryable = kind.is_retryable(),
                 "Quote request failed"
             );
-            return Err(crate::swap::SwapError::new(kind, "Quote request").into());
+            return Err(crate::swap::SwapError::new(kind, "Quote request"));
         }
 
         let quote_response: QuoteResponse = near_sdk::serde_json::from_str(&response_text)
             .map_err(|e| {
                 tracing::error!(?e, response = %response_text, "Failed to parse quote response");
-                AppError::ValidationError(format!("Invalid quote response: {e}"))
+                crate::swap::SwapError::new(
+                    crate::swap::SwapErrorKind::ValidationError {
+                        message: format!("Invalid quote response: {e}"),
+                    },
+                    "Quote request",
+                )
             })?;
 
         let amount_out_u128: u128 = quote_response.quote.amount_out.parse().unwrap_or_default();
@@ -681,7 +691,7 @@ impl OneClickSwap {
         deposit_address: &str,
         amount: U128,
         memo: Option<&str>,
-    ) -> AppResult<String> {
+    ) -> Result<String, crate::swap::SwapError> {
         let asset_str = from_asset.to_string();
 
         tracing::info!(
@@ -695,7 +705,12 @@ impl OneClickSwap {
         // Parse deposit address as NEAR account ID
         let deposit_account: AccountId = deposit_address.parse().map_err(|e| {
             tracing::error!(?e, deposit_address = %deposit_address, "Invalid deposit address");
-            AppError::ValidationError(format!("Invalid deposit address: {e}"))
+            crate::swap::SwapError::new(
+                crate::swap::SwapErrorKind::ValidationError {
+                    message: format!("Invalid deposit address: {e}"),
+                },
+                "Deposit",
+            )
         })?;
 
         match deposit_account.get_account_type() {
@@ -705,8 +720,12 @@ impl OneClickSwap {
                     deposit_address = %deposit_address,
                     "Deterministic 1-Click deposit addresses are not supported"
                 );
-                return Err(AppError::ValidationError(
-                    "Deterministic 1-Click deposit addresses are not supported".to_string(),
+                return Err(crate::swap::SwapError::new(
+                    crate::swap::SwapErrorKind::ValidationError {
+                        message: "Deterministic 1-Click deposit addresses are not supported"
+                            .to_string(),
+                    },
+                    "Deposit",
                 ));
             }
             // For implicit accounts, we need to ensure they exist first
@@ -763,7 +782,8 @@ impl OneClickSwap {
         // Skip for NEP-245 tokens (they handle storage internally)
         if from_asset.clone().into_nep141().is_some() {
             self.ensure_storage_deposit(from_asset, &deposit_account)
-                .await?;
+                .await
+                .map_err(|e| crate::swap::SwapError::from_app_error("Storage deposit", &e))?;
         } else {
             tracing::debug!(
                 token = %from_asset.contract_id(),
@@ -783,7 +803,16 @@ impl OneClickSwap {
                 SU128::from(amount.0),
             ))
             .await
-            .map_err(|e| AppError::Rpc(e.into()))?;
+            .map_err(|e| {
+                crate::swap::SwapError::new(
+                    crate::swap::SwapErrorKind::Indeterminate {
+                        message: format!(
+                            "deposit transfer to {deposit_address} did not confirm: {e}"
+                        ),
+                    },
+                    "Deposit",
+                )
+            })?;
 
         let operation = &operation_result.operation;
 
@@ -795,20 +824,30 @@ impl OneClickSwap {
                     status = ?failed_status,
                     "Deposit transaction failed"
                 );
-                return Err(AppError::ValidationError(format!(
-                    "Deposit transaction failed: operation {} ended with status {failed_status:?}",
-                    operation.id.0
-                )));
+                return Err(crate::swap::SwapError::new(
+                    crate::swap::SwapErrorKind::Unknown {
+                        message: format!(
+                            "Deposit transaction failed: operation {} ended with status {failed_status:?}",
+                            operation.id.0
+                        ),
+                    },
+                    "Deposit",
+                ));
             }
         }
 
         // A succeeded deposit must carry a transaction hash; never fall back to
         // the operation id, which is not a valid tx hash for the 1-Click API.
         let tx_hash = operation.latest_tx_hash().ok_or_else(|| {
-            AppError::ValidationError(format!(
-                "Deposit operation {} succeeded without a transaction hash",
-                operation.id.0
-            ))
+            crate::swap::SwapError::new(
+                crate::swap::SwapErrorKind::Indeterminate {
+                    message: format!(
+                        "deposit operation {} succeeded without a transaction hash; funds moved but cannot be tracked",
+                        operation.id.0
+                    ),
+                },
+                "Deposit",
+            )
         })?;
         let tx_hash_str = tx_hash.to_string();
 
@@ -841,10 +880,15 @@ impl OneClickSwap {
                     refund_amount = %refund_amount.0,
                     "Deposit was refunded - 1-Click rejected the deposit"
                 );
-                return Err(AppError::ValidationError(format!(
-                    "Deposit was refunded by 1-Click deposit address (amount: {})",
-                    refund_amount.0
-                )));
+                return Err(crate::swap::SwapError::new(
+                    crate::swap::SwapErrorKind::Unknown {
+                        message: format!(
+                            "Deposit was refunded by 1-Click deposit address (amount: {})",
+                            refund_amount.0
+                        ),
+                    },
+                    "Deposit",
+                ));
             }
             Ok(None) => {
                 tracing::debug!(tx_hash = %tx_hash_str, "Deposit accepted");
@@ -922,13 +966,16 @@ impl OneClickSwap {
         }
     }
 
-    /// Notifies 1-Click API of the deposit.
+    /// Notifies 1-Click of the deposit. The deposit transaction is already
+    /// on-chain by the time this runs, so every failure here is
+    /// [`crate::swap::SwapErrorKind::Indeterminate`] — 1-Click's own chain
+    /// watcher may still process the deposit whether or not this call landed.
     async fn submit_deposit(
         &self,
         tx_hash: &str,
         deposit_address: &str,
         memo: Option<&str>,
-    ) -> AppResult<()> {
+    ) -> Result<(), crate::swap::SwapError> {
         let request = DepositSubmitRequest {
             tx_hash: tx_hash.to_string(),
             deposit_address: deposit_address.to_string(),
@@ -945,7 +992,14 @@ impl OneClickSwap {
 
         let response = req.send().await.map_err(|e| {
             tracing::error!(?e, "Failed to submit deposit");
-            AppError::ValidationError(format!("Deposit submit failed: {e}"))
+            crate::swap::SwapError::new(
+                crate::swap::SwapErrorKind::Indeterminate {
+                    message: format!(
+                        "deposit {tx_hash} is on-chain but notifying 1-Click failed: {e}"
+                    ),
+                },
+                "Deposit submit",
+            )
         })?;
 
         if !response.status().is_success() {
@@ -969,7 +1023,12 @@ impl OneClickSwap {
                 response = %response_text,
                 "Deposit submission failed"
             );
-            return Err(AppError::ValidationError(error_msg));
+            return Err(crate::swap::SwapError::new(
+                crate::swap::SwapErrorKind::Indeterminate {
+                    message: format!("deposit {tx_hash} is on-chain but 1-Click rejected the notification: {error_msg}"),
+                },
+                "Deposit submit",
+            ));
         }
 
         tracing::info!(
@@ -989,7 +1048,7 @@ impl OneClickSwap {
         deposit_address: &str,
         memo: Option<&str>,
         max_wait_seconds: u64,
-    ) -> AppResult<SwapStatus> {
+    ) -> Result<SwapStatus, crate::swap::SwapError> {
         let max_attempts = max_wait_seconds / POLL_INTERVAL_SECONDS;
 
         tracing::debug!(
@@ -1158,12 +1217,13 @@ impl OneClickSwap {
 
         tracing::warn!("Swap status polling timed out");
         Err(crate::swap::SwapError::new(
-            crate::swap::SwapErrorKind::Timeout {
-                message: format!("Swap did not complete within {max_wait_seconds}s"),
+            crate::swap::SwapErrorKind::Indeterminate {
+                message: format!(
+                    "swap at deposit address {deposit_address} did not reach a terminal status within {max_wait_seconds}s; the deposit is on-chain and may still settle or refund"
+                ),
             },
             "Poll swap status",
-        )
-        .into())
+        ))
     }
 }
 
@@ -1197,7 +1257,7 @@ impl SwapProvider for OneClickSwap {
         from_asset: &FungibleAsset<F>,
         to_asset: &FungibleAsset<T>,
         amount: FungibleAssetAmount<F>,
-    ) -> AppResult<()> {
+    ) -> Result<(), crate::swap::SwapError> {
         let swap_start = std::time::Instant::now();
 
         tracing::info!(
@@ -1216,7 +1276,12 @@ impl SwapProvider for OneClickSwap {
 
         let input_amount: u128 = input_amount_str.parse().map_err(|e| {
             tracing::error!(?e, amount = %input_amount_str, "Failed to parse input amount");
-            AppError::ValidationError(format!("Invalid input amount: {e}"))
+            crate::swap::SwapError::new(
+                crate::swap::SwapErrorKind::ValidationError {
+                    message: format!("Invalid input amount: {e}"),
+                },
+                "Quote request",
+            )
         })?;
 
         // Step 2: Deposit tokens
@@ -1255,8 +1320,7 @@ impl SwapProvider for OneClickSwap {
                     message: format!("Swap ended with status: {status:?}"),
                 },
                 "1-Click swap",
-            )
-            .into())
+            ))
         }
     }
 

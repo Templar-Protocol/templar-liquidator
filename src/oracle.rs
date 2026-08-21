@@ -4,12 +4,14 @@
 //! - Pyth oracles (via Hermes HTTP API)
 //! - LST oracles with price transformers
 //! - Proxy oracles — composed off-chain at scan time from each feed's
-//!   configured source (Hermes for Pyth sources, the RedStone public price
-//!   API via [`crate::redstone`] for RedStone sources, a free adapter view
-//!   read for Lazer sources, transformer inputs by free view call), with the
-//!   proxy's on-chain price cache as fallback for feeds whose leg fails or
-//!   reads stale. Every composed price is bounded by the market's freshness
-//!   window before use.
+//!   configured sources in order, taking the first leg that yields a fresh
+//!   price (Hermes for Pyth sources, the RedStone public price API via
+//!   [`crate::redstone`] for RedStone sources, the token-gated Lazer API via
+//!   [`crate::lazer`] — or, without a token, a free adapter view read — for
+//!   Lazer sources, transformer inputs by free view call), with the proxy's
+//!   on-chain price cache as fallback when every leg fails or reads stale.
+//!   Every composed price is bounded by the market's freshness window before
+//!   use.
 //!
 //! Execution-time pricing is separate and unchanged: the market contract
 //! reads its own on-chain oracle, which this module refreshes via
@@ -67,10 +69,12 @@ struct HermesParsedPrice {
 
 /// A proxy source request the bot can price at scan time without the proxy's
 /// own on-chain cache: Pyth via Hermes, RedStone via the public price API
-/// ([`crate::redstone`]), Lazer via a free view read of its adapter contract.
-/// The Lazer adapter is still a push-fed store — the view read prices the
-/// feed only while someone maintains those pushes; a stale adapter fails
-/// freshness and falls back to the proxy cache like every other leg.
+/// ([`crate::redstone`]), Lazer via the token-gated Lazer API
+/// ([`crate::lazer`]) with a free view read of its adapter contract as the
+/// tokenless fallback. The adapter is still a push-fed store — its read
+/// prices the feed only while someone maintains those pushes; a stale leg
+/// falls through to the feed's next configured source, then to the proxy
+/// cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OffchainRequest {
     Pyth(PriceIdentifier),

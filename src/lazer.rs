@@ -816,6 +816,12 @@ mod tests {
         let (url, requests) = scripted_server(vec![
             (400, String::new()), // batch [7, 11]
             (429, String::new()), // feed 7 on fixed_rate@200ms — terminal
+            // Never served while the abort holds. Without this sentinel the
+            // server would stop listening once the script ran out, every
+            // overflow request would be connection-refused and unlogged, and
+            // the count assertion below could not fail. An unaborted pass
+            // consumes it (feed 7 on real_time), moving both assertions.
+            (200, live_feed_body(7)),
         ])
         .await;
         let prices = test_client(url).get_ema_prices(&[7, 11], 60).await;
@@ -831,7 +837,13 @@ mod tests {
     /// A terminal batch failure never splits at all — one request total.
     #[tokio::test]
     async fn terminal_batch_failure_never_splits() {
-        let (url, requests) = scripted_server(vec![(401, String::new())]).await;
+        let (url, requests) = scripted_server(vec![
+            (401, String::new()),
+            // Sentinel with the same purpose as above: a 401 that wrongly
+            // split would consume it and flip both assertions.
+            (200, live_feed_body(7)),
+        ])
+        .await;
         let prices = test_client(url).get_ema_prices(&[7, 11], 60).await;
         assert!(prices.is_empty());
         assert_eq!(requests.lock().unwrap().len(), 1);

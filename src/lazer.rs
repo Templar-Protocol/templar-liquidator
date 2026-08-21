@@ -26,8 +26,11 @@ struct LazerFeedPoint {
     price_feed_id: u32,
     #[serde(default)]
     ema_price: Option<String>,
+    /// A bare JSON number on the wire (the SDK's string helper covers
+    /// `emaPrice` but not `emaConfidence`); accepted as string too, in case
+    /// upstream ever unifies them.
     #[serde(default)]
-    ema_confidence: Option<String>,
+    ema_confidence: Option<near_sdk::serde_json::Value>,
     #[serde(default)]
     exponent: Option<i16>,
 }
@@ -106,8 +109,12 @@ pub(crate) fn parse_latest_price_response(
         };
         let conf = feed
             .ema_confidence
-            .as_deref()
-            .and_then(|c| c.parse::<u64>().ok())
+            .as_ref()
+            .and_then(|c| match c {
+                near_sdk::serde_json::Value::Number(n) => n.as_u64(),
+                near_sdk::serde_json::Value::String(s) => s.parse::<u64>().ok(),
+                _ => None,
+            })
             .unwrap_or(0);
         prices.insert(
             feed.price_feed_id,
@@ -214,10 +221,13 @@ mod tests {
 
     const NOW: i64 = 1_700_000_000;
 
+    /// The true wire shape: `emaPrice` is serialized through the SDK's
+    /// string helper, while `emaConfidence` is a bare `Price(NonZeroI64)` —
+    /// a JSON **number**. The parser must accept that asymmetry.
     fn response(timestamp_us: i64) -> String {
         format!(
             r#"{{"parsed":{{"timestampUs":"{timestamp_us}","priceFeeds":[
-                {{"priceFeedId":7,"emaPrice":"6435000000000","emaConfidence":"1500000000","exponent":-8}},
+                {{"priceFeedId":7,"emaPrice":"6435000000000","emaConfidence":1500000000,"exponent":-8}},
                 {{"priceFeedId":8,"exponent":-8}}
             ]}}}}"#
         )

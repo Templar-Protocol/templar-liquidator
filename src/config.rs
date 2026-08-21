@@ -644,18 +644,15 @@ impl Args {
                 .clone()
                 .unwrap_or_else(|| self.network.hermes_url()),
             redstone_api_url: self.redstone_api_url.clone(),
-            lazer_api_url: {
-                // A bearer token over plain http travels in cleartext; refuse
-                // at startup, where the operator sees it, rather than leaking
-                // the credential on the first scan.
-                assert!(
-                    self.lazer_api_token.is_none() || self.lazer_api_url.scheme() == "https",
-                    "LAZER_API_URL must be https when LAZER_API_TOKEN is set — the access token would otherwise travel in cleartext (got {})",
-                    self.lazer_api_url
-                );
-                self.lazer_api_url.clone()
-            },
-            lazer_api_token: self.lazer_api_token.clone(),
+            // The config type's constructor enforces HTTPS — a bearer token
+            // over plain http travels in cleartext. Refused at startup,
+            // where the operator sees it, rather than leaking the credential
+            // on the first scan; the message names the scheme only (a URL
+            // can carry credentials in its userinfo component).
+            lazer_api: self.lazer_api_token.clone().map(|token| {
+                crate::lazer::LazerApiConfig::new(self.lazer_api_url.clone(), token)
+                    .unwrap_or_else(|error| panic!("{error}"))
+            }),
             min_swap_value_usd: self.min_swap_value_usd,
             batch_swap_on_cycle_start: self.batch_swap_on_cycle_start,
             swap_retry_config: SwapRetryConfig {

@@ -36,9 +36,33 @@ struct LazerFeedPoint {
     /// Microseconds, a bare JSON number (`TimestampUs` is transparent over
     /// `u64`, unlike the string-encoded envelope timestamp); accepted as
     /// string too. When this feed last actually updated — the envelope
-    /// timestamp only says when the response was assembled.
-    #[serde(default)]
-    feed_update_timestamp: Option<near_sdk::serde_json::Value>,
+    /// timestamp only says when the response was assembled. Presence-aware:
+    /// an absent field (upstream dropped the property → envelope fallback)
+    /// is a different case from an explicit JSON `null` (upstream has no
+    /// timestamp for this feed → fail closed).
+    #[serde(default, deserialize_with = "present_timestamp")]
+    feed_update_timestamp: MaybeTimestamp,
+}
+
+/// The three states a requested timestamp field can arrive in. Serde's
+/// `Option` collapses absent and `null`; this keeps them apart.
+#[derive(Default)]
+enum MaybeTimestamp {
+    /// Field not in the payload at all.
+    #[default]
+    Absent,
+    /// Field present — possibly `null` or malformed, both fail-closed.
+    Present(Option<near_sdk::serde_json::Value>),
+}
+
+/// Marks a present field as [`MaybeTimestamp::Present`]; an absent field
+/// never reaches this and stays [`MaybeTimestamp::Absent`] via
+/// `#[serde(default)]`.
+fn present_timestamp<'de, D>(deserializer: D) -> Result<MaybeTimestamp, D::Error>
+where
+    D: near_sdk::serde::Deserializer<'de>,
+{
+    near_sdk::serde::Deserialize::deserialize(deserializer).map(MaybeTimestamp::Present)
 }
 
 /// The `parsed` object of a `latest_price` response: the envelope's own
@@ -138,11 +162,15 @@ pub(crate) fn parse_latest_price_response(
         // envelope time is fresh by construction — silently degrading would
         // reopen the dead-feed hole); present-but-unparseable means the
         // feed's own age is unknowable, so it fails closed and is skipped.
-        let publish_time_secs = if let Some(value) = &feed.feed_update_timestamp {
-            let Some(us) = value_as_i64(value) else {
+        let publish_time_secs = if let MaybeTimestamp::Present(value) = &feed.feed_update_timestamp
+        {
+            // Present: `null` or unparseable means this feed's own age is
+            // unknowable — fail closed and skip rather than letting the
+            // fresh-by-construction envelope vouch for it.
+            let Some(us) = value.as_ref().and_then(value_as_i64) else {
                 tracing::warn!(
                     feed_id = feed.price_feed_id,
-                    "Lazer feed carries a malformed feedUpdateTimestamp; skipping the feed"
+                    "Lazer feed carries a null or malformed feedUpdateTimestamp; skipping the feed"
                 );
                 continue;
             };
@@ -175,6 +203,65 @@ pub(crate) fn parse_latest_price_response(
     prices
 }
 
+/// Lazer endpoint plus its access token, validated as a pair: construction
+/// enforces HTTPS, so no later hop — including a library caller bypassing
+/// `Args::build_config` — can pair the bearer token with a cleartext
+/// endpoint or transpose the two values.
+#[derive(Clone)]
+pub struct LazerApiConfig {
+    url: Url,
+    token: String,
+}
+
+impl std::fmt::Debug for LazerApiConfig {
+    /// Redacts the access token; the URL alone identifies the deployment.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazerApiConfig")
+            .field("url", &self.url.as_str())
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl LazerApiConfig {
+    /// # Errors
+    ///
+    /// Rejects a non-`https` endpoint — the bearer token would travel in
+    /// cleartext. The message names the scheme only, never the URL: a URL
+    /// can carry credentials in its userinfo component.
+    pub fn new(url: Url, token: String) -> Result<Self, String> {
+        if url.scheme() != "https" {
+            return Err(format!(
+                "LAZER_API_URL must be https when LAZER_API_TOKEN is set — the access token would otherwise travel in cleartext (got scheme '{}'; value withheld)",
+                url.scheme()
+            ));
+        }
+        Ok(Self { url, token })
+    }
+}
+
+/// Appends `v1/latest_price` to the configured URL's path — appends, never
+/// replaces its last segment, so a gateway path prefix survives. `None` for
+/// a cannot-be-a-base URL.
+fn latest_price_endpoint(base: &Url) -> Option<Url> {
+    let mut url = base.clone();
+    url.path_segments_mut()
+        .ok()?
+        .pop_if_empty()
+        .extend(["v1", "latest_price"]);
+    Some(url)
+}
+
+/// Char-boundary-safe cap on upstream text bound for the logs — an error
+/// page must not inflate every scan's log output or panic mid-truncation.
+fn truncate_for_log(text: String) -> String {
+    if text.chars().count() <= 512 {
+        text
+    } else {
+        text.chars().take(512).collect()
+    }
+}
+
 /// Client for the Lazer price service. Constructed only when an access token
 /// is configured — Lazer has no anonymous tier, so without one the Lazer
 /// composition leg reads the on-chain adapter instead.
@@ -196,11 +283,11 @@ impl std::fmt::Debug for LazerApiClient {
 }
 
 impl LazerApiClient {
-    pub(crate) fn new(http: reqwest::Client, base_url: Url, token: String) -> Self {
+    pub(crate) fn new(http: reqwest::Client, config: LazerApiConfig) -> Self {
         Self {
             http,
-            base_url,
-            token,
+            base_url: config.url,
+            token: config.token,
         }
     }
 
@@ -216,12 +303,9 @@ impl LazerApiClient {
         if feed_ids.is_empty() {
             return HashMap::new();
         }
-        let url = match self.base_url.join("v1/latest_price") {
-            Ok(url) => url,
-            Err(error) => {
-                tracing::warn!(%error, "Invalid Lazer API URL");
-                return HashMap::new();
-            }
+        let Some(url) = latest_price_endpoint(&self.base_url) else {
+            tracing::warn!("Invalid Lazer API URL (cannot be a base)");
+            return HashMap::new();
         };
         let body = near_sdk::serde_json::json!({
             "priceFeedIds": feed_ids,
@@ -247,7 +331,7 @@ impl LazerApiClient {
         };
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text = truncate_for_log(response.text().await.unwrap_or_default());
             tracing::warn!(%status, response = %text, "Lazer latest_price returned an error");
             return HashMap::new();
         }
@@ -350,6 +434,75 @@ mod tests {
             prices.contains_key(&9),
             "absent field still falls back to the envelope"
         );
+    }
+
+    /// An explicit JSON `null` is not the same as an absent field: absent
+    /// means upstream dropped the property (envelope fallback, warned), but
+    /// `null` is upstream saying "no timestamp for this feed" — its age is
+    /// unknowable, so it fails closed like a malformed value.
+    #[test]
+    fn null_per_feed_timestamp_skips_the_feed() {
+        let body = format!(
+            r#"{{"parsed":{{"timestampUs":"{env_us}","priceFeeds":[
+                {{"priceFeedId":7,"emaPrice":"100","emaConfidence":5,"exponent":-8,"feedUpdateTimestamp":null}}
+            ]}}}}"#,
+            env_us = (NOW - 1) * 1_000_000,
+        );
+        let prices = parse_latest_price_response(&body, NOW, 60);
+        assert!(
+            !prices.contains_key(&7),
+            "explicit null timestamp must fail closed, not ride the envelope"
+        );
+    }
+
+    /// The endpooint must append to the configured URL's path, not replace
+    /// its last segment — an operator routing through a gateway prefix
+    /// (`https://gateway.example/lazer`) keeps that prefix.
+    #[test]
+    fn endpoint_preserves_the_configured_path_prefix() {
+        let base: Url = "https://gateway.example/lazer".parse().unwrap();
+        assert_eq!(
+            latest_price_endpoint(&base).unwrap().as_str(),
+            "https://gateway.example/lazer/v1/latest_price"
+        );
+        let rootless: Url = "https://pyth-lazer.dourolabs.app".parse().unwrap();
+        assert_eq!(
+            latest_price_endpoint(&rootless).unwrap().as_str(),
+            "https://pyth-lazer.dourolabs.app/v1/latest_price"
+        );
+        let slash: Url = "https://gateway.example/lazer/".parse().unwrap();
+        assert_eq!(
+            latest_price_endpoint(&slash).unwrap().as_str(),
+            "https://gateway.example/lazer/v1/latest_price"
+        );
+    }
+
+    /// The config type carries the HTTPS invariant, so no constructor —
+    /// including library callers bypassing `Args::build_config` — can pair
+    /// the bearer token with a cleartext endpoint.
+    #[test]
+    fn lazer_config_refuses_cleartext_transport() {
+        assert!(LazerApiConfig::new(
+            "http://pyth-lazer.example.com".parse().unwrap(),
+            "token".to_string(),
+        )
+        .is_err());
+        assert!(LazerApiConfig::new(
+            "https://pyth-lazer.dourolabs.app".parse().unwrap(),
+            "token".to_string(),
+        )
+        .is_ok());
+    }
+
+    /// Log truncation must be char-boundary-safe: a multi-byte character
+    /// straddling the limit must not panic.
+    #[test]
+    fn log_truncation_is_char_safe() {
+        let s = "é".repeat(400);
+        let t = truncate_for_log(s);
+        assert!(t.chars().count() <= 512);
+        let short = truncate_for_log("ok".to_string());
+        assert_eq!(short, "ok");
     }
 
     #[test]

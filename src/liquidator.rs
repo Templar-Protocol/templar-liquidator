@@ -522,7 +522,7 @@ impl Liquidator {
         max_loop_iterations: u32,
         hermes_url: url::Url,
         redstone_api_url: url::Url,
-        lazer_api: Option<(url::Url, String)>,
+        lazer_api: Option<crate::lazer::LazerApiConfig>,
         swap_retry_config: crate::swap::SwapRetryConfig,
         min_swap_value_usd: f64,
         proxy_oracle_cache: Option<oracle::ProxyOracleCache>,

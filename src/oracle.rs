@@ -282,7 +282,9 @@ pub struct OracleFetcher {
     redstone_api: crate::redstone::RedStoneApiClient,
     /// Lazer (Pyth Pro) price API, for composing Lazer-sourced proxy prices
     /// off-chain at scan time. `None` when no access token is configured —
-    /// the Lazer leg then reads the on-chain adapter instead.
+    /// the Lazer leg then reads the on-chain adapter instead. The config
+    /// type's constructor enforces HTTPS, so this client can never send the
+    /// bearer token over cleartext.
     lazer_api: Option<crate::lazer::LazerApiClient>,
 }
 
@@ -299,7 +301,7 @@ impl OracleFetcher {
         pyth_updates: PythUpdatesClient,
         hermes_url: Url,
         redstone_api_url: Url,
-        lazer_api: Option<(Url, String)>,
+        lazer_api: Option<crate::lazer::LazerApiConfig>,
         proxy_oracle_cache: Option<ProxyOracleCache>,
     ) -> Self {
         let http_client = reqwest::Client::new();
@@ -312,9 +314,8 @@ impl OracleFetcher {
             }),
             hermes_url,
             redstone_api: crate::redstone::RedStoneApiClient::new(redstone_api_url),
-            lazer_api: lazer_api.map(|(url, token)| {
-                crate::lazer::LazerApiClient::new(http_client.clone(), url, token)
-            }),
+            lazer_api: lazer_api
+                .map(|config| crate::lazer::LazerApiClient::new(http_client.clone(), config)),
             http_client,
         }
     }
@@ -1072,6 +1073,7 @@ impl OracleFetcher {
         price_id: PriceIdentifier,
         plan: OffchainPriceSource,
         backends: &FetchedBackends,
+        transformer_inputs: &mut Vec<(Call, Option<Decimal>)>,
         max_age_secs: u32,
     ) -> Option<pyth::Price> {
         let (request, transform) = match plan {
@@ -1100,13 +1102,32 @@ impl OracleFetcher {
         };
         match transform {
             None => Some(underlying),
-            Some((call, action)) => match self.fetch_transformer_input(&call).await {
-                Ok(input) => action.apply(underlying, input),
-                Err(error) => {
-                    tracing::warn!(%oracle, ?price_id, %error, "Failed to fetch transformer input");
-                    None
-                }
-            },
+            Some((call, action)) => {
+                // Per-round cache, linear because `Call` is Eq but not Hash
+                // and a round carries a handful of transformers at most: two
+                // feeds sharing a rate contract, or a feed retrying its next
+                // candidate, must not pay a second view call. A failed fetch
+                // caches as `None` — retrying within the same round would
+                // just repeat the failure.
+                let cached = transformer_inputs
+                    .iter()
+                    .find(|(c, _)| *c == call)
+                    .map(|(_, cached)| *cached);
+                let input = if let Some(cached) = cached {
+                    cached
+                } else {
+                    let fetched = match self.fetch_transformer_input(&call).await {
+                        Ok(input) => Some(input),
+                        Err(error) => {
+                            tracing::warn!(%oracle, ?price_id, %error, "Failed to fetch transformer input");
+                            None
+                        }
+                    };
+                    transformer_inputs.push((call, fetched));
+                    fetched
+                };
+                action.apply(underlying, input?)
+            }
         }
     }
 
@@ -1157,11 +1178,19 @@ impl OracleFetcher {
         // a leg's usability (stale Lazer adapter, Hermes outage) is only
         // knowable here, so this is where source order falls through.
         let mut response = OracleResponse::new();
+        let mut transformer_inputs: Vec<(Call, Option<Decimal>)> = Vec::new();
         for (price_id, candidates) in plans {
             let mut composed = None;
             for plan in candidates {
                 let Some(price) = self
-                    .price_one_candidate(oracle, price_id, plan, &backends, max_age_secs)
+                    .price_one_candidate(
+                        oracle,
+                        price_id,
+                        plan,
+                        &backends,
+                        &mut transformer_inputs,
+                        max_age_secs,
+                    )
                     .await
                 else {
                     continue;

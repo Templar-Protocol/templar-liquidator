@@ -108,10 +108,9 @@ pub struct ServiceConfig {
     pub hermes_url: url::Url,
     /// RedStone public price API for scan-side proxy price composition
     pub redstone_api_url: url::Url,
-    /// Lazer (Pyth Pro) price API for scan-side proxy price composition
-    pub lazer_api_url: url::Url,
-    /// Lazer access token; the API leg is disabled when unset
-    pub lazer_api_token: Option<String>,
+    /// Lazer (Pyth Pro) price API endpoint + token, HTTPS-validated at
+    /// construction; the API leg is disabled when `None`
+    pub lazer_api: Option<crate::lazer::LazerApiConfig>,
     /// Minimum USD value to attempt a swap (JIT or batch)
     pub min_swap_value_usd: f64,
     /// Enable batch swap of accumulated collateral at round start
@@ -171,8 +170,7 @@ impl std::fmt::Debug for ServiceConfig {
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field("hermes_url", &self.hermes_url)
             .field("redstone_api_url", &self.redstone_api_url)
-            .field("lazer_api_url", &self.lazer_api_url)
-            .field("lazer_api_token", &shown(self.lazer_api_token.as_ref()))
+            .field("lazer_api", &self.lazer_api)
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
             .field("swap_retry_config", &self.swap_retry_config)
@@ -276,10 +274,7 @@ impl LiquidatorService {
             pyth_updates.clone(),
             config.hermes_url.clone(),
             config.redstone_api_url.clone(),
-            config
-                .lazer_api_token
-                .clone()
-                .map(|token| (config.lazer_api_url.clone(), token)),
+            config.lazer_api.clone(),
             None,
         );
 
@@ -736,10 +731,7 @@ impl LiquidatorService {
                     self.config.max_loop_iterations,
                     self.config.hermes_url.clone(),
                     self.config.redstone_api_url.clone(),
-                    self.config
-                        .lazer_api_token
-                        .clone()
-                        .map(|token| (self.config.lazer_api_url.clone(), token)),
+                    self.config.lazer_api.clone(),
                     self.config.swap_retry_config.clone(),
                     self.config.min_swap_value_usd,
                     Some(self.oracle_fetcher.proxy_oracle_cache()),

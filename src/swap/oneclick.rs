@@ -50,14 +50,14 @@ const POLL_INTERVAL_SECONDS: u64 = 10;
 /// Maximum time to wait for swap completion in seconds (4 minutes)
 const MAX_SWAP_WAIT_SECONDS: u64 = 240;
 
-/// NEAR sent to create a fresh implicit deposit account. NEAR bills an
-/// account's storage to its own balance — the account record plus its
-/// full-access key is ~182 bytes at 10^19 yoctoNEAR per byte, so creation
-/// needs at least ~0.00182 NEAR; a smaller transfer is rejected and the
-/// account never exists. 0.002 NEAR gives headroom, and sending it to an
-/// account that already exists is a plain, harmless transfer.
-const IMPLICIT_ACCOUNT_FUNDING: NearToken =
-    NearToken::from_yoctonear(2_000_000_000_000_000_000_000);
+/// NEAR sent to create a fresh implicit deposit account. One yoctoNEAR
+/// suffices: NEP-448 zero-balance accounts (protocol v53) waive storage
+/// staking for accounts using ≤ 770 bytes, which covers an implicit
+/// account's record plus its full-access key (~182 bytes). Everything sent
+/// here is an unrecovered per-swap cost to an address this bot does not
+/// control, so send the minimum — what matters is that creation *failures*
+/// stop the swap before the token deposit (see the status match below).
+const IMPLICIT_ACCOUNT_FUNDING: NearToken = NearToken::from_yoctonear(1);
 
 /// Swap type for the 1-Click API
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -738,8 +738,7 @@ impl OneClickSwap {
                 ));
             }
             // Implicit accounts must exist before they can receive tokens;
-            // see IMPLICIT_ACCOUNT_FUNDING for why the creating transfer
-            // must carry real NEAR.
+            // see IMPLICIT_ACCOUNT_FUNDING for why one yoctoNEAR suffices.
             AccountType::NearImplicitAccount => {
                 tracing::debug!(
                     deposit_account = %deposit_account,

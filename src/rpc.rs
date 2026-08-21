@@ -51,8 +51,10 @@ pub enum RpcError {
 /// split on every non-alphanumeric character and `token` must equal one of
 /// the resulting segments. This is what keeps "429" from matching inside a
 /// hex feed id, and `MethodNotFound` matchable across upstream punctuation
-/// changes. Until the gateway exposes structured error kinds, every
-/// error-message classification in this crate goes through this one matcher.
+/// changes. The rate-limit and method-not-found classifications go through
+/// this matcher; other classification sites still substring-match rendered
+/// text and migrate here (or to structured kinds, once the gateway exposes
+/// them) as they're touched.
 pub(crate) fn has_error_token(text: &str, token: &str) -> bool {
     text.trim()
         .to_lowercase()

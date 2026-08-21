@@ -910,9 +910,10 @@ impl LiquidatorService {
         let mut swapped = 0u32;
         let mut skipped = 0u32;
 
-        // Loop-invariant: without a provider nothing can swap. Checked here
-        // rather than per-asset so a missing provider doesn't skip the
-        // remaining assets' bookkeeping or the summary below.
+        // Loop-invariant: without a provider nothing can swap, so the pass
+        // aborts up front — including the dry-run preview, which would only
+        // narrate swaps that structurally cannot happen — rather than
+        // returning mid-loop with part of the bookkeeping done.
         let Some(ref swap_provider) = self.oneclick_provider else {
             tracing::debug!("No swap provider, skipping batch swap");
             return;
@@ -1257,7 +1258,7 @@ fn is_usdc_asset(asset: &FungibleAsset<BorrowAsset>) -> bool {
         // Solana USDC (OMNI bridge)
         "sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near",
         // Stellar USDC (HOT bridge)
-        "1100_111bzqbb65gxapavoxqmmcgyo5os3txhqs1uh1cgahkquetujq1tju",
+        "1100_111bzqbb65gxapavoxqmmcgyo5os3txhqs1uh1cgahkquetuq1tju",
         // Plain-named variants (testnets, mocks)
         "usdc.near",
         "usdc.fakes.testnet",
@@ -1302,6 +1303,9 @@ mod usdc_tests {
             "nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near"
         )));
         assert!(is_usdc_asset(&asset("nep141:usdc.near")));
+        assert!(is_usdc_asset(&asset(
+            "nep245:v2_1.omni.hot.tg:1100_111bzQBB65GxAPAVoxqmMcgYo5oS3txhqs1Uh1cgahKQUeTUq1TJu"
+        )));
         assert!(!is_usdc_asset(&asset("nep141:notusdc.near")));
         assert!(!is_usdc_asset(&asset("nep141:usdcoin-scam.near")));
         assert!(!is_usdc_asset(&asset("nep141:usdc.scam.near")));

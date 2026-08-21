@@ -1213,18 +1213,22 @@ impl Liquidator {
 
         // The scan needs the full feed pair; a partial response would reach
         // every position's status check and fail each with "Missing price"
-        // instead of skipping the market once.
+        // instead of skipping the market once. This is an error, not a clean
+        // skip: it must count as a failed market scan so a stale-oracle
+        // outage surfaces through the failure counters, the consecutive-
+        // failure alerts, and /healthz instead of reading as a healthy round
+        // that silently liquidated nothing.
         if !crate::oracle::covers_all(&oracle_response, &price_ids) {
             let missing: Vec<String> = price_ids
                 .iter()
                 .filter(|id| !matches!(oracle_response.get(*id), Some(Some(_))))
                 .map(|id| hex::encode(id.0))
                 .collect();
-            tracing::warn!(
-                missing = ?missing,
-                "Oracle prices missing or stale, skipping market"
-            );
-            return Ok(RoundSummary::default());
+            return Err(LiquidatorError::PriceFetchError(
+                rpc::RpcError::WrongResponseKind(format!(
+                    "oracle prices missing or stale for feed(s) {missing:?}"
+                )),
+            ));
         }
 
         // Scan for positions

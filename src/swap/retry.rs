@@ -193,16 +193,23 @@ impl Default for SwapRetryConfig {
     }
 }
 
+/// Upper bound on a single retry delay. Doubling backoff crosses any
+/// realistic threshold within a handful of attempts; without a cap, a large
+/// configured base and attempt count saturate to u64::MAX milliseconds —
+/// which doesn't panic, it parks the retry loop for centuries.
+const MAX_BACKOFF_DELAY: Duration = Duration::from_secs(300);
+
 impl SwapRetryConfig {
     /// Calculate delay for a given attempt (1-indexed): 1×, 2×, 4×, … the
-    /// base delay. Saturates instead of overflowing — the shift is undefined
-    /// at 64 bits and the multiplication can wrap, either of which would
-    /// panic mid-retry under a large configured attempt count.
+    /// base delay, capped at [`MAX_BACKOFF_DELAY`]. Saturating arithmetic —
+    /// the shift is undefined at 64 bits and the multiplication can wrap,
+    /// either of which would panic mid-retry under a large configured
+    /// attempt count.
     fn delay_for_attempt(&self, attempt: u32) -> Duration {
         let multiplier = 1u64
             .checked_shl(attempt.saturating_sub(1))
             .unwrap_or(u64::MAX);
-        Duration::from_millis(self.base_delay_ms.saturating_mul(multiplier))
+        Duration::from_millis(self.base_delay_ms.saturating_mul(multiplier)).min(MAX_BACKOFF_DELAY)
     }
 }
 
@@ -455,17 +462,25 @@ mod tests {
     }
 
     /// A large configured attempt count must not overflow the shift or the
-    /// multiplication — the delay saturates instead of panicking mid-retry.
+    /// multiplication, and the resulting delay must be capped — a saturated
+    /// u64::MAX milliseconds would park the retry loop for centuries, which
+    /// is a hang with extra steps.
     #[test]
-    fn backoff_delay_saturates_instead_of_overflowing() {
+    fn backoff_delay_saturates_and_is_capped() {
         let config = SwapRetryConfig {
             max_attempts: 200,
             base_delay_ms: u64::MAX / 2,
         };
         // Shift alone overflows at attempt 65; the multiplication overflows
-        // far earlier with a large base. Both must saturate.
-        let d = config.delay_for_attempt(200);
-        assert!(d >= config.delay_for_attempt(1));
+        // far earlier with a large base. No panic, and never above the cap.
+        assert!(config.delay_for_attempt(200) <= MAX_BACKOFF_DELAY);
+        assert!(config.delay_for_attempt(1) <= MAX_BACKOFF_DELAY);
+        // Sane configs are unaffected by the cap.
+        let sane = SwapRetryConfig {
+            max_attempts: 3,
+            base_delay_ms: 2000,
+        };
+        assert_eq!(sane.delay_for_attempt(3), Duration::from_millis(8000));
     }
 
     #[test]

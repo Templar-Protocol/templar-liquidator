@@ -1,6 +1,6 @@
 # Configuration reference
 
-Every setting the bot reads, generated against [`src/config.rs`](../src/config.rs)'s `Args` struct (the single source of truth — `.env.example` is a curated subset with commentary, this table is exhaustive).
+Every setting the bot reads. Almost all come from [`src/config.rs`](../src/config.rs)'s `Args` struct (`.env.example` is a curated subset with commentary; this table is exhaustive); the exceptions are the process-level logging variables `RUST_LOG` and `LOG_FORMAT`, read directly at startup and marked `—` in the flag column below.
 
 ## Precedence
 

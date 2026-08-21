@@ -760,17 +760,28 @@ impl OneClickSwap {
                         // This prevents race conditions with storage registration
                         tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
                     }
-                    // A transfer to an existing account succeeds, so a failure
-                    // here means the account does not exist and could not be
-                    // created — the token deposit that follows would bounce.
-                    // Stop instead of proceeding toward a guaranteed refund.
-                    // Retry is acceptable: at worst it re-sends the small NEAR
-                    // funding amount, never inventory.
-                    Ok(result) => {
+                    // A transfer to an existing account succeeds, so failure
+                    // here means the account could not be created — the token
+                    // deposit that follows would bounce. Stop instead of
+                    // proceeding toward a guaranteed refund. This is still the
+                    // pre-deposit phase: no inventory has moved, and a retry
+                    // at worst re-sends the small NEAR funding amount — so
+                    // ambiguous outcomes classify retryable, and only an
+                    // on-chain revert is terminal.
+                    Ok(result) if result.operation.status == OperationStatus::Failed => {
                         return Err(crate::swap::SwapError::new(
                             crate::swap::SwapErrorKind::Unknown {
+                                message: "implicit deposit-account creation failed on-chain"
+                                    .to_string(),
+                            },
+                            "Deposit",
+                        ));
+                    }
+                    Ok(result) => {
+                        return Err(crate::swap::SwapError::new(
+                            crate::swap::SwapErrorKind::Timeout {
                                 message: format!(
-                                    "implicit deposit-account creation ended with status {:?}",
+                                    "implicit deposit-account creation was still {:?} when the gateway stopped waiting",
                                     result.operation.status
                                 ),
                             },

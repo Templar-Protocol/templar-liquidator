@@ -113,9 +113,12 @@ pub trait SwapProvider: Send + Sync {
     /// exceeded, or the swap settles as anything other than a full fill
     /// (refund, partial deposit, or on-chain failure). Classification drives
     /// retry policy, so an implementation must choose kinds honestly — above
-    /// all: any failure at or after the point where funds may have left the
-    /// account MUST be [`SwapErrorKind::Indeterminate`], never a retryable
-    /// kind. Retrying a swap whose deposit already landed spends the funds
+    /// all: any failure at or after the point where the *swapped* funds may
+    /// have left the account (the deposit transfer) MUST be
+    /// [`SwapErrorKind::Indeterminate`], never a retryable kind. Small
+    /// fixed-cost NEAR bonds before that point (storage registration,
+    /// deposit-account funding) are retry-safe and classify as ordinary
+    /// transient errors. Retrying a swap whose deposit already landed spends the funds
     /// twice; `Indeterminate` is never auto-retried, and the next inventory
     /// refresh re-reads chain balances so a late settlement or refund is
     /// reflected before anything sizes a new swap.

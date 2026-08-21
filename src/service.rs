@@ -1245,8 +1245,10 @@ async fn list_deployments(
 /// variant is recognized, batch swap still works but may pick a less liquid target.
 fn is_usdc_asset(asset: &FungibleAsset<BorrowAsset>) -> bool {
     /// Exact ids of known USDC variants, lowercase, as they appear as one
-    /// `:`-delimited segment of an asset id. Anchored comparison — a token
-    /// whose name merely *contains* "usdc" must not be treated as USDC.
+    /// `:`-delimited segment of an asset id. Strictly exact comparison — no
+    /// name-based fallback, because any pattern loose enough to catch an
+    /// unknown legitimate USDC also catches `usdc.<anything>.near` squatters.
+    /// A fork preferring its own USDC contract adds it here.
     const KNOWN_USDC_IDS: &[&str] = &[
         // Native NEAR USDC
         "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
@@ -1256,11 +1258,13 @@ fn is_usdc_asset(asset: &FungibleAsset<BorrowAsset>) -> bool {
         "sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near",
         // Stellar USDC (HOT bridge)
         "1100_111bzqbb65gxapavoxqmmcgyo5os3txhqs1uh1cgahkquetujq1tju",
+        // Plain-named variants (testnets, mocks)
+        "usdc.near",
+        "usdc.fakes.testnet",
     ];
     let s = asset.to_string().to_lowercase();
-    s.split(':').any(|segment| {
-        KNOWN_USDC_IDS.contains(&segment) || segment.split('.').next() == Some("usdc")
-    })
+    s.split(':')
+        .any(|segment| KNOWN_USDC_IDS.contains(&segment))
 }
 
 /// Reports whether a market's configured asset decimals are usable.
@@ -1300,6 +1304,7 @@ mod usdc_tests {
         assert!(is_usdc_asset(&asset("nep141:usdc.near")));
         assert!(!is_usdc_asset(&asset("nep141:notusdc.near")));
         assert!(!is_usdc_asset(&asset("nep141:usdcoin-scam.near")));
+        assert!(!is_usdc_asset(&asset("nep141:usdc.scam.near")));
     }
 }
 

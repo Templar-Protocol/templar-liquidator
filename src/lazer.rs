@@ -257,6 +257,62 @@ fn latest_price_endpoint(base: &Url) -> Option<Url> {
     Some(url)
 }
 
+/// Channels tried in order. `fixed_rate@200ms` first: it is the
+/// widely-carried cadence (still 300× inside a 60s market bound), while
+/// `real_time` is not carried by every feed — and the live API rejects a
+/// whole batch over one feed that lacks the requested channel. `real_time`
+/// remains the per-feed retry for any feed that turns out not to carry the
+/// fixed rate.
+pub(crate) const PRICE_CHANNELS: [&str; 2] = ["fixed_rate@200ms", "real_time"];
+
+/// Why one `latest_price` request priced nothing: the API rejected it (with
+/// the status that says how — 400 is a channel the feeds don't carry, 403 an
+/// unknown feed id), or the transport failed before any status existed.
+#[derive(Debug, Clone, Copy)]
+enum FetchFailure {
+    Http(reqwest::StatusCode),
+    Transport,
+}
+
+impl FetchFailure {
+    /// True for the two rejections the API issues over individual feeds in
+    /// a batch — 400 (a feed lacks the requested channel) and 403 (an
+    /// unknown feed id) — where splitting the batch isolates the bad feed.
+    /// Everything else (auth, rate limiting, server errors, transport)
+    /// would fail identically per feed, so splitting only multiplies dead
+    /// requests against a struggling endpoint.
+    fn is_feed_level_rejection(self) -> bool {
+        match self {
+            Self::Http(status) => {
+                status == reqwest::StatusCode::BAD_REQUEST
+                    || status == reqwest::StatusCode::FORBIDDEN
+            }
+            Self::Transport => false,
+        }
+    }
+}
+
+impl std::fmt::Display for FetchFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http(status) => write!(f, "http {status}"),
+            Self::Transport => write!(f, "transport error"),
+        }
+    }
+}
+
+/// One `latest_price` request body: the given feeds on the given channel,
+/// parsed EMA projection only (no signed payload formats).
+fn latest_price_request_body(feed_ids: &[u32], channel: &str) -> near_sdk::serde_json::Value {
+    near_sdk::serde_json::json!({
+        "priceFeedIds": feed_ids,
+        "properties": ["emaPrice", "emaConfidence", "exponent", "feedUpdateTimestamp"],
+        "formats": [],
+        "parsed": true,
+        "channel": channel,
+    })
+}
+
 /// Client for the Lazer price service. Constructed only when an access token
 /// is configured — Lazer has no anonymous tier, so without one the Lazer
 /// composition leg reads the on-chain adapter instead.
@@ -303,9 +359,15 @@ impl LazerApiClient {
         })
     }
 
-    /// Fetches the latest EMA prices for `feed_ids` in one request. Returns
-    /// only the feeds it could price fresh; any error prices nothing (the
-    /// caller falls back to the on-chain adapter read).
+    /// Fetches the latest EMA prices for `feed_ids`: one batched request on
+    /// the widely-carried channel first; if the API rejects the batch (it
+    /// rejects a whole batch over ONE feed lacking the channel — 400 — or
+    /// one unknown feed id — 403), each feed retries individually across
+    /// [`PRICE_CHANNELS`] so one bad feed cannot zero its siblings. Returns
+    /// only the feeds it could price fresh; anything unpriced falls back to
+    /// the on-chain adapter read in the caller. No error-body parsing
+    /// anywhere — feed-level fault isolation comes from splitting the
+    /// batch, not from reading upstream message text.
     pub(crate) async fn get_ema_prices(
         &self,
         feed_ids: &[u32],
@@ -318,18 +380,93 @@ impl LazerApiClient {
             tracing::warn!("Invalid Lazer API URL (cannot be a base)");
             return HashMap::new();
         };
-        let body = near_sdk::serde_json::json!({
-            "priceFeedIds": feed_ids,
-            "properties": ["emaPrice", "emaConfidence", "exponent", "feedUpdateTimestamp"],
-            "formats": [],
-            "parsed": true,
-            "channel": "real_time",
-        });
+
+        match self
+            .fetch_channel_prices(&url, feed_ids, PRICE_CHANNELS[0], max_age_secs)
+            .await
+        {
+            Ok(prices) => prices,
+            // Feed-level rejections split the batch so one bad feed cannot
+            // zero its siblings. Anything else — auth, rate limiting, 5xx,
+            // transport — would fail identically per feed: it costs exactly
+            // one request, warns with the reason, and defers to the adapter
+            // reads (splitting here would fire 2×N guaranteed-dead requests
+            // at a struggling endpoint, each with a 10s timeout, inside the
+            // scan round that /healthz readiness keys on).
+            Err(failure) if failure.is_feed_level_rejection() => {
+                tracing::debug!(
+                    %failure,
+                    feeds = feed_ids.len(),
+                    "Lazer batch rejected; retrying feeds individually across channels"
+                );
+                let mut prices = HashMap::new();
+                'split: for &feed_id in feed_ids {
+                    for channel in PRICE_CHANNELS {
+                        match self
+                            .fetch_channel_prices(&url, &[feed_id], channel, max_age_secs)
+                            .await
+                        {
+                            Ok(single) if !single.is_empty() => {
+                                prices.extend(single);
+                                break;
+                            }
+                            Ok(_) => break, // priced nothing (stale/malformed) — channel was fine
+                            // Expected mid-split: this feed lacks this
+                            // channel (or is unknown) — try its next channel.
+                            Err(failure) if failure.is_feed_level_rejection() => {
+                                tracing::debug!(feed_id, channel, %failure, "Lazer feed rejected on channel");
+                            }
+                            // Terminal mid-split (auth, rate limit, 5xx,
+                            // transport): every further request would fail
+                            // the same way, each with up to a 10s timeout.
+                            // Keep what already priced, abort the rest.
+                            Err(failure) => {
+                                tracing::warn!(
+                                    %failure,
+                                    feed_id,
+                                    "Lazer split pass hit a terminal failure; keeping recovered prices, deferring the rest to adapter reads"
+                                );
+                                break 'split;
+                            }
+                        }
+                    }
+                }
+                if prices.is_empty() {
+                    tracing::warn!(
+                        %failure,
+                        feeds = feed_ids.len(),
+                        "Lazer API priced no feeds on any channel; deferring to adapter reads"
+                    );
+                }
+                prices
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    %failure,
+                    feeds = feed_ids.len(),
+                    "Lazer latest_price failed; deferring to adapter reads"
+                );
+                HashMap::new()
+            }
+        }
+    }
+
+    /// One `latest_price` POST for `feed_ids` on `channel`. `Err` says why
+    /// the request priced nothing — an HTTP rejection with its status, or a
+    /// transport-level failure with no status to report (no sentinel
+    /// numbers).
+    async fn fetch_channel_prices(
+        &self,
+        url: &Url,
+        feed_ids: &[u32],
+        channel: &str,
+        max_age_secs: u32,
+    ) -> Result<HashMap<u32, pyth::Price>, FetchFailure> {
         let response = match self
             .http
-            .post(url)
+            .post(url.clone())
             .bearer_auth(&self.token)
-            .json(&body)
+            .json(&latest_price_request_body(feed_ids, channel))
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
@@ -340,27 +477,27 @@ impl LazerApiClient {
                 // userinfo/query components this module treats as sensitive.
                 let error = error.without_url();
                 tracing::warn!(%error, "Lazer latest_price request failed");
-                return HashMap::new();
+                return Err(FetchFailure::Transport);
             }
         };
         if !response.status().is_success() {
             // Status only, never the body: an upstream error page can
             // reflect the request — bearer token included — and no
             // truncation redacts that.
-            let status = response.status();
-            tracing::warn!(%status, "Lazer latest_price returned an error");
-            return HashMap::new();
+            return Err(FetchFailure::Http(response.status()));
         }
         match response.text().await {
             // Clock sampled after the round-trip, so in-flight HTTP latency
             // counts against the update's age — same rule as every other leg.
-            Ok(text) => {
-                parse_latest_price_response(&text, crate::oracle::unix_now_secs(), max_age_secs)
-            }
+            Ok(text) => Ok(parse_latest_price_response(
+                &text,
+                crate::oracle::unix_now_secs(),
+                max_age_secs,
+            )),
             Err(error) => {
                 let error = error.without_url();
                 tracing::warn!(%error, "Failed to read Lazer latest_price response");
-                HashMap::new()
+                Err(FetchFailure::Transport)
             }
         }
     }
@@ -513,6 +650,203 @@ mod tests {
             "token".to_string(),
         )
         .is_ok());
+    }
+
+    /// The batch requests `fixed_rate@200ms`, not `real_time`: not every
+    /// Lazer feed carries the real-time channel (the live API 400s the whole
+    /// batch over one such feed), while 200ms is the widely-carried cadence
+    /// and sits far inside any market freshness bound.
+    #[test]
+    fn request_body_uses_the_widely_carried_channel() {
+        let body = latest_price_request_body(&[1, 11], PRICE_CHANNELS[0]);
+        assert_eq!(body["channel"], "fixed_rate@200ms");
+        assert_eq!(body["priceFeedIds"], near_sdk::serde_json::json!([1, 11]));
+        assert_eq!(body["parsed"], true);
+        let retry = latest_price_request_body(&[1], PRICE_CHANNELS[1]);
+        assert_eq!(retry["channel"], "real_time");
+    }
+
+    /// Only the two feed-level rejections split the batch: 400 (a feed
+    /// lacks the requested channel) and 403 (an unknown feed id). Auth
+    /// failures, rate limits, server errors, and transport failures would
+    /// fail identically per feed — splitting would multiply dead requests
+    /// against a struggling or unusable endpoint.
+    #[test]
+    fn only_feed_level_rejections_split_the_batch() {
+        assert!(FetchFailure::Http(reqwest::StatusCode::BAD_REQUEST).is_feed_level_rejection());
+        assert!(FetchFailure::Http(reqwest::StatusCode::FORBIDDEN).is_feed_level_rejection());
+        assert!(!FetchFailure::Http(reqwest::StatusCode::UNAUTHORIZED).is_feed_level_rejection());
+        assert!(
+            !FetchFailure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS).is_feed_level_rejection()
+        );
+        assert!(
+            !FetchFailure::Http(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+                .is_feed_level_rejection()
+        );
+        assert!(!FetchFailure::Transport.is_feed_level_rejection());
+    }
+
+    /// Scripted localhost HTTP server: serves canned (status, body)
+    /// responses in order and records each request body. Lets the split
+    /// logic run against real HTTP without a production seam — the client
+    /// struct is built directly (same module), which is also why these
+    /// tests can use a plain-http URL that `LazerApiConfig::new` would
+    /// rightly refuse.
+    async fn scripted_server(
+        responses: Vec<(u16, String)>,
+    ) -> (Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = requests.clone();
+        tokio::spawn(async move {
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let header_end = loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break None;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break Some(pos + 4);
+                    }
+                };
+                let Some(header_end) = header_end else { return };
+                let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+                let content_length: usize = headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                while buf.len() < header_end + content_length {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                log.lock().unwrap().push(
+                    String::from_utf8_lossy(&buf[header_end..header_end + content_length])
+                        .to_string(),
+                );
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (format!("http://{addr}").parse().unwrap(), requests)
+    }
+
+    fn test_client(base_url: Url) -> LazerApiClient {
+        LazerApiClient {
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            base_url,
+            token: "test-token".to_string(),
+        }
+    }
+
+    fn live_feed_body(feed_id: u32) -> String {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        format!(
+            r#"{{"parsed":{{"timestampUs":"{now_us}","priceFeeds":[
+                {{"priceFeedId":{feed_id},"emaPrice":"100","emaConfidence":5,"exponent":-8,"feedUpdateTimestamp":{now_us}}}
+            ]}}}}"#
+        )
+    }
+
+    fn request_channel_and_feeds(raw: &str) -> (String, Vec<u32>) {
+        let v: near_sdk::serde_json::Value = near_sdk::serde_json::from_str(raw).unwrap();
+        let feeds = v["priceFeedIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| u32::try_from(f.as_u64().unwrap()).unwrap())
+            .collect();
+        (v["channel"].as_str().unwrap().to_string(), feeds)
+    }
+
+    /// The core routing behavior: a 400 batch splits per feed in channel
+    /// order, a sibling that prices is preserved, and a feed rejected on
+    /// every channel is simply absent.
+    #[tokio::test]
+    async fn rejected_batch_splits_per_feed_and_preserves_siblings() {
+        let (url, requests) = scripted_server(vec![
+            (400, String::new()),     // batch [7, 11] on fixed_rate@200ms
+            (200, live_feed_body(7)), // feed 7 on fixed_rate@200ms
+            (403, String::new()),     // feed 11 on fixed_rate@200ms
+            (403, String::new()),     // feed 11 on real_time
+        ])
+        .await;
+        let prices = test_client(url).get_ema_prices(&[7, 11], 60).await;
+
+        assert!(prices.contains_key(&7), "priced sibling must be preserved");
+        assert!(
+            !prices.contains_key(&11),
+            "rejected-everywhere feed is absent"
+        );
+
+        let raw = requests.lock().unwrap().clone();
+        let parsed: Vec<_> = raw.iter().map(|r| request_channel_and_feeds(r)).collect();
+        assert_eq!(parsed[0], ("fixed_rate@200ms".to_string(), vec![7, 11]));
+        assert_eq!(parsed[1], ("fixed_rate@200ms".to_string(), vec![7]));
+        assert_eq!(parsed[2], ("fixed_rate@200ms".to_string(), vec![11]));
+        assert_eq!(parsed[3], ("real_time".to_string(), vec![11]));
+        assert_eq!(parsed.len(), 4);
+    }
+
+    /// A terminal failure mid-split aborts the pass: no further requests
+    /// are issued for the remaining feeds.
+    #[tokio::test]
+    async fn terminal_mid_split_failure_aborts_the_pass() {
+        let (url, requests) = scripted_server(vec![
+            (400, String::new()), // batch [7, 11]
+            (429, String::new()), // feed 7 on fixed_rate@200ms — terminal
+            // Never served while the abort holds. Without this sentinel the
+            // server would stop listening once the script ran out, every
+            // overflow request would be connection-refused and unlogged, and
+            // the count assertion below could not fail. An unaborted pass
+            // consumes it (feed 7 on real_time), moving both assertions.
+            (200, live_feed_body(7)),
+        ])
+        .await;
+        let prices = test_client(url).get_ema_prices(&[7, 11], 60).await;
+
+        assert!(prices.is_empty());
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "terminal failure must stop the split, not walk remaining feeds/channels"
+        );
+    }
+
+    /// A terminal batch failure never splits at all — one request total.
+    #[tokio::test]
+    async fn terminal_batch_failure_never_splits() {
+        let (url, requests) = scripted_server(vec![
+            (401, String::new()),
+            // Sentinel with the same purpose as above: a 401 that wrongly
+            // split would consume it and flip both assertions.
+            (200, live_feed_body(7)),
+        ])
+        .await;
+        let prices = test_client(url).get_ema_prices(&[7, 11], 60).await;
+        assert!(prices.is_empty());
+        assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
     #[test]

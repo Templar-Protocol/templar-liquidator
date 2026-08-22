@@ -109,6 +109,11 @@ pub use profitability::ProfitabilityCalculator;
 pub use scanner::MarketScanner;
 pub use service::{LiquidatorService, ServiceConfig};
 
+// Constructor parameter groups (see `Liquidator::new`)
+pub use executor::{ExecutionRequest, MarketDecimals, Settlement};
+// (MarketContext, SwapConfig, OracleApis, LoopPolicy, SharedHandles are
+// defined below in this module and exported from the crate root.)
+
 // Error conversions
 use crate::rpc::AppError;
 
@@ -482,9 +487,9 @@ pub struct Liquidator {
     /// Enable loop liquidation - repeatedly liquidate until position is healthy
     loop_liquidation: bool,
     /// Maximum iterations for loop liquidation (safety limit)
-    max_loop_iterations: u32,
+    max_loop_iterations: std::num::NonZeroU32,
     /// Market version (major, minor, patch) - used for version-specific liquidation logic
-    market_version: Option<(u32, u32, u32)>,
+    market_version: Option<scanner::MarketVersion>,
     /// Shared notifier for Telegram alerts
     notifier: crate::notifier::SharedNotifier,
 }
@@ -634,71 +639,95 @@ struct LoopCtx {
     dry_run: bool,
 }
 
+/// One market's identity for a liquidator: the contract account, its
+/// on-chain configuration, and its provably-parsed NEP-330 version (which
+/// selects full- vs partial-liquidation sizing).
+pub struct MarketContext {
+    pub market: AccountId,
+    pub config: MarketConfiguration,
+    pub version: Option<scanner::MarketVersion>,
+}
+
+/// Everything that governs collateral swapping for one liquidator.
+#[derive(Clone)]
+pub struct SwapConfig {
+    pub provider: Option<crate::swap::SwapProviderImpl>,
+    pub retry: crate::swap::SwapRetryConfig,
+    pub min_swap_value_usd: f64,
+    pub collateral_strategy: CollateralStrategy,
+}
+
+/// The off-chain price APIs scan-side composition fetches from.
+#[derive(Clone)]
+pub struct OracleApis {
+    pub hermes_url: url::Url,
+    pub redstone_api_url: url::Url,
+    pub lazer_api: Option<crate::lazer::LazerApiConfig>,
+}
+
+/// Loop-liquidation policy: whether to repeat against the same position, and
+/// the (nonzero) iteration ceiling.
+#[derive(Clone, Copy)]
+pub struct LoopPolicy {
+    pub enabled: bool,
+    pub max_iterations: std::num::NonZeroU32,
+}
+
+/// Handles shared across every market's liquidator; each `new` call clones
+/// what it keeps (all are cheap, shared-ownership clones).
+pub struct SharedHandles {
+    pub client: SigningClient,
+    pub pyth_updates: oracle::PythUpdatesClient,
+    pub inventory: inventory::SharedInventory,
+    pub notifier: crate::notifier::SharedNotifier,
+    pub proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
+}
+
 impl Liquidator {
-    /// Creates a new liquidator instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `client` - JSON-RPC client for blockchain communication
-    /// * `signer` - Transaction signer
-    /// * `inventory` - Shared inventory manager
-    /// * `market` - Market contract account ID
-    /// * `market_config` - Market configuration
-    /// * `strategy` - Liquidation strategy
-    /// * `collateral_strategy` - Collateral management strategy
-    /// * `dry_run` - If true, scan and log without executing liquidations
-    /// * `swap_provider` - Optional swap provider for collateral swaps
-    /// * `loop_liquidation` - Enable loop liquidation until position is healthy
-    /// * `max_loop_iterations` - Maximum iterations for loop liquidation (safety limit)
-    /// * `market_version` - Parsed NEP-330 version, fetched once during
-    ///   registry refresh; selects full- vs partial-liquidation sizing
-    #[allow(clippy::too_many_arguments)]
+    /// Creates a new liquidator instance for one market. The grouped
+    /// parameters carry their own invariants — see [`MarketContext`],
+    /// [`SwapConfig`], [`OracleApis`], [`LoopPolicy`], [`SharedHandles`].
     pub fn new(
-        client: &SigningClient,
-        pyth_updates: &oracle::PythUpdatesClient,
-        inventory: &inventory::SharedInventory,
-        market: AccountId,
-        market_config: MarketConfiguration,
+        handles: &SharedHandles,
+        context: MarketContext,
         strategy: Arc<dyn LiquidationStrategy>,
-        collateral_strategy: CollateralStrategy,
+        swap: SwapConfig,
+        oracle_apis: OracleApis,
+        loop_policy: LoopPolicy,
         dry_run: bool,
-        swap_provider: Option<crate::swap::SwapProviderImpl>,
-        loop_liquidation: bool,
-        max_loop_iterations: u32,
-        hermes_url: url::Url,
-        redstone_api_url: url::Url,
-        lazer_api: Option<crate::lazer::LazerApiConfig>,
-        swap_retry_config: crate::swap::SwapRetryConfig,
-        min_swap_value_usd: f64,
-        proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
-        notifier: crate::notifier::SharedNotifier,
-        market_version: Option<(u32, u32, u32)>,
     ) -> Self {
-        let scanner = scanner::MarketScanner::new(client.clone(), market.clone());
+        let MarketContext {
+            market,
+            config: market_config,
+            version: market_version,
+        } = context;
+        let scanner = scanner::MarketScanner::new(handles.client.clone(), market.clone());
         let oracle_fetcher = oracle::OracleFetcher::new(
-            client.clone(),
-            pyth_updates.clone(),
-            hermes_url,
-            redstone_api_url,
-            lazer_api,
-            proxy_oracle_cache,
+            handles.client.clone(),
+            handles.pyth_updates.clone(),
+            oracle_apis.hermes_url,
+            oracle_apis.redstone_api_url,
+            oracle_apis.lazer_api,
+            handles.proxy_oracle_cache.clone(),
         );
         let executor = executor::LiquidationExecutor::new(
-            client.clone(),
-            inventory.clone(),
+            handles.client.clone(),
+            handles.inventory.clone(),
             market.clone(),
             dry_run,
-            collateral_strategy,
-            swap_provider,
-            swap_retry_config,
-            min_swap_value_usd,
-            market_config
-                .price_oracle_configuration
-                .collateral_asset_decimals,
-            market_config
-                .price_oracle_configuration
-                .borrow_asset_decimals,
+            swap,
+            executor::MarketDecimals {
+                collateral: market_config
+                    .price_oracle_configuration
+                    .collateral_asset_decimals,
+                borrow: market_config
+                    .price_oracle_configuration
+                    .borrow_asset_decimals,
+            },
         );
+        let notifier = handles.notifier.clone();
+        let loop_liquidation = loop_policy.enabled;
+        let max_loop_iterations = loop_policy.max_iterations;
 
         Self {
             scanner,
@@ -1166,22 +1195,27 @@ impl Liquidator {
 
         // Reserve BEFORE the paid oracle push: a position that loses an
         // inventory race under POSITION_CONCURRENCY must fail before
-        // spending gas. The executor releases the reservation on failure
-        // and consumes it on success; dry-run touches no inventory.
-        if !dry_run {
-            let reserve_result = self.executor.inventory().write().await.reserve(
+        // spending gas. The mode and the token travel as one Settlement
+        // value — the executor consumes on success and releases on every
+        // failure path; dry-run touches no inventory by construction.
+        let settlement = if dry_run {
+            executor::Settlement::DryRun
+        } else {
+            match self.executor.inventory().write().await.reserve(
                 &self.market_config.borrow_asset,
                 templar_common::asset::BorrowAssetAmount::from(plan.liquidation_amount.0),
-            );
-            if let Err(error) = reserve_result {
-                tracing::info!(
-                    borrower = %borrow_account,
-                    error = %error,
-                    "Inventory no longer covers the sized amount (consumed by a concurrent position), skipping"
-                );
-                return Ok(None);
+            ) {
+                Ok(reservation) => executor::Settlement::Live(reservation),
+                Err(error) => {
+                    tracing::info!(
+                        borrower = %borrow_account,
+                        error = %error,
+                        "Inventory no longer covers the sized amount (consumed by a concurrent position), skipping"
+                    );
+                    return Ok(None);
+                }
             }
-        }
+        };
 
         // Push fresh prices to the underlying Pyth oracle(s) before first
         // execution. The market contract reads from the on-chain oracle
@@ -1213,9 +1247,18 @@ impl Liquidator {
                 borrow_account,
                 &self.market_config.borrow_asset,
                 &self.market_config.collateral_asset,
-                templar_common::asset::BorrowAssetAmount::from(plan.liquidation_amount.0),
-                templar_common::asset::CollateralAssetAmount::from(plan.collateral_amount.0),
-                templar_common::asset::BorrowAssetAmount::from(plan.expected_collateral_value.0),
+                executor::ExecutionRequest {
+                    liquidation_amount: templar_common::asset::BorrowAssetAmount::from(
+                        plan.liquidation_amount.0,
+                    ),
+                    collateral_amount: templar_common::asset::CollateralAssetAmount::from(
+                        plan.collateral_amount.0,
+                    ),
+                    expected_collateral_value: templar_common::asset::BorrowAssetAmount::from(
+                        plan.expected_collateral_value.0,
+                    ),
+                },
+                settlement,
             )
             .await?;
 
@@ -1373,7 +1416,11 @@ impl Liquidator {
         // (no actual liquidation happens, so re-checking yields identical results)
         let dry_run = self.executor.is_dry_run();
         let loop_enabled = self.loop_liquidation && !dry_run;
-        let max_iterations = if dry_run { 1 } else { self.max_loop_iterations };
+        let max_iterations = if dry_run {
+            1
+        } else {
+            self.max_loop_iterations.get()
+        };
         let mut iteration = 0;
         let mut prices_pushed_onchain = false;
         let mut total_liquidated_amount = 0u128;
@@ -1485,7 +1532,10 @@ impl Liquidator {
     /// (in live mode) possibly its own oracle push.
     #[tracing::instrument(skip(self, concurrency), level = "info", fields(market = %self.market))]
     #[allow(clippy::too_many_lines)]
-    pub async fn run_liquidations(&self, concurrency: usize) -> LiquidatorResult<RoundSummary> {
+    pub async fn run_liquidations(
+        &self,
+        concurrency: std::num::NonZeroUsize,
+    ) -> LiquidatorResult<RoundSummary> {
         let max_percentage = self.strategy.max_liquidation_percentage();
 
         tracing::info!(
@@ -1626,7 +1676,7 @@ impl Liquidator {
         );
 
         let total = candidates.len();
-        let concurrency = concurrency.max(1);
+        let concurrency = concurrency.get();
 
         use futures::StreamExt as _;
         let mut results = futures::stream::iter(candidates.into_iter().enumerate().map(

@@ -158,7 +158,7 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
         oracle_response: &OracleResponse,
         configuration: &MarketConfiguration,
         available_balance: U128,
-        market_version: Option<(u32, u32, u32)>,
+        market_version: Option<crate::scanner::MarketVersion>,
     ) -> LiquidatorResult<Option<(U128, U128)>>;
 
     /// Determines whether a sized liquidation is still worth submitting.
@@ -237,6 +237,51 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// A liquidation percentage, provably in `1..=100`: out-of-range values are
+/// unrepresentable, rejected where the value is parsed (clap uses the
+/// `FromStr` impl) instead of panicking in a constructor downstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiquidationPercentage(u8);
+
+impl LiquidationPercentage {
+    /// Full liquidation — the default when no percentage is configured.
+    pub const FULL: Self = Self(100);
+
+    /// # Errors
+    ///
+    /// Rejects 0 and anything above 100.
+    pub fn new(value: u8) -> Result<Self, String> {
+        if value == 0 || value > 100 {
+            return Err(format!(
+                "Partial percentage must be between 1 and 100, got {value}"
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl std::str::FromStr for LiquidationPercentage {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value: u8 = s
+            .parse()
+            .map_err(|_| format!("'{s}' is not a valid number"))?;
+        Self::new(value)
+    }
+}
+
+impl std::fmt::Display for LiquidationPercentage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Percentage-of-inventory liquidation strategy — also the **full-liquidation
 /// strategy** when configured at 100%. There is no separate "full liquidation"
 /// type: sending `target_percentage: 100` *is* full liquidation, and is the
@@ -283,39 +328,17 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
 /// - Position may remain partially underwater
 #[derive(Debug, Clone, Copy)]
 pub struct PercentageLiquidationStrategy {
-    /// Percentage of available funds to use (1-100)
-    pub target_percentage: u8,
+    /// Percentage of available funds to use
+    pub target_percentage: LiquidationPercentage,
     /// Minimum profit margin in basis points (e.g., 50 = 0.5%)
     pub min_profit_margin_bps: u32,
 }
 
 impl PercentageLiquidationStrategy {
-    /// Creates a new partial liquidation strategy.
-    ///
-    /// # Arguments
-    ///
-    /// * `target_percentage` - Percentage of available funds to use (1-100)
-    /// * `min_profit_margin_bps` - Minimum profit margin in basis points
-    ///
-    /// # Panics
-    ///
-    /// Panics if `target_percentage` is 0 or > 100.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use templar_liquidator::liquidation_strategy::PercentageLiquidationStrategy;
-    ///
-    /// // Use 50% of available funds, require 0.5% profit margin
-    /// let strategy = PercentageLiquidationStrategy::new(50, 50);
-    /// ```
+    /// Creates a new partial liquidation strategy. The percentage bounds
+    /// live in [`LiquidationPercentage`], so there is nothing to panic on.
     #[must_use]
-    pub fn new(target_percentage: u8, min_profit_margin_bps: u32) -> Self {
-        assert!(
-            target_percentage > 0 && target_percentage <= 100,
-            "Target percentage must be between 1 and 100"
-        );
-
+    pub fn new(target_percentage: LiquidationPercentage, min_profit_margin_bps: u32) -> Self {
         Self {
             target_percentage,
             min_profit_margin_bps,
@@ -331,12 +354,13 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
         oracle_response: &OracleResponse,
         configuration: &MarketConfiguration,
         available_balance: U128,
-        market_version: Option<(u32, u32, u32)>,
+        market_version: Option<crate::scanner::MarketVersion>,
     ) -> LiquidatorResult<Option<(U128, U128)>> {
         let available_u128: u128 = available_balance.into();
 
         let available_after_buffer = (available_u128 * (10_000 - SAFETY_BUFFER_BPS)) / 10_000;
-        let target_amount = (available_after_buffer * u128::from(self.target_percentage)) / 100;
+        let target_amount =
+            (available_after_buffer * u128::from(self.target_percentage.get())) / 100;
 
         if target_amount == 0 {
             tracing::warn!(
@@ -437,7 +461,7 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
     }
 
     fn max_liquidation_percentage(&self) -> u8 {
-        self.target_percentage
+        self.target_percentage.get()
     }
 }
 
@@ -508,7 +532,7 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
         oracle_response: &OracleResponse,
         configuration: &MarketConfiguration,
         available_balance: U128,
-        market_version: Option<(u32, u32, u32)>,
+        market_version: Option<crate::scanner::MarketVersion>,
     ) -> LiquidatorResult<Option<(U128, U128)>> {
         let decimals = configuration
             .price_oracle_configuration
@@ -684,7 +708,11 @@ mod tests {
         let pos = position(100_000_000, 3_980_000);
         let strategy = FixedAmountLiquidationStrategy::new(100.0, 50);
 
-        for version in [None, Some((1, 0, 0)), Some((1, 0, 5))] {
+        for version in [
+            None,
+            Some(crate::scanner::MarketVersion::new(1, 0, 0)),
+            Some(crate::scanner::MarketVersion::new(1, 0, 5)),
+        ] {
             let result = strategy
                 .calculate_liquidation_amount(&pos, &prices, &cfg, U128(1_000_000_000_000), version)
                 .expect("no error");
@@ -733,7 +761,7 @@ mod tests {
                 &prices,
                 &cfg,
                 U128(1_000_000_000_000),
-                Some((1, 1, 0)),
+                Some(crate::scanner::MarketVersion::new(1, 1, 0)),
             )
             .expect("no error")
             .expect("partial liquidation is fundable");
@@ -746,28 +774,31 @@ mod tests {
 
     #[test]
     fn test_partial_strategy_creation() {
-        let strategy = PercentageLiquidationStrategy::new(50, 50);
-        assert_eq!(strategy.target_percentage, 50);
+        let strategy = PercentageLiquidationStrategy::new(LiquidationPercentage::FULL, 50);
+        assert_eq!(strategy.max_liquidation_percentage(), 100);
+        let strategy =
+            PercentageLiquidationStrategy::new("50".parse::<LiquidationPercentage>().unwrap(), 50);
         assert_eq!(strategy.min_profit_margin_bps, 50);
         assert_eq!(strategy.strategy_name(), "Percentage Liquidation");
         assert_eq!(strategy.max_liquidation_percentage(), 50);
     }
 
+    /// The percentage bounds live in the type, not in a constructor panic:
+    /// 0 and 101 are unrepresentable, rejected where the value is parsed.
     #[test]
-    #[should_panic(expected = "Target percentage must be between 1 and 100")]
-    fn test_partial_strategy_invalid_percentage() {
-        let _ = PercentageLiquidationStrategy::new(0, 50);
-    }
-
-    #[test]
-    #[should_panic(expected = "Target percentage must be between 1 and 100")]
-    fn test_partial_strategy_percentage_too_high() {
-        let _ = PercentageLiquidationStrategy::new(101, 50);
+    fn liquidation_percentage_bounds() {
+        assert!(LiquidationPercentage::new(1).is_ok());
+        assert!(LiquidationPercentage::new(100).is_ok());
+        assert!(LiquidationPercentage::new(0).is_err());
+        assert!(LiquidationPercentage::new(101).is_err());
+        assert_eq!("75".parse::<LiquidationPercentage>().unwrap().get(), 75);
+        assert!("0".parse::<LiquidationPercentage>().is_err());
+        assert!("abc".parse::<LiquidationPercentage>().is_err());
     }
 
     #[test]
     fn test_profitability_check() {
-        let strategy = PercentageLiquidationStrategy::new(50, 50); // 0.5% profit margin
+        let strategy = PercentageLiquidationStrategy::new("50".parse().unwrap(), 50); // 0.5% profit margin
 
         // Profitable case: collateral_value > (liquidation_amount + gas) * 1.005
         // Cost: 1100 (1000 liquidation + 100 gas), Min revenue: 1105, Collateral: 1110
@@ -798,7 +829,7 @@ mod tests {
     /// MIN_PROFIT_BPS is set to anything else.
     #[test]
     fn min_profit_margin_bps_reports_the_configured_margin() {
-        let pct = PercentageLiquidationStrategy::new(50, 75);
+        let pct = PercentageLiquidationStrategy::new("50".parse().unwrap(), 75);
         assert_eq!(pct.min_profit_margin_bps(), 75);
 
         let fixed = FixedAmountLiquidationStrategy::new(100.0, 200);
@@ -810,7 +841,7 @@ mod tests {
     /// silently drift apart.
     #[test]
     fn fixed_amount_profitability_gate_matches_percentage_gate() {
-        let pct = PercentageLiquidationStrategy::new(50, 50);
+        let pct = PercentageLiquidationStrategy::new("50".parse().unwrap(), 50);
         let fixed = FixedAmountLiquidationStrategy::new(100.0, 50);
         for (liq, coll, gas) in [
             (1000u128, 1110u128, 100u128),
@@ -832,7 +863,7 @@ mod tests {
     /// 1106 must pass.
     #[test]
     fn min_revenue_requirement_rounds_up() {
-        let strategy = PercentageLiquidationStrategy::new(50, 50);
+        let strategy = PercentageLiquidationStrategy::new("50".parse().unwrap(), 50);
         assert!(!strategy
             .should_liquidate(U128(1000), U128(1105), U128(100))
             .unwrap());
@@ -846,7 +877,7 @@ mod tests {
     /// panic in debug builds.
     #[test]
     fn min_revenue_overflow_fails_closed() {
-        let strategy = PercentageLiquidationStrategy::new(50, 50);
+        let strategy = PercentageLiquidationStrategy::new("50".parse().unwrap(), 50);
         assert!(!strategy
             .should_liquidate(U128(u128::MAX), U128(u128::MAX), U128(u128::MAX))
             .unwrap());

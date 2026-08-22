@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(liquidator)* `MAX_LOOP_ITERATIONS=0` no longer reports every position as `Liquidated` with nothing executed. The spent-before-anything-ran iteration budget previously took the max-iterations exit on the first iteration, which counted as `succeeded` in the round summary and cleared failure-dedup state; it now reports `Skipped`, with a log naming the cause. (Surfaced by review of the `liquidate()` decomposition; the misreporting predates it.)
+
 - *(swap)* The 1-Click supported-token cache now **fails closed**: an empty cache (the `/v0/tokens` fetch failed) declines every pair instead of allowing them all, honoring `supports_assets`'s documented prefer-false-negatives contract — a wrongly-allowed pair only fails *after* the liquidation has landed and the collateral is already held. The cache reloads on every registry refresh, so one failed fetch no longer needs a restart to notice, and never silently green-lights unroutable pairs in the meantime.
 - *(swap)* A failed implicit deposit-account creation now stops the swap before the token deposit instead of logging a warning and proceeding toward a guaranteed refund. (The creation transfer itself stays at 1 yoctoNEAR — NEP-448 zero-balance accounts waive storage staking for fresh implicit accounts, so the minimum suffices and anything more would be an unrecovered per-swap cost.)
 - *(swap)* Retry backoff arithmetic saturates instead of overflowing: the doubling shift is undefined at 64 attempts and the delay multiplication could wrap — either would panic mid-retry under a large configured `SWAP_RETRY_ATTEMPTS`.

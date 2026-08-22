@@ -554,6 +554,77 @@ enum Evaluation {
     Proceed(LiquidationPlan),
 }
 
+/// The end-of-position log the driver should emit for a terminal mapping —
+/// the pure mapping decides *which*, the driver (which owns the cumulative
+/// totals) emits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopLog {
+    None,
+    CompletedHealthy,
+    MaxedOut,
+    /// The iteration budget was spent before anything executed
+    /// (`MAX_LOOP_ITERATIONS=0`) — the position is skipped, not liquidated.
+    BudgetExhaustedUnliquidated,
+}
+
+/// A terminal mapping: the position-level outcome plus the log to emit.
+struct Stop {
+    outcome: LiquidationOutcome,
+    log: StopLog,
+}
+
+/// Maps one iteration's evaluation to either a plan to execute or the stop
+/// that ends the loop. The rule: a stop on an iteration after a successful
+/// liquidation (`after_success`) reports `Liquidated` for the position,
+/// whatever stopped the loop — except the terminal skips
+/// (maintenance-required, inventory below the contract minimum), which
+/// report `Skipped` regardless, and a spent iteration budget with nothing
+/// executed, which is `Skipped`, never a fabricated `Liquidated`.
+fn map_evaluation(
+    evaluation: Evaluation,
+    after_success: bool,
+) -> std::ops::ControlFlow<Stop, LiquidationPlan> {
+    use std::ops::ControlFlow::{Break, Continue};
+    let stop = |outcome, log| Break(Stop { outcome, log });
+    match evaluation {
+        Evaluation::Healthy => {
+            if after_success {
+                stop(LiquidationOutcome::Liquidated, StopLog::CompletedHealthy)
+            } else {
+                stop(LiquidationOutcome::Healthy, StopLog::None)
+            }
+        }
+        Evaluation::SkipTerminal => stop(LiquidationOutcome::Skipped, StopLog::None),
+        Evaluation::MaxedOut => {
+            if after_success {
+                stop(LiquidationOutcome::Liquidated, StopLog::MaxedOut)
+            } else {
+                stop(
+                    LiquidationOutcome::Skipped,
+                    StopLog::BudgetExhaustedUnliquidated,
+                )
+            }
+        }
+        Evaluation::Skip => stop(
+            if after_success {
+                LiquidationOutcome::Liquidated
+            } else {
+                LiquidationOutcome::Skipped
+            },
+            StopLog::None,
+        ),
+        Evaluation::Unprofitable => stop(
+            if after_success {
+                LiquidationOutcome::Liquidated
+            } else {
+                LiquidationOutcome::Unprofitable
+            },
+            StopLog::None,
+        ),
+        Evaluation::Proceed(plan) => Continue(plan),
+    }
+}
+
 /// Loop bookkeeping the evaluation steps need for their logs.
 #[derive(Clone, Copy)]
 struct LoopCtx {
@@ -707,10 +778,15 @@ impl Liquidator {
         }
     }
 
+    /// A plan's total cost: the repay amount plus gas, saturating.
+    fn total_cost(plan: &LiquidationPlan) -> u128 {
+        plan.liquidation_amount.0.saturating_add(plan.gas_cost.0)
+    }
+
     /// Signed profit of a liquidation: revenue minus total cost, negative
     /// when the position loses money, saturating at the `i128` extremes.
-    /// The single home for arithmetic that three log/notification sites
-    /// previously carried their own copies of.
+    /// The single home for this arithmetic: the profitable log, the
+    /// unprofitable log, and the post-execution notification all use it.
     fn signed_profit(revenue: u128, total_cost: u128) -> i128 {
         if revenue >= total_cost {
             i128::try_from(revenue - total_cost).unwrap_or(i128::MAX)
@@ -891,8 +967,10 @@ impl Liquidator {
             return Ok(Assessment::Unpriceable);
         };
 
+        // Saturating like every other bps computation on this path: a
+        // wrapped value here would feed the profitability gate.
         let theoretical_amount_for_profit =
-            U128((sized.liquidation_amount.0 * 10_000) / (10_000 + SAFETY_BUFFER_BPS));
+            U128(sized.liquidation_amount.0.saturating_mul(10_000) / (10_000 + SAFETY_BUFFER_BPS));
 
         let is_profitable = self.strategy.should_liquidate(
             theoretical_amount_for_profit,
@@ -927,10 +1005,8 @@ impl Liquidator {
         ctx: LoopCtx,
     ) {
         let (borrow_dec, borrow_asset, coll_dec, coll_asset) = self.asset_info();
-        let signed_profit = Self::signed_profit(
-            plan.expected_collateral_value.0,
-            plan.liquidation_amount.0 + plan.gas_cost.0,
-        );
+        let signed_profit =
+            Self::signed_profit(plan.expected_collateral_value.0, Self::total_cost(plan));
 
         let message = if ctx.dry_run {
             "[DRY RUN] Liquidatable position"
@@ -979,7 +1055,7 @@ impl Liquidator {
     ) {
         let (borrow_dec, borrow_asset, coll_dec, coll_asset) = self.asset_info();
 
-        let total_cost = plan.liquidation_amount.0 + plan.gas_cost.0;
+        let total_cost = Self::total_cost(plan);
         let loss = Self::signed_profit(plan.expected_collateral_value.0, total_cost);
 
         // What we'd actually get after applying the liquidation spread:
@@ -1158,10 +1234,8 @@ impl Liquidator {
     ) {
         if outcome == LiquidationOutcome::Liquidated {
             let (borrow_dec, borrow_asset, coll_dec, coll_asset) = self.asset_info();
-            let signed_profit = Self::signed_profit(
-                plan.expected_collateral_value.0,
-                plan.liquidation_amount.0 + plan.gas_cost.0,
-            );
+            let signed_profit =
+                Self::signed_profit(plan.expected_collateral_value.0, Self::total_cost(plan));
             self.notifier.notify_liquidation(
                 self.market.as_ref(),
                 borrow_account.as_ref(),
@@ -1227,9 +1301,9 @@ impl Liquidator {
         );
     }
 
-    /// Maps one iteration's evaluation to either a plan to execute or the
-    /// position-level outcome that ends the loop, emitting the end-of-loop
-    /// summary where one applies.
+    /// Applies the pure [`map_evaluation`] table and emits whichever
+    /// end-of-position log it calls for (the driver owns the cumulative
+    /// totals those logs report).
     fn resolve_evaluation(
         &self,
         evaluation: Evaluation,
@@ -1239,25 +1313,22 @@ impl Liquidator {
         total_collateral_received: u128,
     ) -> std::ops::ControlFlow<LiquidationOutcome, LiquidationPlan> {
         use std::ops::ControlFlow::{Break, Continue};
-        // A stop on an iteration after a successful liquidation reports
-        // Liquidated for the position, whatever stopped the loop.
-        let after_success = ctx.iteration > 1;
-        match evaluation {
-            Evaluation::Healthy => {
-                if after_success {
-                    self.log_loop_summary(
-                        borrow_account,
-                        ctx.iteration - 1,
-                        total_liquidated_amount,
-                        total_collateral_received,
-                        "Loop liquidation completed successfully - position now healthy",
-                    );
-                    return Break(LiquidationOutcome::Liquidated);
-                }
-                Break(LiquidationOutcome::Healthy)
+        let stop = match map_evaluation(evaluation, ctx.iteration > 1) {
+            Continue(plan) => return Continue(plan),
+            Break(stop) => stop,
+        };
+        match stop.log {
+            StopLog::None => {}
+            StopLog::CompletedHealthy => {
+                self.log_loop_summary(
+                    borrow_account,
+                    ctx.iteration - 1,
+                    total_liquidated_amount,
+                    total_collateral_received,
+                    "Loop liquidation completed successfully - position now healthy",
+                );
             }
-            Evaluation::SkipTerminal => Break(LiquidationOutcome::Skipped),
-            Evaluation::MaxedOut => {
+            StopLog::MaxedOut => {
                 self.log_loop_summary(
                     borrow_account,
                     ctx.max_iterations,
@@ -1265,20 +1336,17 @@ impl Liquidator {
                     total_collateral_received,
                     "Loop liquidation stopped - max iterations reached",
                 );
-                Break(LiquidationOutcome::Liquidated)
             }
-            Evaluation::Skip => Break(if after_success {
-                LiquidationOutcome::Liquidated
-            } else {
-                LiquidationOutcome::Skipped
-            }),
-            Evaluation::Unprofitable => Break(if after_success {
-                LiquidationOutcome::Liquidated
-            } else {
-                LiquidationOutcome::Unprofitable
-            }),
-            Evaluation::Proceed(plan) => Continue(plan),
+            StopLog::BudgetExhaustedUnliquidated => {
+                tracing::info!(
+                    market = %self.market,
+                    borrower = %borrow_account,
+                    max_iterations = ctx.max_iterations,
+                    "Loop iteration budget spent before any liquidation, skipping"
+                );
+            }
         }
+        Break(stop.outcome)
     }
 
     /// Performs a single liquidation using the inventory-based model: the
@@ -1375,8 +1443,8 @@ impl Liquidator {
             );
 
             // If loop liquidation is disabled, return after the first
-            // liquidation. (The old in-loop guard for this case on a later
-            // iteration was unreachable for the same reason and is gone.)
+            // liquidation — this unconditional return is what makes a
+            // later-iteration guard for the disabled case impossible.
             if !loop_enabled {
                 return Ok(outcome);
             }
@@ -1826,6 +1894,82 @@ mod tests {
         assert_eq!(Liquidator::require_conversions(err(), Ok(U128(5))), None);
         assert_eq!(Liquidator::require_conversions(Ok(U128(100)), err()), None);
         assert_eq!(Liquidator::require_conversions(err(), err()), None);
+    }
+
+    /// The full terminal-outcome table: six `Evaluation` variants crossed
+    /// with `after_success`. This mapping is what drives `RoundSummary`
+    /// counters and failure-dedup clearing, so it is pinned exhaustively.
+    #[test]
+    fn evaluation_outcome_table() {
+        use std::ops::ControlFlow::{Break, Continue};
+        let plan = || LiquidationPlan {
+            liquidation_amount: U128(1),
+            collateral_amount: U128(1),
+            expected_collateral_value: U128(1),
+            gas_cost: U128(1),
+        };
+        let map = |evaluation, after_success| match map_evaluation(evaluation, after_success) {
+            Break(stop) => (stop.outcome, stop.log),
+            Continue(_) => panic!("expected a stop"),
+        };
+
+        // First iteration: outcomes report what actually happened.
+        assert_eq!(
+            map(Evaluation::Healthy, false),
+            (LiquidationOutcome::Healthy, StopLog::None)
+        );
+        assert_eq!(
+            map(Evaluation::SkipTerminal, false),
+            (LiquidationOutcome::Skipped, StopLog::None)
+        );
+        // An iteration budget of zero means nothing was ever executed —
+        // Skipped, never a fabricated Liquidated.
+        assert_eq!(
+            map(Evaluation::MaxedOut, false),
+            (
+                LiquidationOutcome::Skipped,
+                StopLog::BudgetExhaustedUnliquidated
+            )
+        );
+        assert_eq!(
+            map(Evaluation::Skip, false),
+            (LiquidationOutcome::Skipped, StopLog::None)
+        );
+        assert_eq!(
+            map(Evaluation::Unprofitable, false),
+            (LiquidationOutcome::Unprofitable, StopLog::None)
+        );
+        assert!(matches!(
+            map_evaluation(Evaluation::Proceed(plan()), false),
+            Continue(_)
+        ));
+
+        // After a successful iteration: any stop reports Liquidated for the
+        // position — except maintenance/below-minimum, which stay Skipped.
+        assert_eq!(
+            map(Evaluation::Healthy, true),
+            (LiquidationOutcome::Liquidated, StopLog::CompletedHealthy)
+        );
+        assert_eq!(
+            map(Evaluation::SkipTerminal, true),
+            (LiquidationOutcome::Skipped, StopLog::None)
+        );
+        assert_eq!(
+            map(Evaluation::MaxedOut, true),
+            (LiquidationOutcome::Liquidated, StopLog::MaxedOut)
+        );
+        assert_eq!(
+            map(Evaluation::Skip, true),
+            (LiquidationOutcome::Liquidated, StopLog::None)
+        );
+        assert_eq!(
+            map(Evaluation::Unprofitable, true),
+            (LiquidationOutcome::Liquidated, StopLog::None)
+        );
+        assert!(matches!(
+            map_evaluation(Evaluation::Proceed(plan()), true),
+            Continue(_)
+        ));
     }
 
     /// The one signed-profit computation: three call sites (profitable log,

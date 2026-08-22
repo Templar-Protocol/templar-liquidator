@@ -265,7 +265,7 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
             inv.get_available_balance(&borrow_asset).0,
         )
     };
-    executor
+    let reservation = executor
         .inventory()
         .write()
         .await
@@ -277,9 +277,13 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
             &borrower_id.0,
             &borrow_asset,
             &collateral_asset,
-            liquidation_amount,
-            liquidatable_collateral,
-            liquidation_amount, // expected collateral value (unused for Hold)
+            templar_liquidator::executor::ExecutionRequest {
+                liquidation_amount,
+                collateral_amount: liquidatable_collateral,
+                // Expected collateral value is unused for Hold.
+                expected_collateral_value: liquidation_amount,
+            },
+            Some(reservation),
         )
         .await?;
 

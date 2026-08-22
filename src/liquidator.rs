@@ -1166,22 +1166,27 @@ impl Liquidator {
 
         // Reserve BEFORE the paid oracle push: a position that loses an
         // inventory race under POSITION_CONCURRENCY must fail before
-        // spending gas. The executor releases the reservation on failure
-        // and consumes it on success; dry-run touches no inventory.
-        if !dry_run {
-            let reserve_result = self.executor.inventory().write().await.reserve(
+        // spending gas. The reservation token travels into the executor,
+        // which consumes it on success and releases it on every failure
+        // path; dry-run touches no inventory and passes no token.
+        let reservation = if dry_run {
+            None
+        } else {
+            match self.executor.inventory().write().await.reserve(
                 &self.market_config.borrow_asset,
                 templar_common::asset::BorrowAssetAmount::from(plan.liquidation_amount.0),
-            );
-            if let Err(error) = reserve_result {
-                tracing::info!(
-                    borrower = %borrow_account,
-                    error = %error,
-                    "Inventory no longer covers the sized amount (consumed by a concurrent position), skipping"
-                );
-                return Ok(None);
+            ) {
+                Ok(reservation) => Some(reservation),
+                Err(error) => {
+                    tracing::info!(
+                        borrower = %borrow_account,
+                        error = %error,
+                        "Inventory no longer covers the sized amount (consumed by a concurrent position), skipping"
+                    );
+                    return Ok(None);
+                }
             }
-        }
+        };
 
         // Push fresh prices to the underlying Pyth oracle(s) before first
         // execution. The market contract reads from the on-chain oracle
@@ -1213,9 +1218,18 @@ impl Liquidator {
                 borrow_account,
                 &self.market_config.borrow_asset,
                 &self.market_config.collateral_asset,
-                templar_common::asset::BorrowAssetAmount::from(plan.liquidation_amount.0),
-                templar_common::asset::CollateralAssetAmount::from(plan.collateral_amount.0),
-                templar_common::asset::BorrowAssetAmount::from(plan.expected_collateral_value.0),
+                executor::ExecutionRequest {
+                    liquidation_amount: templar_common::asset::BorrowAssetAmount::from(
+                        plan.liquidation_amount.0,
+                    ),
+                    collateral_amount: templar_common::asset::CollateralAssetAmount::from(
+                        plan.collateral_amount.0,
+                    ),
+                    expected_collateral_value: templar_common::asset::BorrowAssetAmount::from(
+                        plan.expected_collateral_value.0,
+                    ),
+                },
+                reservation,
             )
             .await?;
 

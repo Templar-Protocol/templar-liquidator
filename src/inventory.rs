@@ -384,12 +384,9 @@ impl InventoryManager {
         ))
     }
 
-    /// Reserves balance for a liquidation
-    ///
-    /// # Arguments
-    ///
-    /// * `asset` - Asset to reserve
-    /// * `amount` - Amount to reserve
+    /// Reserves balance for a liquidation, returning the [`Reservation`]
+    /// token that is the only way to settle it — see the type's docs for
+    /// the contract this enforces.
     ///
     /// # Errors
     ///
@@ -398,7 +395,7 @@ impl InventoryManager {
         &mut self,
         asset: &FungibleAsset<BorrowAsset>,
         amount: BorrowAssetAmount,
-    ) -> InventoryResult<()> {
+    ) -> InventoryResult<Reservation> {
         let entry = self
             .inventory
             .get_mut(asset)
@@ -406,17 +403,18 @@ impl InventoryManager {
 
         entry.reserve(amount)?;
 
-        Ok(())
+        Ok(Reservation {
+            asset: asset.clone(),
+            amount,
+        })
     }
 
-    /// Releases reserved balance
-    ///
-    /// # Arguments
-    ///
-    /// * `asset` - Asset to release
-    /// * `amount` - Amount to release
-    pub fn release(&mut self, asset: &FungibleAsset<BorrowAsset>, amount: BorrowAssetAmount) {
-        if let Some(entry) = self.inventory.get_mut(asset) {
+    /// Releases a reservation: the tokens never left the account and are
+    /// available again. Takes the token by value — a reservation settles
+    /// exactly once.
+    pub fn release(&mut self, reservation: Reservation) {
+        let Reservation { asset, amount } = reservation;
+        if let Some(entry) = self.inventory.get_mut(&asset) {
             entry.release(amount);
         }
     }
@@ -425,8 +423,10 @@ impl InventoryManager {
     /// tracked balance and clears the reservation in one step. Use this — not
     /// [`release`](Self::release) — after a liquidation lands; releasing alone
     /// would count spent tokens as available until the next RPC refresh.
-    pub fn consume(&mut self, asset: &FungibleAsset<BorrowAsset>, amount: BorrowAssetAmount) {
-        if let Some(entry) = self.inventory.get_mut(asset) {
+    /// Takes the token by value — a reservation settles exactly once.
+    pub fn consume(&mut self, reservation: Reservation) {
+        let Reservation { asset, amount } = reservation;
+        if let Some(entry) = self.inventory.get_mut(&asset) {
             entry.consume(amount);
         }
     }
@@ -593,6 +593,29 @@ pub struct InventorySnapshotEntry {
     pub last_updated_ago_ms: u64,
 }
 
+/// Proof of a live reservation: created only by
+/// [`InventoryManager::reserve`], settled exactly once by
+/// [`consume`](InventoryManager::consume) or
+/// [`release`](InventoryManager::release), which take it **by value** — so
+/// double-settling, or settling amounts that were never reserved, is a
+/// compile error rather than a saturating no-op. Dropping a token without
+/// settling permanently holds the reserved amount (visible in the inventory
+/// snapshot), which the `must_use` warning exists to prevent.
+#[must_use = "an unsettled reservation holds inventory until the process restarts; consume or release it"]
+#[derive(Debug)]
+pub struct Reservation {
+    asset: FungibleAsset<BorrowAsset>,
+    amount: BorrowAssetAmount,
+}
+
+impl Reservation {
+    /// The reserved amount, for logging and transaction construction.
+    #[must_use]
+    pub fn amount(&self) -> BorrowAssetAmount {
+        self.amount
+    }
+}
+
 /// Shared inventory manager for concurrent access
 pub type SharedInventory = Arc<RwLock<InventoryManager>>;
 
@@ -685,17 +708,25 @@ mod tests {
         // Check available balance
         assert_eq!(inventory.get_available_balance(&asset).0, 1000);
 
-        // Reserve 300
-        inventory
+        // Reserve 300 — the returned token is the only settle handle.
+        let first = inventory
             .reserve(&asset, BorrowAssetAmount::from(300))
             .unwrap();
+        assert_eq!(u128::from(first.amount()), 300);
         assert_eq!(inventory.get_available_balance(&asset).0, 700);
         assert_eq!(inventory.get_reserved_balance(&asset).0, 300);
 
-        // Release 100
-        inventory.release(&asset, BorrowAssetAmount::from(100));
-        assert_eq!(inventory.get_available_balance(&asset).0, 800);
-        assert_eq!(inventory.get_reserved_balance(&asset).0, 200);
+        // A second reservation coexists; releasing it restores exactly its
+        // own amount, keyed by the token, not by caller-supplied numbers.
+        let second = inventory
+            .reserve(&asset, BorrowAssetAmount::from(100))
+            .unwrap();
+        assert_eq!(inventory.get_available_balance(&asset).0, 600);
+        inventory.release(second);
+        assert_eq!(inventory.get_available_balance(&asset).0, 700);
+        assert_eq!(inventory.get_reserved_balance(&asset).0, 300);
+        inventory.release(first);
+        assert_eq!(inventory.get_available_balance(&asset).0, 1000);
     }
 
     /// `consume` must debit the balance *and* clear the reservation together —
@@ -717,10 +748,10 @@ mod tests {
             },
         );
 
-        inventory
+        let reservation = inventory
             .reserve(&asset, BorrowAssetAmount::from(300))
             .unwrap();
-        inventory.consume(&asset, BorrowAssetAmount::from(300));
+        inventory.consume(reservation);
 
         assert_eq!(inventory.get_total_balance(&asset).0, 700);
         assert_eq!(inventory.get_reserved_balance(&asset).0, 0);
@@ -746,7 +777,14 @@ mod tests {
             },
         );
 
-        inventory.consume(&asset, BorrowAssetAmount::from(500));
+        // The over-consume case is unrepresentable through the token API
+        // (a token's amount was provably reserved), so the saturating
+        // backstop is exercised at the entry level it lives at.
+        inventory
+            .inventory
+            .get_mut(&asset)
+            .unwrap()
+            .consume(BorrowAssetAmount::from(500));
         assert_eq!(inventory.get_total_balance(&asset).0, 0);
         assert_eq!(inventory.get_reserved_balance(&asset).0, 0);
     }

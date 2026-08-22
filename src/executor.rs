@@ -37,6 +37,19 @@ pub enum SwapIssue {
     },
 }
 
+/// The amounts one liquidation execution sends and expects: what the sized,
+/// gate-approved plan resolved to, in on-chain units.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutionRequest {
+    /// Borrow-asset amount to repay.
+    pub liquidation_amount: BorrowAssetAmount,
+    /// Collateral amount requested in return.
+    pub collateral_amount: CollateralAssetAmount,
+    /// The collateral's expected value in borrow-asset units (drives the
+    /// JIT-swap USD threshold).
+    pub expected_collateral_value: BorrowAssetAmount,
+}
+
 /// Liquidation transaction executor.
 ///
 /// Responsible for:
@@ -121,10 +134,19 @@ impl LiquidationExecutor {
         borrow_account: &AccountId,
         borrow_asset: &FungibleAsset<BorrowAsset>,
         collateral_asset: &FungibleAsset<CollateralAsset>,
-        liquidation_amount: BorrowAssetAmount,
-        collateral_amount: CollateralAssetAmount,
-        expected_collateral_value: BorrowAssetAmount,
+        request: ExecutionRequest,
+        reservation: Option<inventory::Reservation>,
     ) -> LiquidatorResult<(LiquidationOutcome, Option<SwapIssue>)> {
+        let ExecutionRequest {
+            liquidation_amount,
+            collateral_amount,
+            expected_collateral_value,
+        } = request;
+        // The reservation settles exactly once on whichever path this
+        // function exits through; `take()` makes each settle site
+        // self-evidently the only one to run. Dry-run passes `None` (no
+        // inventory was touched).
+        let mut reservation = reservation;
         // Dry run mode - log what would happen, skip execution
         if self.dry_run {
             // Log JIT swap intent if applicable
@@ -205,19 +227,17 @@ impl LiquidationExecutor {
                                     // reservation contract above); release it before
                                     // surfacing the inspection error, like the other
                                     // failure paths.
-                                    self.inventory
-                                        .write()
-                                        .await
-                                        .release(borrow_asset, liquidation_amount);
+                                    if let Some(r) = reservation.take() {
+                                        self.inventory.write().await.release(r);
+                                    }
                                     return Err(error);
                                 }
                             };
 
                         if let Some(failed_on) = failed_receipt {
-                            self.inventory
-                                .write()
-                                .await
-                                .release(borrow_asset, liquidation_amount);
+                            if let Some(r) = reservation.take() {
+                                self.inventory.write().await.release(r);
+                            }
 
                             let operation_id = operation_result.operation.id.0.clone();
                             let error_msg = format!(
@@ -246,10 +266,9 @@ impl LiquidationExecutor {
                         // un-reserve), never release — a bare release would
                         // count the spent amount as available until the next
                         // RPC refresh.
-                        self.inventory
-                            .write()
-                            .await
-                            .consume(borrow_asset, liquidation_amount);
+                        if let Some(r) = reservation.take() {
+                            self.inventory.write().await.consume(r);
+                        }
 
                         // Handle collateral based on strategy
                         let (swap_succeeded, swap_issue) = match &self.collateral_strategy {
@@ -299,10 +318,9 @@ impl LiquidationExecutor {
                     failed_status => {
                         // Operation did not succeed (reverted receipt, or did not
                         // reach finality) - release reserved inventory.
-                        self.inventory
-                            .write()
-                            .await
-                            .release(borrow_asset, liquidation_amount);
+                        if let Some(r) = reservation.take() {
+                            self.inventory.write().await.release(r);
+                        }
 
                         let operation_id = operation_result.operation.id.0.clone();
                         let error_msg = format!(
@@ -322,10 +340,9 @@ impl LiquidationExecutor {
             }
             Err(e) => {
                 // Release reserved inventory on submission failure
-                self.inventory
-                    .write()
-                    .await
-                    .release(borrow_asset, liquidation_amount);
+                if let Some(r) = reservation.take() {
+                    self.inventory.write().await.release(r);
+                }
 
                 tracing::error!(
                     borrower = %borrow_account,

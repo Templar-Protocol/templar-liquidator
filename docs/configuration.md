@@ -34,8 +34,8 @@ The bot refuses to start without these three:
 | — | `--once` | `false` | Shorthand for `--run-mode once`. No env var equivalent; forces once mode and takes precedence over `--run-mode` if both are given. |
 | `LIQUIDATION_SCAN_INTERVAL` | `--liquidation-scan-interval` | `600` | Seconds between liquidation scan rounds (loop mode). |
 | `REGISTRY_REFRESH_INTERVAL` | `--registry-refresh-interval` | `3600` | Seconds between registry re-discovery (loop mode). |
-| `CONCURRENCY` | `--concurrency`, `-c` | `10` | Concurrency for registry deployment listing. Floored at 1 internally — `0` would stall the pipeline. |
-| `POSITION_CONCURRENCY` | `--position-concurrency` | `1` | Positions evaluated/liquidated concurrently within one market's round. `1` (the default) is fully sequential with a 1-second pause between positions — what free public RPC endpoints tolerate. Raising it drops the pause and fans evaluation out; each in-flight position costs several RPC reads (and in live mode, possibly an oracle push), so bring an RPC endpoint sized for the load. Floored at 1 internally. Validate a raised value in dry-run or a staging deployment before going live: watch for RPC rate-limit errors, "Inventory no longer covers the sized amount" skips (thin inventory makes the knob buy less than it looks), and "Notification dropped" warnings. |
+| `CONCURRENCY` | `--concurrency`, `-c` | `10` | Concurrency for registry deployment listing. Must be ≥ 1 — `0` would stall the pipeline and is rejected at startup. |
+| `POSITION_CONCURRENCY` | `--position-concurrency` | `1` | Positions evaluated/liquidated concurrently within one market's round. `1` (the default) is fully sequential with a 1-second pause between positions — what free public RPC endpoints tolerate. Raising it drops the pause and fans evaluation out; each in-flight position costs several RPC reads (and in live mode, possibly an oracle push), so bring an RPC endpoint sized for the load. Must be ≥ 1 (`0` is rejected at startup). Validate a raised value in dry-run or a staging deployment before going live: watch for RPC rate-limit errors, "Inventory no longer covers the sized amount" skips (thin inventory makes the knob buy less than it looks), and "Notification dropped" warnings. |
 
 ## Liquidation strategy
 
@@ -47,7 +47,7 @@ The bot refuses to start without these three:
 | `FIXED_LIQUIDATION_AMOUNT_USD` | `--fixed-liquidation-amount-usd` | unset | Fixed USD amount to repay per liquidation. USD-denominated borrow assets only (no price lookup — assumes the borrow asset is a USD stablecoin). On markets requiring full liquidation (contract version < 1.1.0) it acts as an eligibility threshold, not a cap: a full liquidation must buy the position's *entire* collateral deposit, so a position is skipped when that whole deposit — valued at the liquidation discount, plus a 0.5% safety buffer — costs more than the budget. That threshold tracks collateral value, not debt, so it can sit far above what the position owes. |
 | `MIN_PROFIT_BPS` | `--min-profit-bps` | `50` | Minimum profit margin, in basis points, required to submit a liquidation. |
 | `LOOP_LIQUIDATION` | `--loop-liquidation` | `false` | Repeatedly liquidate the same position (re-checking each iteration) until it's healthy or inventory runs out. Disabled in dry-run (position state never changes there, so re-checking is a no-op). |
-| `MAX_LOOP_ITERATIONS` | `--max-loop-iterations` | `10` | Safety cap on loop-liquidation iterations. |
+| `MAX_LOOP_ITERATIONS` | `--max-loop-iterations` | `10` | Safety cap on loop-liquidation iterations. Must be ≥ 1 — `0` would mean "never liquidate anything" and is rejected at startup. |
 
 ## Collateral strategy
 

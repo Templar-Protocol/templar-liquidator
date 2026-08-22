@@ -429,7 +429,7 @@ impl Args {
                 let pct =
                     percentage.unwrap_or(crate::liquidation_strategy::LiquidationPercentage::FULL);
                 tracing::info!(
-                    percentage = %pct,
+                    percentage = pct.get(),
                     "Using PercentageLiquidationStrategy ({}% of available liquidatable collateral, 100% = full liquidation)",
                     pct
                 );
@@ -624,8 +624,9 @@ impl Args {
             liquidation_scan_interval: self.liquidation_scan_interval,
             registry_refresh_interval: self.registry_refresh_interval,
             run_mode: self.effective_run_mode(),
-            // `0` would make `buffer_unordered` hang forever; a refresh/scan with
-            // no concurrency makes no sense, so floor both knobs at 1.
+            // `0` would make `buffer_unordered` hang forever; both knobs are
+            // NonZeroUsize, so zero is rejected at parse time — nothing to
+            // floor here.
             concurrency: self.concurrency,
             position_concurrency: self.position_concurrency,
             strategy,
@@ -1162,16 +1163,26 @@ mod tests {
         );
     }
 
+    /// `0` for the three nonzero knobs is rejected by the CLI itself — the
+    /// layer where the invariant now lives — not merely by the field types:
+    /// reverting any of them to a plain integer would leave std's parser
+    /// tests green while restoring the `buffer_unordered` hang.
     #[test]
-    fn position_concurrency_reaches_config_and_is_floored_at_one() {
-        let args = parse_with(&["--position-concurrency", "8"]);
-        assert_eq!(args.build_config().position_concurrency.get(), 8);
-
-        // `0` would make `buffer_unordered` hang forever. It is now
-        // unrepresentable: the knob is `NonZeroUsize`, so clap rejects "0"
-        // at parse time instead of a silent floor here.
-        assert!("0".parse::<std::num::NonZeroUsize>().is_err());
-        assert!("1".parse::<std::num::NonZeroUsize>().is_ok());
+    fn zero_concurrency_and_loop_knobs_are_rejected_at_parse_time() {
+        for args in [
+            ["--position-concurrency", "0"],
+            ["--concurrency", "0"],
+            ["--max-loop-iterations", "0"],
+        ] {
+            let err =
+                try_parse_with(&args).expect_err("zero should fail to parse for a nonzero knob");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{args:?}"
+            );
+        }
+        assert!(try_parse_with(&["--position-concurrency", "8"]).is_ok());
     }
 
     /// A concurrent round can fire up to two notifications per in-flight

@@ -599,8 +599,11 @@ pub struct InventorySnapshotEntry {
 /// [`release`](InventoryManager::release), which take it **by value** — so
 /// double-settling, or settling amounts that were never reserved, is a
 /// compile error rather than a saturating no-op. Dropping a token without
-/// settling permanently holds the reserved amount (visible in the inventory
-/// snapshot), which the `must_use` warning exists to prevent.
+/// settling permanently holds the reserved amount until restart (visible in
+/// the inventory snapshot as persistent `reserved`); the `must_use` warning
+/// catches only a wholly discarded `reserve()` result — a token bound and
+/// then leaked past an early return is on the caller, so settle on every
+/// path.
 #[must_use = "an unsettled reservation holds inventory until the process restarts; consume or release it"]
 #[derive(Debug)]
 pub struct Reservation {

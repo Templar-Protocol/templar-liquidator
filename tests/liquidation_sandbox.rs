@@ -287,7 +287,7 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
                 // Expected collateral value is unused for Hold.
                 expected_collateral_value: liquidation_amount,
             },
-            Some(reservation),
+            templar_liquidator::Settlement::Live(reservation),
         )
         .await?;
 

@@ -45,6 +45,19 @@ pub struct MarketDecimals {
     pub collateral: i32,
 }
 
+/// How one execution settles inventory — the mode and the token are one
+/// value, so "dry-run holding a live reservation" and "live execution with
+/// nothing reserved" (which would leave spent tokens counted as available
+/// until the next refresh) are unrepresentable rather than checked.
+#[derive(Debug)]
+pub enum Settlement {
+    /// Live execution: the caller reserved this amount before its oracle
+    /// push; the executor settles the token on every exit path.
+    Live(inventory::Reservation),
+    /// Simulation: no inventory was touched and nothing settles.
+    DryRun,
+}
+
 /// The amounts one liquidation execution sends and expects: what the sized,
 /// gate-approved plan resolved to, in on-chain units.
 #[derive(Debug, Clone, Copy)]
@@ -148,20 +161,17 @@ impl LiquidationExecutor {
         borrow_asset: &FungibleAsset<BorrowAsset>,
         collateral_asset: &FungibleAsset<CollateralAsset>,
         request: ExecutionRequest,
-        reservation: Option<inventory::Reservation>,
+        settlement: Settlement,
     ) -> LiquidatorResult<(LiquidationOutcome, Option<SwapIssue>)> {
         let ExecutionRequest {
             liquidation_amount,
             collateral_amount,
             expected_collateral_value,
         } = request;
-        // The reservation settles exactly once on whichever path this
-        // function exits through; `take()` makes each settle site
-        // self-evidently the only one to run. Dry-run passes `None` (no
-        // inventory was touched).
-        let mut reservation = reservation;
+        // The settlement variant is the single source of the mode — not
+        // `self.dry_run`, which callers already used to build it.
         // Dry run mode - log what would happen, skip execution
-        if self.dry_run {
+        if matches!(settlement, Settlement::DryRun) {
             // Log JIT swap intent if applicable
             if matches!(self.collateral_strategy, CollateralStrategy::SwapToBorrow)
                 && self.swap_provider.is_some()
@@ -195,6 +205,24 @@ impl LiquidationExecutor {
             }
             return Ok((LiquidationOutcome::Liquidated, None));
         }
+        let Settlement::Live(reservation) = settlement else {
+            unreachable!("dry-run returned above");
+        };
+        // Fail closed on a mismatched token: settling a different amount
+        // than the transaction spends would silently mis-account inventory
+        // until the next refresh.
+        if reservation.amount() != liquidation_amount {
+            let reserved = u128::from(reservation.amount());
+            self.inventory.write().await.release(reservation);
+            return Err(LiquidatorError::StrategyError(format!(
+                "reservation amount {reserved} does not match liquidation amount {}; reservation released, liquidation aborted",
+                u128::from(liquidation_amount)
+            )));
+        }
+        // The reservation settles exactly once on whichever live path this
+        // function exits through; `take()` makes each settle site
+        // self-evidently the only one to run.
+        let mut reservation = Some(reservation);
 
         // Execute liquidation transaction through the gateway. The driver signs,
         // submits, and polls to finality; a reverted on-chain transaction comes

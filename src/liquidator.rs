@@ -110,7 +110,7 @@ pub use scanner::MarketScanner;
 pub use service::{LiquidatorService, ServiceConfig};
 
 // Constructor parameter groups (see `Liquidator::new`)
-pub use executor::{ExecutionRequest, MarketDecimals};
+pub use executor::{ExecutionRequest, MarketDecimals, Settlement};
 // (MarketContext, SwapConfig, OracleApis, LoopPolicy, SharedHandles are
 // defined below in this module and exported from the crate root.)
 
@@ -1195,17 +1195,17 @@ impl Liquidator {
 
         // Reserve BEFORE the paid oracle push: a position that loses an
         // inventory race under POSITION_CONCURRENCY must fail before
-        // spending gas. The reservation token travels into the executor,
-        // which consumes it on success and releases it on every failure
-        // path; dry-run touches no inventory and passes no token.
-        let reservation = if dry_run {
-            None
+        // spending gas. The mode and the token travel as one Settlement
+        // value — the executor consumes on success and releases on every
+        // failure path; dry-run touches no inventory by construction.
+        let settlement = if dry_run {
+            executor::Settlement::DryRun
         } else {
             match self.executor.inventory().write().await.reserve(
                 &self.market_config.borrow_asset,
                 templar_common::asset::BorrowAssetAmount::from(plan.liquidation_amount.0),
             ) {
-                Ok(reservation) => Some(reservation),
+                Ok(reservation) => executor::Settlement::Live(reservation),
                 Err(error) => {
                     tracing::info!(
                         borrower = %borrow_account,
@@ -1258,7 +1258,7 @@ impl Liquidator {
                         plan.expected_collateral_value.0,
                     ),
                 },
-                reservation,
+                settlement,
             )
             .await?;
 

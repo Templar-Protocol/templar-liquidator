@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `Liquidator::liquidate()` is decomposed from one ~500-line loop into a small driver over five focused steps (`check_status` → `size_position` → `assess_profitability` → `execute_plan` → `notify_execution`), with the evaluation/execution boundary made explicit: everything is decided before any money moves. No behavior change — every log line, outcome mapping, and error-propagation point is preserved. Three duplicated signed-profit computations collapse into one `signed_profit` function, and an unreachable loop-guard branch (loop-disabled check on a later iteration, which the loop's own exit made impossible) is deleted.
+- `Liquidator::liquidate()` is decomposed from one ~500-line loop into a small driver over five focused steps (`check_status` → `size_position` → `assess_profitability` → `execute_plan` → `notify_execution`), with the evaluation/execution boundary made explicit: everything is decided before any money moves. No behavior change beyond the `MAX_LOOP_ITERATIONS=0` fix recorded under Fixed — every log line, outcome mapping, and error-propagation point is otherwise preserved (the full outcome table is pinned by a test). Three duplicated signed-profit computations collapse into one `signed_profit` function, and an unreachable loop-guard branch (loop-disabled check on a later iteration, which the loop's own exit made impossible) is deleted.
 
 - `RpcError::TimeoutError` carries the underlying error's rendering instead of two duration numbers that were always a `(0, 0)` sentinel — no layer that produces timeouts surfaces real durations, so none are invented. Timeout log/notification messages now show the actual underlying error.
 

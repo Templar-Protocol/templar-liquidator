@@ -158,7 +158,7 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
         oracle_response: &OracleResponse,
         configuration: &MarketConfiguration,
         available_balance: U128,
-        market_version: Option<(u32, u32, u32)>,
+        market_version: Option<crate::scanner::MarketVersion>,
     ) -> LiquidatorResult<Option<(U128, U128)>>;
 
     /// Determines whether a sized liquidation is still worth submitting.
@@ -331,7 +331,7 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
         oracle_response: &OracleResponse,
         configuration: &MarketConfiguration,
         available_balance: U128,
-        market_version: Option<(u32, u32, u32)>,
+        market_version: Option<crate::scanner::MarketVersion>,
     ) -> LiquidatorResult<Option<(U128, U128)>> {
         let available_u128: u128 = available_balance.into();
 
@@ -508,7 +508,7 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
         oracle_response: &OracleResponse,
         configuration: &MarketConfiguration,
         available_balance: U128,
-        market_version: Option<(u32, u32, u32)>,
+        market_version: Option<crate::scanner::MarketVersion>,
     ) -> LiquidatorResult<Option<(U128, U128)>> {
         let decimals = configuration
             .price_oracle_configuration
@@ -684,7 +684,11 @@ mod tests {
         let pos = position(100_000_000, 3_980_000);
         let strategy = FixedAmountLiquidationStrategy::new(100.0, 50);
 
-        for version in [None, Some((1, 0, 0)), Some((1, 0, 5))] {
+        for version in [
+            None,
+            Some(crate::scanner::MarketVersion::new(1, 0, 0)),
+            Some(crate::scanner::MarketVersion::new(1, 0, 5)),
+        ] {
             let result = strategy
                 .calculate_liquidation_amount(&pos, &prices, &cfg, U128(1_000_000_000_000), version)
                 .expect("no error");
@@ -733,7 +737,7 @@ mod tests {
                 &prices,
                 &cfg,
                 U128(1_000_000_000_000),
-                Some((1, 1, 0)),
+                Some(crate::scanner::MarketVersion::new(1, 1, 0)),
             )
             .expect("no error")
             .expect("partial liquidation is fundable");

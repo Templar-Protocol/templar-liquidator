@@ -484,7 +484,7 @@ pub struct Liquidator {
     /// Maximum iterations for loop liquidation (safety limit)
     max_loop_iterations: u32,
     /// Market version (major, minor, patch) - used for version-specific liquidation logic
-    market_version: Option<(u32, u32, u32)>,
+    market_version: Option<scanner::MarketVersion>,
     /// Shared notifier for Telegram alerts
     notifier: crate::notifier::SharedNotifier,
 }
@@ -672,7 +672,7 @@ impl Liquidator {
         min_swap_value_usd: f64,
         proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
         notifier: crate::notifier::SharedNotifier,
-        market_version: Option<(u32, u32, u32)>,
+        market_version: Option<scanner::MarketVersion>,
     ) -> Self {
         let scanner = scanner::MarketScanner::new(client.clone(), market.clone());
         let oracle_fetcher = oracle::OracleFetcher::new(

@@ -592,7 +592,7 @@ impl LiquidatorService {
             let mut market_configs: Vec<(
                 AccountId,
                 templar_common::market::MarketConfiguration,
-                (u32, u32, u32),
+                crate::scanner::MarketVersion,
             )> = Vec::new();
             for market in &all_markets {
                 // Step 0: Skip ignored markets before any RPC calls
@@ -664,7 +664,7 @@ impl LiquidatorService {
                         continue;
                     }
                 };
-                let Some(version) = crate::scanner::parse_semver(&version_string) else {
+                let Some(version) = crate::scanner::MarketVersion::parse(&version_string) else {
                     tracing::warn!(
                         market = %market,
                         version = %version_string,
@@ -672,13 +672,11 @@ impl LiquidatorService {
                     );
                     continue;
                 };
-                let (min_major, min_minor, min_patch) =
-                    crate::scanner::MarketScanner::MIN_SUPPORTED_VERSION;
-                if version < (min_major, min_minor, min_patch) {
+                if version < crate::scanner::MarketVersion::MIN_SUPPORTED {
                     tracing::info!(
                         market = %market,
                         version = %version_string,
-                        min_required = %format!("{min_major}.{min_minor}.{min_patch}"),
+                        min_required = %crate::scanner::MarketVersion::MIN_SUPPORTED,
                         "Skipping market - unsupported version"
                     );
                     continue;

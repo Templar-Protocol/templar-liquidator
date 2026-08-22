@@ -80,10 +80,10 @@ pub struct ServiceConfig {
     /// Execution mode: continuous loop or single cycle
     pub run_mode: crate::config::RunMode,
     /// Concurrency for registry deployment listing
-    pub concurrency: usize,
+    pub concurrency: std::num::NonZeroUsize,
     /// Maximum positions evaluated/liquidated concurrently within one
     /// market's round (1 = sequential with pacing; see `config::Args`)
-    pub position_concurrency: usize,
+    pub position_concurrency: std::num::NonZeroUsize,
     /// Liquidation strategy
     pub strategy: Arc<dyn LiquidationStrategy>,
     /// Collateral strategy
@@ -103,7 +103,7 @@ pub struct ServiceConfig {
     /// Enable loop liquidation - repeatedly liquidate until position is healthy
     pub loop_liquidation: bool,
     /// Maximum iterations for loop liquidation (safety limit)
-    pub max_loop_iterations: u32,
+    pub max_loop_iterations: std::num::NonZeroU32,
     /// Pyth Hermes API URL for fetching price data
     pub hermes_url: url::Url,
     /// RedStone public price API for scan-side proxy price composition
@@ -1209,7 +1209,7 @@ impl LiquidatorService {
 async fn list_all_deployments(
     client: &SigningClient,
     registries: Vec<AccountId>,
-    concurrency: usize,
+    concurrency: std::num::NonZeroUsize,
 ) -> templar_gateway_core::GatewayResult<Vec<AccountId>> {
     use futures::{StreamExt, TryStreamExt};
 
@@ -1218,7 +1218,7 @@ async fn list_all_deployments(
             let client = client.clone();
             async move { list_deployments(&client, registry).await }
         })
-        .buffer_unordered(concurrency)
+        .buffer_unordered(concurrency.get())
         .try_concat()
         .await
 }

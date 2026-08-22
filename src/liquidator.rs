@@ -482,7 +482,7 @@ pub struct Liquidator {
     /// Enable loop liquidation - repeatedly liquidate until position is healthy
     loop_liquidation: bool,
     /// Maximum iterations for loop liquidation (safety limit)
-    max_loop_iterations: u32,
+    max_loop_iterations: std::num::NonZeroU32,
     /// Market version (major, minor, patch) - used for version-specific liquidation logic
     market_version: Option<scanner::MarketVersion>,
     /// Shared notifier for Telegram alerts
@@ -649,7 +649,7 @@ impl Liquidator {
     /// * `dry_run` - If true, scan and log without executing liquidations
     /// * `swap_provider` - Optional swap provider for collateral swaps
     /// * `loop_liquidation` - Enable loop liquidation until position is healthy
-    /// * `max_loop_iterations` - Maximum iterations for loop liquidation (safety limit)
+    /// * `max_loop_iterations` - Maximum iterations for loop liquidation (safety limit, nonzero)
     /// * `market_version` - Parsed NEP-330 version, fetched once during
     ///   registry refresh; selects full- vs partial-liquidation sizing
     #[allow(clippy::too_many_arguments)]
@@ -664,7 +664,7 @@ impl Liquidator {
         dry_run: bool,
         swap_provider: Option<crate::swap::SwapProviderImpl>,
         loop_liquidation: bool,
-        max_loop_iterations: u32,
+        max_loop_iterations: std::num::NonZeroU32,
         hermes_url: url::Url,
         redstone_api_url: url::Url,
         lazer_api: Option<crate::lazer::LazerApiConfig>,
@@ -1373,7 +1373,11 @@ impl Liquidator {
         // (no actual liquidation happens, so re-checking yields identical results)
         let dry_run = self.executor.is_dry_run();
         let loop_enabled = self.loop_liquidation && !dry_run;
-        let max_iterations = if dry_run { 1 } else { self.max_loop_iterations };
+        let max_iterations = if dry_run {
+            1
+        } else {
+            self.max_loop_iterations.get()
+        };
         let mut iteration = 0;
         let mut prices_pushed_onchain = false;
         let mut total_liquidated_amount = 0u128;
@@ -1485,7 +1489,10 @@ impl Liquidator {
     /// (in live mode) possibly its own oracle push.
     #[tracing::instrument(skip(self, concurrency), level = "info", fields(market = %self.market))]
     #[allow(clippy::too_many_lines)]
-    pub async fn run_liquidations(&self, concurrency: usize) -> LiquidatorResult<RoundSummary> {
+    pub async fn run_liquidations(
+        &self,
+        concurrency: std::num::NonZeroUsize,
+    ) -> LiquidatorResult<RoundSummary> {
         let max_percentage = self.strategy.max_liquidation_percentage();
 
         tracing::info!(
@@ -1626,7 +1633,7 @@ impl Liquidator {
         );
 
         let total = candidates.len();
-        let concurrency = concurrency.max(1);
+        let concurrency = concurrency.get();
 
         use futures::StreamExt as _;
         let mut results = futures::stream::iter(candidates.into_iter().enumerate().map(

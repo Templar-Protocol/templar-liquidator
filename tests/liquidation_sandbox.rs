@@ -248,12 +248,16 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
         inventory,
         market_id.clone(),
         false, // dry_run
-        CollateralStrategy::Hold,
-        None, // swap provider
-        SwapRetryConfig::default(),
-        0.0, // min swap value (unused for Hold)
-        oracle_cfg.collateral_asset_decimals,
-        oracle_cfg.borrow_asset_decimals,
+        templar_liquidator::SwapConfig {
+            provider: None,
+            retry: SwapRetryConfig::default(),
+            min_swap_value_usd: 0.0, // unused for Hold
+            collateral_strategy: CollateralStrategy::Hold,
+        },
+        templar_liquidator::MarketDecimals {
+            collateral: oracle_cfg.collateral_asset_decimals,
+            borrow: oracle_cfg.borrow_asset_decimals,
+        },
     );
 
     // Live-mode contract: the caller reserves before executing (the service

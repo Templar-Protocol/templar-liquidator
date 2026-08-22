@@ -717,26 +717,37 @@ impl LiquidatorService {
             for (market, config, version) in market_configs {
                 tracing::debug!(market = %market, "Creating liquidator for market");
 
+                let handles = crate::SharedHandles {
+                    client: self.client.clone(),
+                    pyth_updates: self.pyth_updates.clone(),
+                    inventory: self.inventory.clone(),
+                    notifier: self.config.notifier.clone(),
+                    proxy_oracle_cache: Some(self.oracle_fetcher.proxy_oracle_cache()),
+                };
                 let liquidator = Liquidator::new(
-                    &self.client,
-                    &self.pyth_updates,
-                    &self.inventory,
-                    market.clone(),
-                    config,
+                    &handles,
+                    crate::MarketContext {
+                        market: market.clone(),
+                        config,
+                        version: Some(version),
+                    },
                     self.config.strategy.clone(),
-                    self.config.collateral_strategy.clone(),
+                    crate::SwapConfig {
+                        provider: self.oneclick_provider.clone(),
+                        retry: self.config.swap_retry_config.clone(),
+                        min_swap_value_usd: self.config.min_swap_value_usd,
+                        collateral_strategy: self.config.collateral_strategy.clone(),
+                    },
+                    crate::OracleApis {
+                        hermes_url: self.config.hermes_url.clone(),
+                        redstone_api_url: self.config.redstone_api_url.clone(),
+                        lazer_api: self.config.lazer_api.clone(),
+                    },
+                    crate::LoopPolicy {
+                        enabled: self.config.loop_liquidation,
+                        max_iterations: self.config.max_loop_iterations,
+                    },
                     self.config.dry_run,
-                    self.oneclick_provider.clone(),
-                    self.config.loop_liquidation,
-                    self.config.max_loop_iterations,
-                    self.config.hermes_url.clone(),
-                    self.config.redstone_api_url.clone(),
-                    self.config.lazer_api.clone(),
-                    self.config.swap_retry_config.clone(),
-                    self.config.min_swap_value_usd,
-                    Some(self.oracle_fetcher.proxy_oracle_cache()),
-                    self.config.notifier.clone(),
-                    Some(version),
                 );
 
                 supported_markets.insert(market, liquidator);

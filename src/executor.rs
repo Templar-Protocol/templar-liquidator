@@ -37,6 +37,14 @@ pub enum SwapIssue {
     },
 }
 
+/// A market's asset decimals, from its validated on-chain oracle
+/// configuration (gated by the registry's sanity check at registration).
+#[derive(Debug, Clone, Copy)]
+pub struct MarketDecimals {
+    pub borrow: i32,
+    pub collateral: i32,
+}
+
 /// The amounts one liquidation execution sends and expects: what the sized,
 /// gate-approved plan resolved to, in on-chain units.
 #[derive(Debug, Clone, Copy)]
@@ -74,19 +82,24 @@ pub struct LiquidationExecutor {
 
 impl LiquidationExecutor {
     /// Creates a new liquidation executor.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: SigningClient,
         inventory: inventory::SharedInventory,
         market: AccountId,
         dry_run: bool,
-        collateral_strategy: CollateralStrategy,
-        swap_provider: Option<crate::swap::SwapProviderImpl>,
-        swap_retry_config: crate::swap::SwapRetryConfig,
-        min_swap_value_usd: f64,
-        collateral_decimals: i32,
-        borrow_decimals: i32,
+        swap: crate::SwapConfig,
+        decimals: MarketDecimals,
     ) -> Self {
+        let crate::SwapConfig {
+            provider: swap_provider,
+            retry: swap_retry_config,
+            min_swap_value_usd,
+            collateral_strategy,
+        } = swap;
+        let MarketDecimals {
+            collateral: collateral_decimals,
+            borrow: borrow_decimals,
+        } = decimals;
         Self {
             client,
             inventory,

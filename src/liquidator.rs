@@ -109,6 +109,11 @@ pub use profitability::ProfitabilityCalculator;
 pub use scanner::MarketScanner;
 pub use service::{LiquidatorService, ServiceConfig};
 
+// Constructor parameter groups (see `Liquidator::new`)
+pub use executor::{ExecutionRequest, MarketDecimals};
+// (MarketContext, SwapConfig, OracleApis, LoopPolicy, SharedHandles are
+// defined below in this module and exported from the crate root.)
+
 // Error conversions
 use crate::rpc::AppError;
 
@@ -634,71 +639,95 @@ struct LoopCtx {
     dry_run: bool,
 }
 
+/// One market's identity for a liquidator: the contract account, its
+/// on-chain configuration, and its provably-parsed NEP-330 version (which
+/// selects full- vs partial-liquidation sizing).
+pub struct MarketContext {
+    pub market: AccountId,
+    pub config: MarketConfiguration,
+    pub version: Option<scanner::MarketVersion>,
+}
+
+/// Everything that governs collateral swapping for one liquidator.
+#[derive(Clone)]
+pub struct SwapConfig {
+    pub provider: Option<crate::swap::SwapProviderImpl>,
+    pub retry: crate::swap::SwapRetryConfig,
+    pub min_swap_value_usd: f64,
+    pub collateral_strategy: CollateralStrategy,
+}
+
+/// The off-chain price APIs scan-side composition fetches from.
+#[derive(Clone)]
+pub struct OracleApis {
+    pub hermes_url: url::Url,
+    pub redstone_api_url: url::Url,
+    pub lazer_api: Option<crate::lazer::LazerApiConfig>,
+}
+
+/// Loop-liquidation policy: whether to repeat against the same position, and
+/// the (nonzero) iteration ceiling.
+#[derive(Clone, Copy)]
+pub struct LoopPolicy {
+    pub enabled: bool,
+    pub max_iterations: std::num::NonZeroU32,
+}
+
+/// Handles shared across every market's liquidator; each `new` call clones
+/// what it keeps (all are cheap, shared-ownership clones).
+pub struct SharedHandles {
+    pub client: SigningClient,
+    pub pyth_updates: oracle::PythUpdatesClient,
+    pub inventory: inventory::SharedInventory,
+    pub notifier: crate::notifier::SharedNotifier,
+    pub proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
+}
+
 impl Liquidator {
-    /// Creates a new liquidator instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `client` - JSON-RPC client for blockchain communication
-    /// * `signer` - Transaction signer
-    /// * `inventory` - Shared inventory manager
-    /// * `market` - Market contract account ID
-    /// * `market_config` - Market configuration
-    /// * `strategy` - Liquidation strategy
-    /// * `collateral_strategy` - Collateral management strategy
-    /// * `dry_run` - If true, scan and log without executing liquidations
-    /// * `swap_provider` - Optional swap provider for collateral swaps
-    /// * `loop_liquidation` - Enable loop liquidation until position is healthy
-    /// * `max_loop_iterations` - Maximum iterations for loop liquidation (safety limit, nonzero)
-    /// * `market_version` - Parsed NEP-330 version, fetched once during
-    ///   registry refresh; selects full- vs partial-liquidation sizing
-    #[allow(clippy::too_many_arguments)]
+    /// Creates a new liquidator instance for one market. The grouped
+    /// parameters carry their own invariants — see [`MarketContext`],
+    /// [`SwapConfig`], [`OracleApis`], [`LoopPolicy`], [`SharedHandles`].
     pub fn new(
-        client: &SigningClient,
-        pyth_updates: &oracle::PythUpdatesClient,
-        inventory: &inventory::SharedInventory,
-        market: AccountId,
-        market_config: MarketConfiguration,
+        handles: &SharedHandles,
+        context: MarketContext,
         strategy: Arc<dyn LiquidationStrategy>,
-        collateral_strategy: CollateralStrategy,
+        swap: SwapConfig,
+        oracle_apis: OracleApis,
+        loop_policy: LoopPolicy,
         dry_run: bool,
-        swap_provider: Option<crate::swap::SwapProviderImpl>,
-        loop_liquidation: bool,
-        max_loop_iterations: std::num::NonZeroU32,
-        hermes_url: url::Url,
-        redstone_api_url: url::Url,
-        lazer_api: Option<crate::lazer::LazerApiConfig>,
-        swap_retry_config: crate::swap::SwapRetryConfig,
-        min_swap_value_usd: f64,
-        proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
-        notifier: crate::notifier::SharedNotifier,
-        market_version: Option<scanner::MarketVersion>,
     ) -> Self {
-        let scanner = scanner::MarketScanner::new(client.clone(), market.clone());
+        let MarketContext {
+            market,
+            config: market_config,
+            version: market_version,
+        } = context;
+        let scanner = scanner::MarketScanner::new(handles.client.clone(), market.clone());
         let oracle_fetcher = oracle::OracleFetcher::new(
-            client.clone(),
-            pyth_updates.clone(),
-            hermes_url,
-            redstone_api_url,
-            lazer_api,
-            proxy_oracle_cache,
+            handles.client.clone(),
+            handles.pyth_updates.clone(),
+            oracle_apis.hermes_url,
+            oracle_apis.redstone_api_url,
+            oracle_apis.lazer_api,
+            handles.proxy_oracle_cache.clone(),
         );
         let executor = executor::LiquidationExecutor::new(
-            client.clone(),
-            inventory.clone(),
+            handles.client.clone(),
+            handles.inventory.clone(),
             market.clone(),
             dry_run,
-            collateral_strategy,
-            swap_provider,
-            swap_retry_config,
-            min_swap_value_usd,
-            market_config
-                .price_oracle_configuration
-                .collateral_asset_decimals,
-            market_config
-                .price_oracle_configuration
-                .borrow_asset_decimals,
+            swap,
+            executor::MarketDecimals {
+                collateral: market_config
+                    .price_oracle_configuration
+                    .collateral_asset_decimals,
+                borrow: market_config
+                    .price_oracle_configuration
+                    .borrow_asset_decimals,
+            },
         );
+        let notifier = handles.notifier.clone();
+        let loop_liquidation = loop_policy.enabled;
+        let max_loop_iterations = loop_policy.max_iterations;
 
         Self {
             scanner,

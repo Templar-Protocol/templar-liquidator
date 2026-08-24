@@ -219,6 +219,17 @@ impl LiquidationExecutor {
         let Settlement::Live(reservation) = settlement else {
             unreachable!("dry-run returned above");
         };
+        // Issuance first, before anything releases or submits: a foreign
+        // token cannot settle here at all, so it must abort pre-submission
+        // (dropped un-settled — the issuing manager keeps its hold), and
+        // every later "released" message stays accurate because the token
+        // is provably this inventory's own.
+        if !self.inventory.read().await.issued(&reservation) {
+            return Err(LiquidatorError::StrategyError(
+                "reservation was issued by a different InventoryManager; it cannot settle here (the issuing manager keeps its hold), liquidation aborted"
+                    .to_string(),
+            ));
+        }
         // The Settlement variant carries the token, but it must not become
         // the sole authority on whether money moves: DRY_RUN=true is the
         // crate's safety invariant, so a live settlement handed to a
@@ -742,6 +753,53 @@ mod tests {
         assert!(
             result.is_err(),
             "a live executor must not fabricate Liquidated from a simulation"
+        );
+    }
+
+    /// A foreign token — same asset, same amount, different issuing
+    /// manager — must abort BEFORE submission: it would pass an
+    /// asset/amount check, the liquidation would submit, and the success
+    /// path's consume would then be refused, leaving the spent amount
+    /// counted available until the next refresh.
+    #[tokio::test]
+    async fn foreign_reservation_aborts_before_submission() {
+        let (executor, _inventory_b) = test_executor(false);
+        let asset: FungibleAsset<BorrowAsset> =
+            FungibleAsset::from_str("nep141:usdc.near").unwrap();
+        let collateral: FungibleAsset<CollateralAsset> =
+            FungibleAsset::from_str("nep141:btc.near").unwrap();
+
+        // A second manager issues a token for the same asset and amount.
+        let (_, inventory_a) = test_executor(false);
+        inventory_a
+            .write()
+            .await
+            .seed_asset_for_tests(&asset, BorrowAssetAmount::from(1_000));
+        let foreign = inventory_a
+            .write()
+            .await
+            .reserve(&asset, BorrowAssetAmount::from(300))
+            .unwrap();
+
+        let borrower = AccountId::from_str("borrower.near").unwrap();
+        let result = executor
+            .execute_liquidation(
+                &borrower,
+                &asset,
+                &collateral,
+                request(300),
+                Settlement::Live(foreign),
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(LiquidatorError::StrategyError(m)) if m.contains("different InventoryManager")),
+            "must abort via the issuance guard, before any transaction: {result:?}"
+        );
+        assert_eq!(
+            inventory_a.read().await.get_reserved_balance(&asset).0,
+            300,
+            "the issuing manager keeps its hold — nothing here may settle a foreign token"
         );
     }
 

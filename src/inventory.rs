@@ -443,6 +443,15 @@ impl InventoryManager {
         }
     }
 
+    /// True when this manager issued `reservation` — the executor's
+    /// pre-submission check, so a foreign token aborts before funds move
+    /// rather than after, when the success path's `consume` would refuse it
+    /// and leave the spent amount counted available.
+    #[must_use]
+    pub fn issued(&self, reservation: &Reservation) -> bool {
+        reservation.manager_id == self.id
+    }
+
     /// Accepts a token only if this manager issued it; a foreign token is
     /// refused loudly and untouched — settling it here would corrupt this
     /// manager's aggregate accounting while the issuing manager kept its

@@ -200,6 +200,9 @@ pub struct LiquidatorService {
     oracle_fetcher: crate::OracleFetcher,
     /// Collateral asset → price / swap target info (built from market configs)
     collateral_price_map: HashMap<String, CollateralPriceInfo>,
+    /// Set when SIGTERM/ctrl-C arrives: in-flight work finishes, nothing new
+    /// starts, and the loop exits after draining notifications.
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
     /// Consecutive scan failure count per market (reset on success)
     scan_failure_counts: HashMap<AccountId, u32>,
     /// Operational counters served by the optional `/metrics` endpoint.
@@ -298,6 +301,7 @@ impl LiquidatorService {
             oneclick_provider,
             oracle_fetcher,
             collateral_price_map: HashMap::new(),
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scan_failure_counts: HashMap::new(),
             metrics: Arc::new(Metrics::default()),
         }
@@ -328,7 +332,67 @@ impl LiquidatorService {
         Some(SwapProviderImpl::oneclick(oneclick))
     }
 
-    /// Run the service event loop
+    /// Resolves when the process receives ctrl-C or (on unix) SIGTERM.
+    /// Registration failures are logged and that source is disabled — the
+    /// bot keeps running rather than dying over a signal-handler problem.
+    async fn shutdown_signal() {
+        let ctrl_c = async {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                tracing::warn!(%error, "Cannot listen for ctrl-C; graceful shutdown via ctrl-C unavailable");
+                std::future::pending::<()>().await;
+            }
+        };
+        #[cfg(unix)]
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut sig) => {
+                    sig.recv().await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Cannot listen for SIGTERM; graceful shutdown via SIGTERM unavailable");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            () = ctrl_c => {}
+            () = terminate => {}
+        }
+    }
+
+    /// Spawns the task that turns SIGTERM/ctrl-C into graceful shutdown.
+    ///
+    /// The watcher sets the flag the moment the signal arrives — so a round
+    /// already in flight stops starting new positions — and the returned
+    /// [`tokio::sync::Notify`]'s permit makes `run()`'s select exit as soon
+    /// as the current branch completes. Compose `stop`, Kubernetes, and
+    /// Cloud Run all deliver SIGTERM and expect exactly this: finish,
+    /// flush, exit 0. A second signal exits immediately (code 130) — it
+    /// would otherwise be swallowed (installing the tokio handlers replaced
+    /// the default die-on-signal behavior), leaving ctrl-C-ctrl-C stranded
+    /// behind a hung drain.
+    fn spawn_shutdown_watcher(&self) -> Arc<tokio::sync::Notify> {
+        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let flag = Arc::clone(&self.shutdown);
+        let notify = Arc::clone(&shutdown_notify);
+        tokio::spawn(async move {
+            Self::shutdown_signal().await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            tracing::info!(
+                "Shutdown signal received — finishing in-flight work, starting nothing new"
+            );
+            notify.notify_one();
+            Self::shutdown_signal().await;
+            tracing::warn!("Second shutdown signal — exiting immediately");
+            std::process::exit(130);
+        });
+        shutdown_notify
+    }
+
+    /// Run the service event loop until a shutdown signal arrives, then
+    /// finish in-flight work, drain notifications, and return (exit 0).
     pub async fn run(mut self) {
         // Optional operational HTTP surface. Loop mode only: a `run_once`
         // process exits before anything could scrape it. A bind failure is
@@ -386,8 +450,21 @@ impl LiquidatorService {
         // Reset the registry interval to start timing from now
         registry_interval.reset();
 
+        let shutdown_notify = self.spawn_shutdown_watcher();
+
         loop {
+            // Checked at the top as well as in the select: `select!` picks
+            // among simultaneously-ready branches unfairly, and after a long
+            // cycle an interval tick is often already pending — without this
+            // check a signal that arrived mid-cycle could lose the race and
+            // buy one more full scan round.
+            if self.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             select! {
+                () = shutdown_notify.notified() => {
+                    break;
+                }
                 _ = registry_interval.tick() => {
                     match self.refresh_registry().await {
                         Ok(()) => {
@@ -425,6 +502,12 @@ impl LiquidatorService {
                 }
             }
         }
+
+        // Mirror run_once's drain discipline: without it, returning from
+        // here drops the runtime and cancels any notification still in
+        // flight — including the ones the final round just queued.
+        self.config.notifier.drain(Duration::from_secs(10)).await;
+        tracing::info!("Graceful shutdown complete");
     }
 
     /// One liquidation cycle: collateral refresh, optional batch swap,
@@ -1132,7 +1215,7 @@ impl LiquidatorService {
                 let result = async {
                     tracing::info!(market = %market, "Scanning market for liquidations");
                     liquidator
-                        .run_liquidations(self.config.position_concurrency)
+                        .run_liquidations(self.config.position_concurrency, &self.shutdown)
                         .await
                 }
                 .instrument(market_span)

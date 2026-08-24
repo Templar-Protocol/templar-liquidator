@@ -20,7 +20,7 @@ way to adapt it to different parameters or a different venue is to fork and
 configure via CLI flags / env vars, or — where configuration can't express the
 change — extend one of the three seams called out in `src/liquidator.rs`'s
 crate-level docs: `swap::SwapProvider`, `liquidation_strategy::LiquidationStrategy`,
-or `notifier::Notifier`.
+or `notifier::NotificationChannel`.
 
 ## Orientation commands
 
@@ -46,9 +46,11 @@ One line per file in `src/`:
 - `config.rs` — CLI argument parsing (`Args`, `clap`) and translation into
   `ServiceConfig`.
 - `service.rs` — service lifecycle: `run()` is the long-lived loop
-  (registry refresh + liquidation rounds on independent timers), `run_once()`
-  performs exactly one registry refresh and one liquidation round, then drains
-  pending notifications before returning.
+  (registry refresh + liquidation rounds on independent timers) with graceful
+  shutdown on SIGTERM/ctrl-C (finish in-flight, start nothing new, drain
+  notifications, exit 0), `run_once()` performs exactly one registry refresh
+  and one liquidation round, then drains pending notifications before
+  returning.
 - `scanner.rs` — fetches borrow positions per market and checks liquidation
   status, with pagination for large markets.
 - `liquidation_strategy.rs` — `LiquidationStrategy` trait and the built-in
@@ -131,7 +133,11 @@ Bump every `rev =` together in one change, never one alone.
 - **`--run-mode once` must drain notifications before returning.**
   `run_once()` explicitly drains the notifier after the liquidation cycle
   (success or error path) because the tokio runtime shutting down when `main`
-  returns would otherwise cancel an in-flight Telegram POST.
+  returns would otherwise cancel an in-flight Telegram POST. Loop mode has
+  the same obligation on its shutdown path: `run()` drains after its loop
+  exits, and SIGTERM/ctrl-C must keep meaning *graceful* — finish in-flight
+  positions, start nothing new, drain, exit 0 (a liquidation is never
+  abandoned between repay and settle).
 - **`/healthz` must only report healthy when at least one market scanned
   cleanly, recently.** It's a readiness check, not a liveness check — see
   `http.rs`'s module doc for why wiring it to a liveness probe would be

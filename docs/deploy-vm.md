@@ -86,6 +86,8 @@ docker compose down
 docker compose up -d
 ```
 
+`docker compose stop`/`down` deliver SIGTERM and wait (10s by default) before SIGKILL: the bot treats SIGTERM as graceful shutdown — it finishes in-flight positions, starts nothing new, flushes pending Telegram notifications, and exits 0. If your rounds run long, raise the grace period (`docker compose stop -t 60`, or `stop_grace_period` in the compose file) so a mid-round stop isn't cut off at the notification flush.
+
 ## `scripts/deploy.sh` reference
 
 ```text

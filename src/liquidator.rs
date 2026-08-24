@@ -1531,11 +1531,18 @@ impl Liquidator {
     /// capital commitment, so concurrent positions cannot double-spend the
     /// same balance, but each in-flight position costs several RPC reads and
     /// (in live mode) possibly its own oracle push.
-    #[tracing::instrument(skip(self, concurrency), level = "info", fields(market = %self.market))]
+    ///
+    /// `shutdown` is consulted each time the round is about to start another
+    /// position: once set, positions already in flight run to completion
+    /// (a liquidation must never be abandoned between repay and settle) but
+    /// no new ones start, and the summary reflects only what actually ran.
+    /// Callers without a shutdown source pass a flag that is never set.
+    #[tracing::instrument(skip(self, concurrency, shutdown), level = "info", fields(market = %self.market))]
     #[allow(clippy::too_many_lines)]
     pub async fn run_liquidations(
         &self,
         concurrency: std::num::NonZeroUsize,
+        shutdown: &std::sync::atomic::AtomicBool,
     ) -> LiquidatorResult<RoundSummary> {
         let max_percentage = self.strategy.max_liquidation_percentage();
 
@@ -1680,24 +1687,43 @@ impl Liquidator {
         let concurrency = concurrency.get();
 
         use futures::StreamExt as _;
-        let mut results = futures::stream::iter(candidates.into_iter().enumerate().map(
-            |(i, (account, position))| {
-                let oracle_response = oracle_response.clone();
-                async move {
-                    let result = self
-                        .liquidate(account.clone(), position, oracle_response)
-                        .await;
-                    // Sequential mode paces positions 1s apart (skipped after
-                    // the last one); concurrent mode drops the pause — the
-                    // operator raising the knob brings an RPC endpoint sized
-                    // for the load.
-                    if concurrency == 1 && i < total - 1 {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // `take_while` is consulted each time the stream pulls a new
+        // position future, so a shutdown signal stops *starting* positions
+        // while the in-flight ones drain to completion below — the
+        // finish-what-you-started half of graceful shutdown.
+        let started = std::sync::atomic::AtomicUsize::new(0);
+        let mut results = futures::stream::iter(
+            candidates
+                .into_iter()
+                .enumerate()
+                .take_while(|_| {
+                    let go = !shutdown.load(std::sync::atomic::Ordering::SeqCst);
+                    if go {
+                        started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
-                    (account, result)
-                }
-            },
-        ))
+                    go
+                })
+                .map(|(i, (account, position))| {
+                    let oracle_response = oracle_response.clone();
+                    async move {
+                        let result = self
+                            .liquidate(account.clone(), position, oracle_response)
+                            .await;
+                        // Sequential mode paces positions 1s apart (skipped after
+                        // the last one, and once shutdown is requested — there
+                        // is nothing left to pace); concurrent mode drops the
+                        // pause — the operator raising the knob brings an RPC
+                        // endpoint sized for the load.
+                        if concurrency == 1
+                            && i < total - 1
+                            && !shutdown.load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                        (account, result)
+                    }
+                }),
+        )
         .buffer_unordered(concurrency);
 
         while let Some((account, result)) = results.next().await {
@@ -1731,6 +1757,15 @@ impl Liquidator {
                     failed += 1;
                 }
             }
+        }
+
+        let started = started.load(std::sync::atomic::Ordering::Relaxed);
+        if shutdown.load(std::sync::atomic::Ordering::SeqCst) && started < total {
+            tracing::info!(
+                started,
+                unstarted = total - started,
+                "Shutdown requested — remaining positions were not started"
+            );
         }
 
         tracing::info!(

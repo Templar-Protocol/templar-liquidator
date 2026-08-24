@@ -203,6 +203,13 @@ pub struct LiquidatorService {
     /// Set when SIGTERM/ctrl-C arrives: in-flight work finishes, nothing new
     /// starts, and the loop exits after draining notifications.
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Wake side of the shutdown signal: the watcher sends `true` after
+    /// setting the flag, so async waits (the event-loop select, pacing
+    /// sleeps) cancel immediately instead of noticing the flag late. The
+    /// flag is always stored before the send — a woken waiter re-reading
+    /// the flag sees `true`.
+    shutdown_wake_tx: tokio::sync::watch::Sender<bool>,
+    shutdown_wake: tokio::sync::watch::Receiver<bool>,
     /// Consecutive scan failure count per market (reset on success)
     scan_failure_counts: HashMap<AccountId, u32>,
     /// Operational counters served by the optional `/metrics` endpoint.
@@ -292,6 +299,7 @@ impl LiquidatorService {
             "Swap configuration loaded"
         );
 
+        let (shutdown_wake_tx, shutdown_wake) = tokio::sync::watch::channel(false);
         Self {
             config,
             client,
@@ -302,6 +310,8 @@ impl LiquidatorService {
             oracle_fetcher,
             collateral_price_map: HashMap::new(),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            shutdown_wake_tx,
+            shutdown_wake,
             scan_failure_counts: HashMap::new(),
             metrics: Arc::new(Metrics::default()),
         }
@@ -361,9 +371,9 @@ impl LiquidatorService {
     /// Spawns the task that turns SIGTERM/ctrl-C into graceful shutdown.
     ///
     /// The watcher sets the flag the moment the first signal arrives — so a
-    /// round already in flight stops starting new positions — and the
-    /// returned [`tokio::sync::Notify`]'s permit makes `run()`'s select exit
-    /// as soon as the current branch completes. Compose `stop`, Kubernetes,
+    /// round already in flight stops starting new positions — then sends on
+    /// the wake channel, which exits `run()`'s select as soon as the current
+    /// branch completes and cancels any pacing sleep mid-wait. Compose `stop`, Kubernetes,
     /// and Cloud Run all deliver SIGTERM and expect exactly this: finish,
     /// flush, exit 0. A second signal exits immediately (code 130) — it
     /// would otherwise be swallowed (installing the listeners replaced the
@@ -378,10 +388,9 @@ impl LiquidatorService {
     /// swallows any signal that arrives with no listener present,
     /// re-registering between the first and second waits would open a window
     /// where the operator's second signal simply vanishes.
-    fn spawn_shutdown_watcher(&self) -> Arc<tokio::sync::Notify> {
-        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    fn spawn_shutdown_watcher(&self) {
         let flag = Arc::clone(&self.shutdown);
-        let notify = Arc::clone(&shutdown_notify);
+        let wake = self.shutdown_wake_tx.clone();
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
@@ -401,7 +410,7 @@ impl LiquidatorService {
             if interrupt.is_none() && terminate.is_none() {
                 // No source can ever fire; the bot runs without graceful
                 // shutdown rather than dying over a handler problem.
-                return shutdown_notify;
+                return;
             }
             tokio::spawn(async move {
                 Self::next_signal(&mut interrupt, &mut terminate).await;
@@ -409,7 +418,7 @@ impl LiquidatorService {
                 tracing::info!(
                     "Shutdown signal received — finishing in-flight work, starting nothing new"
                 );
-                notify.notify_one();
+                let _ = wake.send(true);
                 // A second signal is the operator insisting: exit now.
                 Self::next_signal(&mut interrupt, &mut terminate).await;
                 tracing::warn!("Second shutdown signal — exiting immediately");
@@ -426,13 +435,36 @@ impl LiquidatorService {
             tracing::info!(
                 "Shutdown signal received — finishing in-flight work, starting nothing new"
             );
-            notify.notify_one();
+            let _ = wake.send(true);
             if tokio::signal::ctrl_c().await.is_ok() {
                 tracing::warn!("Second shutdown signal — exiting immediately");
                 std::process::exit(130);
             }
         });
-        shutdown_notify
+    }
+
+    /// Resolves once shutdown has been requested; never resolves otherwise
+    /// (including when the watcher was never spawned), so it is safe as the
+    /// cancelling side of a `select!`.
+    async fn await_shutdown(mut wake: tokio::sync::watch::Receiver<bool>) {
+        loop {
+            if *wake.borrow() {
+                return;
+            }
+            if wake.changed().await.is_err() {
+                // Sender gone: nothing can ever signal shutdown this way.
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    /// Sleeps for `duration`, returning early once shutdown is requested —
+    /// a pacing pause must never stand between a signal and the drain.
+    async fn interruptible_sleep(&self, duration: Duration) {
+        select! {
+            () = sleep(duration) => {}
+            () = Self::await_shutdown(self.shutdown_wake.clone()) => {}
+        }
     }
 
     /// Run the service event loop until a shutdown signal arrives, then
@@ -442,7 +474,7 @@ impl LiquidatorService {
         // ctrl-C mean graceful shutdown instead of the default immediate
         // kill, so a signal during the (potentially slow) initial refresh
         // already finishes cleanly.
-        let shutdown_notify = self.spawn_shutdown_watcher();
+        self.spawn_shutdown_watcher();
 
         // Optional operational HTTP surface. Loop mode only: a `run_once`
         // process exits before anything could scrape it. A bind failure is
@@ -510,7 +542,7 @@ impl LiquidatorService {
                 break;
             }
             select! {
-                () = shutdown_notify.notified() => {
+                () = Self::await_shutdown(self.shutdown_wake.clone()) => {
                     break;
                 }
                 _ = registry_interval.tick() => {
@@ -631,7 +663,7 @@ impl LiquidatorService {
 
         // Single-cycle runs must drain before returning: the tokio runtime
         // shutting down after `main` returns would otherwise cancel any
-        // Telegram POST still in flight, on both the success and error paths.
+        // notification send still in flight, on both success and error paths.
         self.config.notifier.drain(Duration::from_secs(10)).await;
 
         result
@@ -1325,11 +1357,7 @@ impl LiquidatorService {
                                 error = %e,
                                 "Rate limited — sleeping 60s before next market"
                             );
-                            // Pointless once shutdown is requested: the
-                            // loop-top check breaks before the next market.
-                            if !self.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
-                                sleep(Duration::from_secs(60)).await;
-                            }
+                            self.interruptible_sleep(Duration::from_secs(60)).await;
                         } else {
                             tracing::warn!(
                                 market = %market,
@@ -1356,16 +1384,15 @@ impl LiquidatorService {
                 }
 
                 // Add delay between markets to avoid rate limiting (except
-                // after the last market, and once shutdown is requested —
+                // after the last market; cancelled mid-wait by shutdown —
                 // there is no next market to pace).
-                if i < market_count - 1 && !self.shutdown.load(std::sync::atomic::Ordering::SeqCst)
-                {
+                if i < market_count - 1 {
                     let delay_seconds = 5;
                     tracing::debug!(
                         "Waiting {}s before next market to avoid rate limits",
                         delay_seconds
                     );
-                    sleep(Duration::from_secs(delay_seconds)).await;
+                    self.interruptible_sleep(Duration::from_secs(delay_seconds)).await;
                 }
             }
         }

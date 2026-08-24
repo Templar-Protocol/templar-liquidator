@@ -33,7 +33,7 @@ flowchart TD
     SwapImpl --> OneClick["swap/oneclick.rs<br/>1-Click API"]
     OneClick --> Retry["swap/retry.rs<br/>classify + retry"]
 
-    Executor --> Notifier["notifier.rs<br/>Telegram"]
+    Executor --> Notifier["notifier.rs<br/>NotificationChannel<br/>(Telegram shipped)"]
     Liquidator --> Notifier
     Service --> Notifier
 
@@ -49,7 +49,7 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`config.rs`** — CLI argument parsing (`Args`, via `clap`'s `env`-aware derive) and translation into `ServiceConfig`. Owns the mutual-exclusivity checks (partial vs. fixed-amount strategy, Telegram token/chat-id pairing) that panic at startup rather than producing a half-configured bot.
 
-**`service.rs`** — service lifecycle. `LiquidatorService::new` wires the gateway client, inventory manager, swap providers, and oracle fetcher from `ServiceConfig`. `run()` is the long-lived loop: registry refresh and liquidation rounds tick on independent `tokio::time::interval`s. `run_once()` performs exactly one refresh and one round, then explicitly drains the notifier before returning — otherwise the tokio runtime shutting down when `main` exits could cancel an in-flight Telegram POST. Loop mode shuts down gracefully on SIGTERM/ctrl-C: in-flight positions finish, no new ones start (a round in flight stops feeding positions to its worker pool), pending notifications drain, and the process exits 0 — the contract `docker compose stop`, Kubernetes, and systemd all assume when they send SIGTERM and wait a grace period before SIGKILL. A second signal force-exits immediately (code 130).
+**`service.rs`** — service lifecycle. `LiquidatorService::new` wires the gateway client, inventory manager, swap providers, and oracle fetcher from `ServiceConfig`. `run()` is the long-lived loop: registry refresh and liquidation rounds tick on independent `tokio::time::interval`s. `run_once()` performs exactly one refresh and one round, then explicitly drains the notifier before returning — otherwise the tokio runtime shutting down when `main` exits could cancel an in-flight notification send. Loop mode shuts down gracefully on SIGTERM/ctrl-C: in-flight positions finish, no new ones start (a round in flight stops feeding positions to its worker pool), pending notifications drain, and the process exits 0 — the contract `docker compose stop`, Kubernetes, and systemd all assume when they send SIGTERM and wait a grace period before SIGKILL. A second signal force-exits immediately (code 130).
 
 **`scanner.rs`** — `MarketScanner`: fetches a market's borrow positions (paginated for large markets) and evaluates liquidation status per position against a supplied oracle response. (Contract-version gating happens once, during the service's registry refresh — not here.)
 

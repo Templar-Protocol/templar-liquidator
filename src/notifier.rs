@@ -148,8 +148,11 @@ type DedupKey = (String, String, crate::NotificationKind);
 /// strips. Failures must be logged and swallowed, never propagated or
 /// panicked: notifications are advisory and must not disturb liquidation
 /// flow. Two consequences of that rule are load-bearing: a panicking `send`
-/// aborts the whole process (release builds set `panic = "abort"`, and sends
-/// run concurrently with liquidation work), and the shell imposes no
+/// kills at minimum its own task and message, and under the release
+/// profile's `panic = "abort"` — what the shipped Docker image runs —
+/// aborts the whole process, concurrently with liquidation work (the
+/// debug-profile convenience scripts merely unwind, so a panic that looks
+/// survivable in local runs is fatal in deployment). The shell imposes no
 /// deadline — a `send` that hangs holds its in-flight slot forever, and
 /// after `max_inflight` such hangs every later notification is silently
 /// dropped. Bound your own I/O the way [`TelegramChannel`] does (a 10s

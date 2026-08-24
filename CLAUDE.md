@@ -133,7 +133,7 @@ Bump every `rev =` together in one change, never one alone.
 - **`--run-mode once` must drain notifications before returning.**
   `run_once()` explicitly drains the notifier after the liquidation cycle
   (success or error path) because the tokio runtime shutting down when `main`
-  returns would otherwise cancel an in-flight Telegram POST. Loop mode has
+  returns would otherwise cancel an in-flight notification send. Loop mode has
   the same obligation on its shutdown path: `run()` drains after its loop
   exits, and SIGTERM/ctrl-C must keep meaning *graceful* — finish in-flight
   positions, start nothing new, drain, exit 0 (a liquidation is never

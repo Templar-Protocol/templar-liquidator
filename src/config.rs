@@ -1182,7 +1182,8 @@ mod tests {
                 "{args:?}"
             );
         }
-        assert!(try_parse_with(&["--position-concurrency", "8"]).is_ok());
+        let args = parse_with(&["--position-concurrency", "8"]);
+        assert_eq!(args.build_config().position_concurrency.get(), 8);
     }
 
     /// A concurrent round can fire up to two notifications per in-flight

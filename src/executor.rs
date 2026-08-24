@@ -52,7 +52,9 @@ pub struct MarketDecimals {
 #[derive(Debug)]
 pub enum Settlement {
     /// Live execution: the caller reserved this amount before its oracle
-    /// push; the executor settles the token on every exit path.
+    /// push; the executor settles the token on every exit path. A dry-run
+    /// executor refuses this variant — the executor's own mode remains the
+    /// authority on whether money moves.
     Live(inventory::Reservation),
     /// Simulation: no inventory was touched and nothing settles.
     DryRun,
@@ -208,6 +210,17 @@ impl LiquidationExecutor {
         let Settlement::Live(reservation) = settlement else {
             unreachable!("dry-run returned above");
         };
+        // The Settlement variant carries the token, but it must not become
+        // the sole authority on whether money moves: DRY_RUN=true is the
+        // crate's safety invariant, so a live settlement handed to a
+        // dry-run executor fails closed instead of submitting.
+        if self.dry_run {
+            self.inventory.write().await.release(reservation);
+            return Err(LiquidatorError::StrategyError(
+                "live settlement passed to a dry-run executor; reservation released, liquidation aborted"
+                    .to_string(),
+            ));
+        }
         // Fail closed on a mismatched token: settling a different amount
         // than the transaction spends would silently mis-account inventory
         // until the next refresh.

@@ -86,7 +86,7 @@ docker compose down
 docker compose up -d
 ```
 
-`docker compose stop`/`down` deliver SIGTERM and wait out a grace period before SIGKILL: the bot treats SIGTERM as graceful shutdown — it finishes in-flight positions, starts nothing new, flushes pending Telegram notifications, and exits 0. Both compose files set `stop_grace_period: 60s` (Docker's 10s default would routinely SIGKILL mid-flush — the notification drain alone budgets 10s); if your positions run longer, raise it there or per-stop with `docker compose stop -t 120`. A second SIGTERM/ctrl-C skips the graceful path and exits immediately.
+`docker compose stop`/`down` deliver SIGTERM and wait out a grace period before SIGKILL: the bot treats SIGTERM as graceful shutdown — it finishes in-flight positions, starts nothing new, flushes pending notifications (Telegram in the shipped configuration), and exits 0. Both compose files set `stop_grace_period: 60s` (Docker's 10s default would routinely SIGKILL mid-flush — the notification drain alone budgets 10s); if your positions run longer, raise it there or per-stop with `docker compose stop -t 120`. A second SIGTERM/ctrl-C skips the graceful path and exits immediately.
 
 ## `scripts/deploy.sh` reference
 

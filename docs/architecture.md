@@ -75,7 +75,7 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`swap/retry.rs`** — shared error classification (retryable network/server/rate-limit errors vs. permanent validation errors) and the generic retry wrapper swaps run through.
 
-**`notifier.rs`** — Telegram notifications; the notification extension seam (no trait boundary yet — a fork wanting another channel extends or replaces this type directly). Also owns consecutive-scan-failure threshold tracking and per-(market, borrower, error-class) failure-notification dedup/cooldown.
+**`notifier.rs`** — notifications; the notification extension seam: the `NotificationChannel` trait (`send(&self, text)`; Telegram is the shipped implementation) behind a shell that owns failure dedup, the in-flight semaphore, and `drain()` — a fork's channel implements the trait and plugs into `Notifier::with_channel`.
 
 **`metrics.rs`** — dependency-free Prometheus text-format counters and one gauge, process-lifetime, exposed via `http.rs`.
 

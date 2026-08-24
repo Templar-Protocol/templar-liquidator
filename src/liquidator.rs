@@ -46,10 +46,11 @@
 //!   of a position to repay each round. Reach for this when the built-in
 //!   percentage-of-inventory and fixed-USD-amount strategies don't match the sizing
 //!   policy you want (e.g. per-market caps, sizing off inventory pressure).
-//! - [`crate::notifier::Notifier`] — currently sends Telegram messages only, with
-//!   no trait boundary in front of it. Reach for this when alerts need to go
-//!   somewhere Telegram can't (another chat platform, a paging system, a metrics
-//!   sink), which today means extending or replacing this type directly.
+//! - [`crate::notifier::NotificationChannel`] — the transport notifications go
+//!   out on. Reach for this when alerts need to go somewhere Telegram can't
+//!   (another chat platform, a paging system, a metrics sink): implement the
+//!   trait and hand it to [`crate::notifier::Notifier::with_channel`]; dedup,
+//!   rate limiting, and drain-on-shutdown stay in the shared shell.
 //!
 //! # Run modes
 //!

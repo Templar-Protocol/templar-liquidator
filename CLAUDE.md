@@ -79,9 +79,9 @@ One line per file in `src/`:
   quote → deposit → poll.
 - `swap/retry.rs` — swap error classification (retryable vs. permanent) and
   the generic retry wrapper swaps run through.
-- `notifier.rs` — Telegram notifications; the notification extension seam
-  (no trait boundary yet — a fork adding another channel extends or replaces
-  this type directly).
+- `notifier.rs` — notifications; the notification extension seam: the
+  `NotificationChannel` trait (Telegram is the shipped impl) behind a shell
+  that owns dedup, the in-flight semaphore, and `drain()`.
 - `metrics.rs` — dependency-free Prometheus text-format counters/gauges,
   process-lifetime, exposed via `http.rs`.
 - `http.rs` — optional `GET /healthz` (readiness, not liveness) and

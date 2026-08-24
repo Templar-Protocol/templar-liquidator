@@ -209,7 +209,7 @@ jobs:
           echo "scope: ${reason}"
           echo "range ${from}..${HEAD_SHA}: ${files} files, ${lines} changed lines -> ${depth}"
 
-      - uses: anthropics/claude-code-action@459ad358ae43fea66bfefd0a1f8d840b4b9791fb # v1.0.194
+      - uses: anthropics/claude-code-action@dcb57747bfceeaa1fa72638cae52295d1d853d4a # v1.0.199
         # Long-running work blocks the main session instead of being moved to
         # the background. A backgrounded subagent reports by waking its parent
         # on a later turn, and a non-interactive run has no later turn.

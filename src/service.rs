@@ -1069,6 +1069,19 @@ impl LiquidatorService {
         };
 
         for (collateral_asset, balance) in &holdings {
+            // One swap can legitimately take minutes (deposit + poll to
+            // settle, with retries), so a batch entered just before a
+            // signal could outlive the orchestrator's kill grace period.
+            // Skipping costs nothing: the collateral stays held and the
+            // next start's batch swap picks it up.
+            if self.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                tracing::info!(
+                    swapped,
+                    skipped,
+                    "Shutdown requested — skipping remaining batch swaps"
+                );
+                break;
+            }
             let asset_key = collateral_asset.to_string();
 
             // Lookup USD price

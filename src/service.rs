@@ -332,61 +332,105 @@ impl LiquidatorService {
         Some(SwapProviderImpl::oneclick(oneclick))
     }
 
-    /// Resolves when the process receives ctrl-C or (on unix) SIGTERM.
-    /// Registration failures are logged and that source is disabled — the
-    /// bot keeps running rather than dying over a signal-handler problem.
-    async fn shutdown_signal() {
-        let ctrl_c = async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                tracing::warn!(%error, "Cannot listen for ctrl-C; graceful shutdown via ctrl-C unavailable");
-                std::future::pending::<()>().await;
+    /// Waits for one signal on `sig`; parks forever if this source is
+    /// unavailable (registration failed or the stream closed) so a
+    /// `select!` falls through to the other source.
+    #[cfg(unix)]
+    async fn recv_signal(sig: Option<&mut tokio::signal::unix::Signal>) {
+        if let Some(sig) = sig {
+            if sig.recv().await.is_some() {
+                return;
             }
-        };
-        #[cfg(unix)]
-        let terminate = async {
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(mut sig) => {
-                    sig.recv().await;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Cannot listen for SIGTERM; graceful shutdown via SIGTERM unavailable");
-                    std::future::pending::<()>().await;
-                }
-            }
-        };
-        #[cfg(not(unix))]
-        let terminate = std::future::pending::<()>();
+        }
+        std::future::pending::<()>().await;
+    }
+
+    /// Waits for the next SIGINT or SIGTERM on the already-registered
+    /// listeners.
+    #[cfg(unix)]
+    async fn next_signal(
+        interrupt: &mut Option<tokio::signal::unix::Signal>,
+        terminate: &mut Option<tokio::signal::unix::Signal>,
+    ) {
         tokio::select! {
-            () = ctrl_c => {}
-            () = terminate => {}
+            () = Self::recv_signal(interrupt.as_mut()) => {}
+            () = Self::recv_signal(terminate.as_mut()) => {}
         }
     }
 
     /// Spawns the task that turns SIGTERM/ctrl-C into graceful shutdown.
     ///
-    /// The watcher sets the flag the moment the signal arrives — so a round
-    /// already in flight stops starting new positions — and the returned
-    /// [`tokio::sync::Notify`]'s permit makes `run()`'s select exit as soon
-    /// as the current branch completes. Compose `stop`, Kubernetes, and
-    /// Cloud Run all deliver SIGTERM and expect exactly this: finish,
+    /// The watcher sets the flag the moment the first signal arrives — so a
+    /// round already in flight stops starting new positions — and the
+    /// returned [`tokio::sync::Notify`]'s permit makes `run()`'s select exit
+    /// as soon as the current branch completes. Compose `stop`, Kubernetes,
+    /// and Cloud Run all deliver SIGTERM and expect exactly this: finish,
     /// flush, exit 0. A second signal exits immediately (code 130) — it
-    /// would otherwise be swallowed (installing the tokio handlers replaced
-    /// the default die-on-signal behavior), leaving ctrl-C-ctrl-C stranded
+    /// would otherwise be swallowed (installing the listeners replaced the
+    /// default die-on-signal behavior), leaving ctrl-C-ctrl-C stranded
     /// behind a hung drain.
+    ///
+    /// On unix both listeners are registered synchronously, before this
+    /// returns, and held for the watcher's whole life. Registration is what
+    /// replaces the default disposition, so a signal during startup already
+    /// shuts down cleanly instead of killing the process mid-refresh; and
+    /// because dropping a listener does not restore that default while tokio
+    /// swallows any signal that arrives with no listener present,
+    /// re-registering between the first and second waits would open a window
+    /// where the operator's second signal simply vanishes.
     fn spawn_shutdown_watcher(&self) -> Arc<tokio::sync::Notify> {
         let shutdown_notify = Arc::new(tokio::sync::Notify::new());
         let flag = Arc::clone(&self.shutdown);
         let notify = Arc::clone(&shutdown_notify);
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let register = |kind: SignalKind, name: &'static str| match signal(kind) {
+                Ok(sig) => Some(sig),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        signal = name,
+                        "Cannot listen for this signal; graceful shutdown via it unavailable"
+                    );
+                    None
+                }
+            };
+            let mut interrupt = register(SignalKind::interrupt(), "SIGINT");
+            let mut terminate = register(SignalKind::terminate(), "SIGTERM");
+            if interrupt.is_none() && terminate.is_none() {
+                // No source can ever fire; the bot runs without graceful
+                // shutdown rather than dying over a handler problem.
+                return shutdown_notify;
+            }
+            tokio::spawn(async move {
+                Self::next_signal(&mut interrupt, &mut terminate).await;
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                tracing::info!(
+                    "Shutdown signal received — finishing in-flight work, starting nothing new"
+                );
+                notify.notify_one();
+                // A second signal is the operator insisting: exit now.
+                Self::next_signal(&mut interrupt, &mut terminate).await;
+                tracing::warn!("Second shutdown signal — exiting immediately");
+                std::process::exit(130);
+            });
+        }
+        #[cfg(not(unix))]
         tokio::spawn(async move {
-            Self::shutdown_signal().await;
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                tracing::warn!(%error, "Cannot listen for ctrl-C; graceful shutdown unavailable");
+                return;
+            }
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
             tracing::info!(
                 "Shutdown signal received — finishing in-flight work, starting nothing new"
             );
             notify.notify_one();
-            Self::shutdown_signal().await;
-            tracing::warn!("Second shutdown signal — exiting immediately");
-            std::process::exit(130);
+            if tokio::signal::ctrl_c().await.is_ok() {
+                tracing::warn!("Second shutdown signal — exiting immediately");
+                std::process::exit(130);
+            }
         });
         shutdown_notify
     }
@@ -394,6 +438,12 @@ impl LiquidatorService {
     /// Run the service event loop until a shutdown signal arrives, then
     /// finish in-flight work, drain notifications, and return (exit 0).
     pub async fn run(mut self) {
+        // First thing, before any startup await: from here on SIGTERM and
+        // ctrl-C mean graceful shutdown instead of the default immediate
+        // kill, so a signal during the (potentially slow) initial refresh
+        // already finishes cleanly.
+        let shutdown_notify = self.spawn_shutdown_watcher();
+
         // Optional operational HTTP surface. Loop mode only: a `run_once`
         // process exits before anything could scrape it. A bind failure is
         // logged loudly but does not abort the bot — trading continues
@@ -449,8 +499,6 @@ impl LiquidatorService {
 
         // Reset the registry interval to start timing from now
         registry_interval.reset();
-
-        let shutdown_notify = self.spawn_shutdown_watcher();
 
         loop {
             // Checked at the top as well as in the select: `select!` picks
@@ -1207,6 +1255,18 @@ impl LiquidatorService {
 
         async {
             for (i, market) in market_ids.iter().enumerate() {
+                // The graceful-shutdown deadline is the orchestrator's
+                // SIGKILL grace period: post-signal markets must not each
+                // pay an oracle fetch and a paginated scan (plus the
+                // pacing sleeps below) just to start zero positions.
+                if self.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                    tracing::info!(
+                        markets_scanned = i,
+                        markets_skipped = market_count - i,
+                        "Shutdown requested — skipping remaining markets"
+                    );
+                    break;
+                }
                 let Some(liquidator) = self.markets.get(market) else {
                     continue;
                 };
@@ -1252,7 +1312,11 @@ impl LiquidatorService {
                                 error = %e,
                                 "Rate limited — sleeping 60s before next market"
                             );
-                            sleep(Duration::from_secs(60)).await;
+                            // Pointless once shutdown is requested: the
+                            // loop-top check breaks before the next market.
+                            if !self.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                                sleep(Duration::from_secs(60)).await;
+                            }
                         } else {
                             tracing::warn!(
                                 market = %market,
@@ -1278,8 +1342,11 @@ impl LiquidatorService {
                     }
                 }
 
-                // Add delay between markets to avoid rate limiting (except after last market)
-                if i < market_count - 1 {
+                // Add delay between markets to avoid rate limiting (except
+                // after the last market, and once shutdown is requested —
+                // there is no next market to pace).
+                if i < market_count - 1 && !self.shutdown.load(std::sync::atomic::Ordering::SeqCst)
+                {
                     let delay_seconds = 5;
                     tracing::debug!(
                         "Waiting {}s before next market to avoid rate limits",

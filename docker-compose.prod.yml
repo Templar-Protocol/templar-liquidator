@@ -2,6 +2,12 @@ services:
   liquidator:
     image: templar-liquidator:latest
     container_name: templar-liquidator
+
+    # Room for graceful shutdown: SIGTERM lets in-flight liquidations finish
+    # and queued notifications drain (the drain alone budgets 10s) before the
+    # process exits 0. Docker's 10s default grace period would routinely
+    # SIGKILL mid-flush.
+    stop_grace_period: 60s
     restart: always
 
     # Optional /healthz + /metrics port (see src/http.rs). Inert unless the

@@ -137,7 +137,10 @@ Bump every `rev =` together in one change, never one alone.
   the same obligation on its shutdown path: `run()` drains after its loop
   exits, and SIGTERM/ctrl-C must keep meaning *graceful* — finish in-flight
   positions, start nothing new, drain, exit 0 (a liquidation is never
-  abandoned between repay and settle).
+  abandoned between repay and settle). The one sanctioned exception: a
+  **second** signal force-exits immediately with code 130 — explicit
+  operator insistence outranks the drain, since without the escape hatch a
+  hung drain would leave no way out short of SIGKILL.
 - **`/healthz` must only report healthy when at least one market scanned
   cleanly, recently.** It's a readiness check, not a liveness check — see
   `http.rs`'s module doc for why wiring it to a liveness probe would be

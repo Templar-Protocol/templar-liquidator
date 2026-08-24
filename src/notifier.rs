@@ -1,10 +1,14 @@
 //! Notification system for the liquidator bot.
 //!
-//! [`Notifier`] is the notification extension seam: it currently sends
-//! HTML-formatted Telegram messages and nothing else, with no trait in front of
-//! it. A fork that needs a different channel (another chat platform, a paging
-//! system, a metrics sink) extends or replaces this type directly — see the
-//! crate-level docs for how this fits alongside the other two extension seams.
+//! [`NotificationChannel`] is the notification extension seam: one method,
+//! delivering one already-formatted message ([`TelegramChannel`] is the
+//! shipped implementation). [`Notifier`] is the channel-independent shell
+//! around it — failure dedup, the in-flight semaphore, and
+//! [`drain`](Notifier::drain). A fork that needs a different channel
+//! (another chat platform, a paging system, a metrics sink) implements the
+//! trait and constructs the notifier with [`Notifier::with_channel`] — see
+//! the crate-level docs for how this fits alongside the other two extension
+//! seams.
 //!
 //! # What triggers each notification
 //!
@@ -143,7 +147,13 @@ type DedupKey = (String, String, crate::NotificationKind);
 /// (`<b>`, `<code>`, entity-escaped values) — a non-HTML channel converts or
 /// strips. Failures must be logged and swallowed, never propagated or
 /// panicked: notifications are advisory and must not disturb liquidation
-/// flow.
+/// flow. Two consequences of that rule are load-bearing: a panicking `send`
+/// aborts the whole process (release builds set `panic = "abort"`, and sends
+/// run concurrently with liquidation work), and the shell imposes no
+/// deadline — a `send` that hangs holds its in-flight slot forever, and
+/// after `max_inflight` such hangs every later notification is silently
+/// dropped. Bound your own I/O the way [`TelegramChannel`] does (a 10s
+/// request timeout).
 #[async_trait::async_trait]
 pub trait NotificationChannel: Send + Sync + std::fmt::Debug {
     /// Delivers one message.
@@ -435,13 +445,13 @@ impl Notifier {
 
     /// Waits for all in-flight notifications to finish sending, up to `timeout`.
     ///
-    /// A no-op when Telegram is unconfigured — nothing was ever spawned. Works
-    /// by acquiring every semaphore permit: that only succeeds once every
-    /// `spawn_send` task has released its permit, i.e. once the background
-    /// sends have all completed. Single-cycle runs must call this before
-    /// returning, since dropping the runtime otherwise cancels any Telegram
-    /// POST still in flight; long-running modes never need this because the
-    /// process keeps running past any individual cycle.
+    /// A no-op when no channel is configured — nothing was ever spawned.
+    /// Works by acquiring every semaphore permit: that only succeeds once
+    /// every `spawn_send` task has released its permit, i.e. once the
+    /// background sends have all completed. Single-cycle runs must call this
+    /// before returning, since dropping the runtime otherwise cancels any
+    /// send still in flight; loop mode has the same obligation on its
+    /// graceful-shutdown path and drains after its event loop exits.
     pub async fn drain(&self, timeout: Duration) {
         if self.channel.is_none() {
             return;

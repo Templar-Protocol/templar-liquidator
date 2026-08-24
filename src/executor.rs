@@ -706,7 +706,10 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_err(), "must refuse to submit under dry-run");
+        assert!(
+            matches!(&result, Err(LiquidatorError::StrategyError(m)) if m.contains("dry-run executor")),
+            "must refuse via the guard, before any transaction: {result:?}"
+        );
         assert_eq!(
             inventory.read().await.get_reserved_balance(&asset).0,
             0,
@@ -776,8 +779,8 @@ mod tests {
             .await;
 
         assert!(
-            result.is_err(),
-            "wrong-asset token must abort the liquidation"
+            matches!(&result, Err(LiquidatorError::StrategyError(m)) if m.contains("does not cover")),
+            "must abort via the covers() guard, before any transaction: {result:?}"
         );
         assert_eq!(
             inventory.read().await.get_reserved_balance(&asset_b).0,

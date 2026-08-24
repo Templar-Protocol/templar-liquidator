@@ -116,7 +116,13 @@ pub struct InventoryManager {
     min_refresh_interval: Duration,
     /// Last full refresh timestamp
     last_full_refresh: Option<Instant>,
+    /// This manager's identity, stamped into every [`Reservation`] it
+    /// issues so a token cannot settle in a different manager.
+    id: u64,
 }
+
+/// Source of [`InventoryManager::id`] values — process-unique, never reused.
+static NEXT_MANAGER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl InventoryManager {
     /// Creates a new inventory manager
@@ -133,6 +139,7 @@ impl InventoryManager {
             collateral_inventory: HashMap::new(),
             min_refresh_interval: Duration::from_secs(30),
             last_full_refresh: None,
+            id: NEXT_MANAGER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -406,6 +413,7 @@ impl InventoryManager {
         Ok(Reservation {
             asset: asset.clone(),
             amount,
+            manager_id: self.id,
         })
     }
 
@@ -413,7 +421,9 @@ impl InventoryManager {
     /// available again. Takes the token by value — a reservation settles
     /// exactly once.
     pub fn release(&mut self, reservation: Reservation) {
-        let Reservation { asset, amount } = reservation;
+        let Some((asset, amount)) = self.accept_token(reservation, "release") else {
+            return;
+        };
         if let Some(entry) = self.inventory.get_mut(&asset) {
             entry.release(amount);
         }
@@ -425,10 +435,35 @@ impl InventoryManager {
     /// would count spent tokens as available until the next RPC refresh.
     /// Takes the token by value — a reservation settles exactly once.
     pub fn consume(&mut self, reservation: Reservation) {
-        let Reservation { asset, amount } = reservation;
+        let Some((asset, amount)) = self.accept_token(reservation, "consume") else {
+            return;
+        };
         if let Some(entry) = self.inventory.get_mut(&asset) {
             entry.consume(amount);
         }
+    }
+
+    /// Accepts a token only if this manager issued it; a foreign token is
+    /// refused loudly and untouched — settling it here would corrupt this
+    /// manager's aggregate accounting while the issuing manager kept its
+    /// hold. (One manager exists in production; a second can only come from
+    /// a fork constructing its own.)
+    fn accept_token(
+        &self,
+        reservation: Reservation,
+        operation: &str,
+    ) -> Option<(FungibleAsset<BorrowAsset>, BorrowAssetAmount)> {
+        if reservation.manager_id != self.id {
+            tracing::error!(
+                operation,
+                asset = %reservation.asset,
+                amount = %u128::from(reservation.amount),
+                "Reservation was issued by a different InventoryManager; refusing to settle it here (the issuing manager keeps its hold)"
+            );
+            return None;
+        }
+        let Reservation { asset, amount, .. } = reservation;
+        Some((asset, amount))
     }
 
     /// Gets all tracked assets
@@ -609,6 +644,8 @@ pub struct InventorySnapshotEntry {
 pub struct Reservation {
     asset: FungibleAsset<BorrowAsset>,
     amount: BorrowAssetAmount,
+    /// The issuing manager's identity — settlement is refused anywhere else.
+    manager_id: u64,
 }
 
 impl Reservation {
@@ -828,6 +865,39 @@ mod tests {
             .consume(BorrowAssetAmount::from(500));
         assert_eq!(inventory.get_total_balance(&asset).0, 0);
         assert_eq!(inventory.get_reserved_balance(&asset).0, 0);
+    }
+
+    /// A token settles only in the manager that issued it: reserving in A
+    /// and settling in B must leave B untouched (and A still holding) —
+    /// otherwise B's aggregate accounting absorbs a hold it never issued.
+    #[test]
+    fn reservation_settles_only_in_its_issuing_manager() {
+        let client = create_test_client();
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let asset = create_test_asset();
+
+        let mut manager_a = InventoryManager::new(client.clone(), account_id.clone());
+        manager_a.seed_asset_for_tests(&asset, BorrowAssetAmount::from(1000));
+        let mut manager_b = InventoryManager::new(client, account_id);
+        manager_b.seed_asset_for_tests(&asset, BorrowAssetAmount::from(1000));
+
+        let token_a = manager_a
+            .reserve(&asset, BorrowAssetAmount::from(300))
+            .unwrap();
+        // Give B its own live reservation so a foreign settle would visibly
+        // corrupt it.
+        let token_b = manager_b
+            .reserve(&asset, BorrowAssetAmount::from(300))
+            .unwrap();
+
+        // Foreign release: B must refuse — its own reservation stays.
+        manager_b.release(token_a);
+        assert_eq!(manager_b.get_reserved_balance(&asset).0, 300);
+        assert_eq!(manager_a.get_reserved_balance(&asset).0, 300);
+
+        // B's own token still settles normally.
+        manager_b.release(token_b);
+        assert_eq!(manager_b.get_reserved_balance(&asset).0, 0);
     }
 
     #[test]

@@ -116,7 +116,13 @@ pub struct InventoryManager {
     min_refresh_interval: Duration,
     /// Last full refresh timestamp
     last_full_refresh: Option<Instant>,
+    /// This manager's identity, stamped into every [`Reservation`] it
+    /// issues so a token cannot settle in a different manager.
+    id: u64,
 }
+
+/// Source of [`InventoryManager::id`] values — process-unique, never reused.
+static NEXT_MANAGER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl InventoryManager {
     /// Creates a new inventory manager
@@ -133,6 +139,7 @@ impl InventoryManager {
             collateral_inventory: HashMap::new(),
             min_refresh_interval: Duration::from_secs(30),
             last_full_refresh: None,
+            id: NEXT_MANAGER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -384,12 +391,9 @@ impl InventoryManager {
         ))
     }
 
-    /// Reserves balance for a liquidation
-    ///
-    /// # Arguments
-    ///
-    /// * `asset` - Asset to reserve
-    /// * `amount` - Amount to reserve
+    /// Reserves balance for a liquidation, returning the [`Reservation`]
+    /// token that is the only way to settle it — see the type's docs for
+    /// the contract this enforces.
     ///
     /// # Errors
     ///
@@ -398,7 +402,7 @@ impl InventoryManager {
         &mut self,
         asset: &FungibleAsset<BorrowAsset>,
         amount: BorrowAssetAmount,
-    ) -> InventoryResult<()> {
+    ) -> InventoryResult<Reservation> {
         let entry = self
             .inventory
             .get_mut(asset)
@@ -406,17 +410,21 @@ impl InventoryManager {
 
         entry.reserve(amount)?;
 
-        Ok(())
+        Ok(Reservation {
+            asset: asset.clone(),
+            amount,
+            manager_id: self.id,
+        })
     }
 
-    /// Releases reserved balance
-    ///
-    /// # Arguments
-    ///
-    /// * `asset` - Asset to release
-    /// * `amount` - Amount to release
-    pub fn release(&mut self, asset: &FungibleAsset<BorrowAsset>, amount: BorrowAssetAmount) {
-        if let Some(entry) = self.inventory.get_mut(asset) {
+    /// Releases a reservation: the tokens never left the account and are
+    /// available again. Takes the token by value — a reservation settles
+    /// exactly once.
+    pub fn release(&mut self, reservation: Reservation) {
+        let Some((asset, amount)) = self.accept_token(reservation, "release") else {
+            return;
+        };
+        if let Some(entry) = self.inventory.get_mut(&asset) {
             entry.release(amount);
         }
     }
@@ -425,10 +433,46 @@ impl InventoryManager {
     /// tracked balance and clears the reservation in one step. Use this — not
     /// [`release`](Self::release) — after a liquidation lands; releasing alone
     /// would count spent tokens as available until the next RPC refresh.
-    pub fn consume(&mut self, asset: &FungibleAsset<BorrowAsset>, amount: BorrowAssetAmount) {
-        if let Some(entry) = self.inventory.get_mut(asset) {
+    /// Takes the token by value — a reservation settles exactly once.
+    pub fn consume(&mut self, reservation: Reservation) {
+        let Some((asset, amount)) = self.accept_token(reservation, "consume") else {
+            return;
+        };
+        if let Some(entry) = self.inventory.get_mut(&asset) {
             entry.consume(amount);
         }
+    }
+
+    /// True when this manager issued `reservation` — the executor's
+    /// pre-submission check, so a foreign token aborts before funds move
+    /// rather than after, when the success path's `consume` would refuse it
+    /// and leave the spent amount counted available.
+    #[must_use]
+    pub fn issued(&self, reservation: &Reservation) -> bool {
+        reservation.manager_id == self.id
+    }
+
+    /// Accepts a token only if this manager issued it; a foreign token is
+    /// refused loudly and untouched — settling it here would corrupt this
+    /// manager's aggregate accounting while the issuing manager kept its
+    /// hold. (One manager exists in production; a second can only come from
+    /// a fork constructing its own.)
+    fn accept_token(
+        &self,
+        reservation: Reservation,
+        operation: &str,
+    ) -> Option<(FungibleAsset<BorrowAsset>, BorrowAssetAmount)> {
+        if reservation.manager_id != self.id {
+            tracing::error!(
+                operation,
+                asset = %reservation.asset,
+                amount = %u128::from(reservation.amount),
+                "Reservation was issued by a different InventoryManager; refusing to settle it here (the issuing manager keeps its hold)"
+            );
+            return None;
+        }
+        let Reservation { asset, amount, .. } = reservation;
+        Some((asset, amount))
     }
 
     /// Gets all tracked assets
@@ -593,6 +637,65 @@ pub struct InventorySnapshotEntry {
     pub last_updated_ago_ms: u64,
 }
 
+/// Proof of a live reservation: created only by
+/// [`InventoryManager::reserve`], settled exactly once by
+/// [`consume`](InventoryManager::consume) or
+/// [`release`](InventoryManager::release), which take it **by value** — so
+/// double-settling, or settling amounts that were never reserved, is a
+/// compile error rather than a saturating no-op. Dropping a token without
+/// settling permanently holds the reserved amount until restart (visible in
+/// the inventory snapshot as persistent `reserved`); the `must_use` warning
+/// catches only a wholly discarded `reserve()` result — a token bound and
+/// then leaked past an early return is on the caller, so settle on every
+/// path.
+#[must_use = "an unsettled reservation holds inventory until the process restarts; consume or release it"]
+#[derive(Debug)]
+pub struct Reservation {
+    asset: FungibleAsset<BorrowAsset>,
+    amount: BorrowAssetAmount,
+    /// The issuing manager's identity — settlement is refused anywhere else.
+    manager_id: u64,
+}
+
+impl Reservation {
+    /// The reserved amount, for logging and transaction construction.
+    #[must_use]
+    pub fn amount(&self) -> BorrowAssetAmount {
+        self.amount
+    }
+
+    /// True when this token covers exactly `asset` for exactly `amount` —
+    /// the executor's pre-submission identity check. Fields stay private,
+    /// so this is the one way to interrogate a token: a same-sized
+    /// reservation of a *different* asset must not pass, or the transaction
+    /// would spend one asset while settlement debited another.
+    #[must_use]
+    pub fn covers(&self, asset: &FungibleAsset<BorrowAsset>, amount: BorrowAssetAmount) -> bool {
+        self.asset == *asset && self.amount == amount
+    }
+}
+
+#[cfg(test)]
+impl InventoryManager {
+    /// Test-only seeding: registers `asset` with a starting balance so
+    /// cross-module tests can reserve against it. Compiled out of
+    /// production builds.
+    pub(crate) fn seed_asset_for_tests(
+        &mut self,
+        asset: &FungibleAsset<BorrowAsset>,
+        balance: BorrowAssetAmount,
+    ) {
+        self.inventory.insert(
+            asset.clone(),
+            InventoryEntry {
+                balance,
+                reserved: BorrowAssetAmount::from(0),
+                last_updated: Instant::now(),
+            },
+        );
+    }
+}
+
 /// Shared inventory manager for concurrent access
 pub type SharedInventory = Arc<RwLock<InventoryManager>>;
 
@@ -685,17 +788,32 @@ mod tests {
         // Check available balance
         assert_eq!(inventory.get_available_balance(&asset).0, 1000);
 
-        // Reserve 300
-        inventory
+        // Reserve 300 — the returned token is the only settle handle.
+        let first = inventory
             .reserve(&asset, BorrowAssetAmount::from(300))
             .unwrap();
+        assert_eq!(u128::from(first.amount()), 300);
+        // `covers` is the executor's pre-submission identity check: both the
+        // asset and the amount must match, since the fields are private.
+        assert!(first.covers(&asset, BorrowAssetAmount::from(300)));
+        assert!(!first.covers(&asset, BorrowAssetAmount::from(299)));
+        let other: FungibleAsset<BorrowAsset> =
+            FungibleAsset::from_str("nep141:usdt.near").unwrap();
+        assert!(!first.covers(&other, BorrowAssetAmount::from(300)));
         assert_eq!(inventory.get_available_balance(&asset).0, 700);
         assert_eq!(inventory.get_reserved_balance(&asset).0, 300);
 
-        // Release 100
-        inventory.release(&asset, BorrowAssetAmount::from(100));
-        assert_eq!(inventory.get_available_balance(&asset).0, 800);
-        assert_eq!(inventory.get_reserved_balance(&asset).0, 200);
+        // A second reservation coexists; releasing it restores exactly its
+        // own amount, keyed by the token, not by caller-supplied numbers.
+        let second = inventory
+            .reserve(&asset, BorrowAssetAmount::from(100))
+            .unwrap();
+        assert_eq!(inventory.get_available_balance(&asset).0, 600);
+        inventory.release(second);
+        assert_eq!(inventory.get_available_balance(&asset).0, 700);
+        assert_eq!(inventory.get_reserved_balance(&asset).0, 300);
+        inventory.release(first);
+        assert_eq!(inventory.get_available_balance(&asset).0, 1000);
     }
 
     /// `consume` must debit the balance *and* clear the reservation together —
@@ -717,10 +835,10 @@ mod tests {
             },
         );
 
-        inventory
+        let reservation = inventory
             .reserve(&asset, BorrowAssetAmount::from(300))
             .unwrap();
-        inventory.consume(&asset, BorrowAssetAmount::from(300));
+        inventory.consume(reservation);
 
         assert_eq!(inventory.get_total_balance(&asset).0, 700);
         assert_eq!(inventory.get_reserved_balance(&asset).0, 0);
@@ -746,9 +864,49 @@ mod tests {
             },
         );
 
-        inventory.consume(&asset, BorrowAssetAmount::from(500));
+        // The over-consume case is unrepresentable through the token API
+        // (a token's amount was provably reserved), so the saturating
+        // backstop is exercised at the entry level it lives at.
+        inventory
+            .inventory
+            .get_mut(&asset)
+            .unwrap()
+            .consume(BorrowAssetAmount::from(500));
         assert_eq!(inventory.get_total_balance(&asset).0, 0);
         assert_eq!(inventory.get_reserved_balance(&asset).0, 0);
+    }
+
+    /// A token settles only in the manager that issued it: reserving in A
+    /// and settling in B must leave B untouched (and A still holding) —
+    /// otherwise B's aggregate accounting absorbs a hold it never issued.
+    #[test]
+    fn reservation_settles_only_in_its_issuing_manager() {
+        let client = create_test_client();
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let asset = create_test_asset();
+
+        let mut manager_a = InventoryManager::new(client.clone(), account_id.clone());
+        manager_a.seed_asset_for_tests(&asset, BorrowAssetAmount::from(1000));
+        let mut manager_b = InventoryManager::new(client, account_id);
+        manager_b.seed_asset_for_tests(&asset, BorrowAssetAmount::from(1000));
+
+        let token_a = manager_a
+            .reserve(&asset, BorrowAssetAmount::from(300))
+            .unwrap();
+        // Give B its own live reservation so a foreign settle would visibly
+        // corrupt it.
+        let token_b = manager_b
+            .reserve(&asset, BorrowAssetAmount::from(300))
+            .unwrap();
+
+        // Foreign release: B must refuse — its own reservation stays.
+        manager_b.release(token_a);
+        assert_eq!(manager_b.get_reserved_balance(&asset).0, 300);
+        assert_eq!(manager_a.get_reserved_balance(&asset).0, 300);
+
+        // B's own token still settles normally.
+        manager_b.release(token_b);
+        assert_eq!(manager_b.get_reserved_balance(&asset).0, 0);
     }
 
     #[test]

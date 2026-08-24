@@ -80,10 +80,10 @@ pub struct ServiceConfig {
     /// Execution mode: continuous loop or single cycle
     pub run_mode: crate::config::RunMode,
     /// Concurrency for registry deployment listing
-    pub concurrency: usize,
+    pub concurrency: std::num::NonZeroUsize,
     /// Maximum positions evaluated/liquidated concurrently within one
     /// market's round (1 = sequential with pacing; see `config::Args`)
-    pub position_concurrency: usize,
+    pub position_concurrency: std::num::NonZeroUsize,
     /// Liquidation strategy
     pub strategy: Arc<dyn LiquidationStrategy>,
     /// Collateral strategy
@@ -103,7 +103,7 @@ pub struct ServiceConfig {
     /// Enable loop liquidation - repeatedly liquidate until position is healthy
     pub loop_liquidation: bool,
     /// Maximum iterations for loop liquidation (safety limit)
-    pub max_loop_iterations: u32,
+    pub max_loop_iterations: std::num::NonZeroU32,
     /// Pyth Hermes API URL for fetching price data
     pub hermes_url: url::Url,
     /// RedStone public price API for scan-side proxy price composition
@@ -592,7 +592,7 @@ impl LiquidatorService {
             let mut market_configs: Vec<(
                 AccountId,
                 templar_common::market::MarketConfiguration,
-                (u32, u32, u32),
+                crate::scanner::MarketVersion,
             )> = Vec::new();
             for market in &all_markets {
                 // Step 0: Skip ignored markets before any RPC calls
@@ -664,7 +664,7 @@ impl LiquidatorService {
                         continue;
                     }
                 };
-                let Some(version) = crate::scanner::parse_semver(&version_string) else {
+                let Some(version) = crate::scanner::MarketVersion::parse(&version_string) else {
                     tracing::warn!(
                         market = %market,
                         version = %version_string,
@@ -672,13 +672,11 @@ impl LiquidatorService {
                     );
                     continue;
                 };
-                let (min_major, min_minor, min_patch) =
-                    crate::scanner::MarketScanner::MIN_SUPPORTED_VERSION;
-                if version < (min_major, min_minor, min_patch) {
+                if version < crate::scanner::MarketVersion::MIN_SUPPORTED {
                     tracing::info!(
                         market = %market,
                         version = %version_string,
-                        min_required = %format!("{min_major}.{min_minor}.{min_patch}"),
+                        min_required = %crate::scanner::MarketVersion::MIN_SUPPORTED,
                         "Skipping market - unsupported version"
                     );
                     continue;
@@ -719,26 +717,37 @@ impl LiquidatorService {
             for (market, config, version) in market_configs {
                 tracing::debug!(market = %market, "Creating liquidator for market");
 
+                let handles = crate::SharedHandles {
+                    client: self.client.clone(),
+                    pyth_updates: self.pyth_updates.clone(),
+                    inventory: self.inventory.clone(),
+                    notifier: self.config.notifier.clone(),
+                    proxy_oracle_cache: Some(self.oracle_fetcher.proxy_oracle_cache()),
+                };
                 let liquidator = Liquidator::new(
-                    &self.client,
-                    &self.pyth_updates,
-                    &self.inventory,
-                    market.clone(),
-                    config,
+                    &handles,
+                    crate::MarketContext {
+                        market: market.clone(),
+                        config,
+                        version: Some(version),
+                    },
                     self.config.strategy.clone(),
-                    self.config.collateral_strategy.clone(),
+                    crate::SwapConfig {
+                        provider: self.oneclick_provider.clone(),
+                        retry: self.config.swap_retry_config.clone(),
+                        min_swap_value_usd: self.config.min_swap_value_usd,
+                        collateral_strategy: self.config.collateral_strategy.clone(),
+                    },
+                    crate::OracleApis {
+                        hermes_url: self.config.hermes_url.clone(),
+                        redstone_api_url: self.config.redstone_api_url.clone(),
+                        lazer_api: self.config.lazer_api.clone(),
+                    },
+                    crate::LoopPolicy {
+                        enabled: self.config.loop_liquidation,
+                        max_iterations: self.config.max_loop_iterations,
+                    },
                     self.config.dry_run,
-                    self.oneclick_provider.clone(),
-                    self.config.loop_liquidation,
-                    self.config.max_loop_iterations,
-                    self.config.hermes_url.clone(),
-                    self.config.redstone_api_url.clone(),
-                    self.config.lazer_api.clone(),
-                    self.config.swap_retry_config.clone(),
-                    self.config.min_swap_value_usd,
-                    Some(self.oracle_fetcher.proxy_oracle_cache()),
-                    self.config.notifier.clone(),
-                    Some(version),
                 );
 
                 supported_markets.insert(market, liquidator);
@@ -1211,7 +1220,7 @@ impl LiquidatorService {
 async fn list_all_deployments(
     client: &SigningClient,
     registries: Vec<AccountId>,
-    concurrency: usize,
+    concurrency: std::num::NonZeroUsize,
 ) -> templar_gateway_core::GatewayResult<Vec<AccountId>> {
     use futures::{StreamExt, TryStreamExt};
 
@@ -1220,7 +1229,7 @@ async fn list_all_deployments(
             let client = client.clone();
             async move { list_deployments(&client, registry).await }
         })
-        .buffer_unordered(concurrency)
+        .buffer_unordered(concurrency.get())
         .try_concat()
         .await
 }

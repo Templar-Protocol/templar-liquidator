@@ -44,18 +44,6 @@ pub enum RunMode {
     Once,
 }
 
-fn validate_percentage(s: &str) -> Result<u8, String> {
-    let value: u8 = s
-        .parse()
-        .map_err(|_| format!("'{s}' is not a valid number"))?;
-    if value == 0 || value > 100 {
-        return Err(format!(
-            "Partial percentage must be between 1 and 100, got {value}"
-        ));
-    }
-    Ok(value)
-}
-
 /// Rejects zero at the config boundary: a `0`-attempt retry loop never runs
 /// the operation at all and returns a confusing "Retry loop exhausted"
 /// error instead of the underlying failure. `1` means "try once, no
@@ -145,8 +133,8 @@ pub struct Args {
     pub once: bool,
 
     /// Concurrency for registry deployment listing
-    #[arg(short, long, env = "CONCURRENCY", default_value_t = 10)]
-    pub concurrency: usize,
+    #[arg(short, long, env = "CONCURRENCY", default_value = "10")]
+    pub concurrency: std::num::NonZeroUsize,
 
     /// Maximum positions evaluated/liquidated concurrently within one market's
     /// round. Defaults to 1: fully sequential with a 1-second pause between
@@ -154,14 +142,14 @@ pub struct Args {
     /// drops the pause and fans position evaluation out — the scale lever for
     /// operators with a dedicated RPC endpoint; expect each in-flight position
     /// to cost several RPC reads (and in live mode, possibly an oracle push).
-    #[arg(long, env = "POSITION_CONCURRENCY", default_value_t = 1)]
-    pub position_concurrency: usize,
+    #[arg(long, env = "POSITION_CONCURRENCY", default_value = "1")]
+    pub position_concurrency: std::num::NonZeroUsize,
 
     /// Percentage of available borrow-asset inventory to deploy per liquidation (1-100)
     /// If not set and --fixed-liquidation-amount-usd is also not set, defaults to 100%
     /// Mutually exclusive with --fixed-liquidation-amount-usd
-    #[arg(long, env = "PARTIAL_LIQUIDATION_PERCENTAGE", value_parser = validate_percentage)]
-    pub partial_percentage: Option<u8>,
+    #[arg(long, env = "PARTIAL_LIQUIDATION_PERCENTAGE")]
+    pub partial_percentage: Option<crate::liquidation_strategy::LiquidationPercentage>,
 
     /// Fixed liquidation amount in USD
     /// Example: 100.0 for $100 USD (works across all USD-based markets with any decimals)
@@ -223,9 +211,10 @@ pub struct Args {
     #[arg(long, env = "LOOP_LIQUIDATION", default_value_t = false)]
     pub loop_liquidation: bool,
 
-    /// Maximum iterations for loop liquidation (safety limit)
-    #[arg(long, env = "MAX_LOOP_ITERATIONS", default_value_t = 10)]
-    pub max_loop_iterations: u32,
+    /// Maximum iterations for loop liquidation (safety limit). Zero is
+    /// rejected at parse time — it would mean "never liquidate anything".
+    #[arg(long, env = "MAX_LOOP_ITERATIONS", default_value = "10")]
+    pub max_loop_iterations: std::num::NonZeroU32,
 
     /// Pyth Hermes API URL for fetching price data. Defaults to Pyth's endpoint for
     /// `--network`.
@@ -437,9 +426,10 @@ impl Args {
                 )
             }
             (percentage, None) => {
-                let pct = percentage.unwrap_or(100);
+                let pct =
+                    percentage.unwrap_or(crate::liquidation_strategy::LiquidationPercentage::FULL);
                 tracing::info!(
-                    percentage = pct,
+                    percentage = pct.get(),
                     "Using PercentageLiquidationStrategy ({}% of available liquidatable collateral, 100% = full liquidation)",
                     pct
                 );
@@ -611,7 +601,7 @@ impl Args {
         // position (liquidation + swap issue); scale the notifier's cap with
         // the knob so busy rounds don't silently drop alerts.
         let notification_capacity = crate::notifier::MAX_INFLIGHT_NOTIFICATIONS
-            .max(self.position_concurrency.max(1).saturating_mul(2));
+            .max(self.position_concurrency.get().saturating_mul(2));
         let notifier = Arc::new(Notifier::with_limits(
             telegram_config,
             failure_cooldown,
@@ -634,10 +624,11 @@ impl Args {
             liquidation_scan_interval: self.liquidation_scan_interval,
             registry_refresh_interval: self.registry_refresh_interval,
             run_mode: self.effective_run_mode(),
-            // `0` would make `buffer_unordered` hang forever; a refresh/scan with
-            // no concurrency makes no sense, so floor both knobs at 1.
-            concurrency: self.concurrency.max(1),
-            position_concurrency: self.position_concurrency.max(1),
+            // `0` would make `buffer_unordered` hang forever; both knobs are
+            // NonZeroUsize, so zero is rejected at parse time — nothing to
+            // floor here.
+            concurrency: self.concurrency,
+            position_concurrency: self.position_concurrency,
             strategy,
             collateral_strategy,
             dry_run: self.dry_run,
@@ -716,9 +707,9 @@ mod tests {
             registry_refresh_interval: 3600,
             run_mode: RunMode::Loop,
             once: false,
-            concurrency: 10,
-            position_concurrency: 1,
-            partial_percentage: Some(50),
+            concurrency: std::num::NonZeroUsize::new(10).unwrap(),
+            position_concurrency: std::num::NonZeroUsize::new(1).unwrap(),
+            partial_percentage: Some("50".parse().unwrap()),
             fixed_liquidation_amount_usd: None,
             min_profit_bps: 100,
             // Matches the CLI default (safe-by-default): tests that care about
@@ -730,7 +721,7 @@ mod tests {
             ignored_collateral_assets: vec![],
             ignored_markets: vec![],
             loop_liquidation: false,
-            max_loop_iterations: 10,
+            max_loop_iterations: std::num::NonZeroU32::new(10).unwrap(),
             hermes_url: None,
             redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
             lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
@@ -876,7 +867,7 @@ mod tests {
     #[test]
     fn test_create_strategy_percentage_100() {
         let mut args = create_test_args();
-        args.partial_percentage = Some(100);
+        args.partial_percentage = Some("100".parse().unwrap());
         args.min_profit_bps = 200;
 
         let strategy = args.create_strategy();
@@ -887,7 +878,7 @@ mod tests {
     #[test]
     fn test_create_strategy_percentage_75() {
         let mut args = create_test_args();
-        args.partial_percentage = Some(75);
+        args.partial_percentage = Some("75".parse().unwrap());
         args.min_profit_bps = 150;
 
         let strategy = args.create_strategy();
@@ -938,7 +929,7 @@ mod tests {
         args.near_rpc_url = Some("https://custom.rpc.url".to_string());
         args.liquidation_scan_interval = 300;
         args.registry_refresh_interval = 1800;
-        args.concurrency = 5;
+        args.concurrency = std::num::NonZeroUsize::new(5).unwrap();
         // The case that matters for build_config is an explicit opt-in to
         // live mode (dry_run = false) propagating through to the config.
         args.dry_run = false;
@@ -955,7 +946,7 @@ mod tests {
         );
         assert_eq!(config.liquidation_scan_interval, 300);
         assert_eq!(config.registry_refresh_interval, 1800);
-        assert_eq!(config.concurrency, 5);
+        assert_eq!(config.concurrency.get(), 5);
         assert!(!config.dry_run);
         assert_eq!(config.allowed_collateral_assets.len(), 1);
         assert_eq!(config.ignored_collateral_assets.len(), 1);
@@ -969,16 +960,17 @@ mod tests {
 
     #[test]
     fn test_percentage_validation() {
+        use crate::liquidation_strategy::LiquidationPercentage;
         // Valid percentages
-        assert_eq!(validate_percentage("1").unwrap(), 1);
-        assert_eq!(validate_percentage("50").unwrap(), 50);
-        assert_eq!(validate_percentage("100").unwrap(), 100);
+        assert_eq!("1".parse::<LiquidationPercentage>().unwrap().get(), 1);
+        assert_eq!("50".parse::<LiquidationPercentage>().unwrap().get(), 50);
+        assert_eq!("100".parse::<LiquidationPercentage>().unwrap().get(), 100);
 
         // Invalid percentages
-        assert!(validate_percentage("0").is_err());
-        assert!(validate_percentage("101").is_err());
-        assert!(validate_percentage("abc").is_err());
-        assert!(validate_percentage("-5").is_err());
+        assert!("0".parse::<LiquidationPercentage>().is_err());
+        assert!("101".parse::<LiquidationPercentage>().is_err());
+        assert!("abc".parse::<LiquidationPercentage>().is_err());
+        assert!("-5".parse::<LiquidationPercentage>().is_err());
     }
 
     #[test]
@@ -1165,19 +1157,33 @@ mod tests {
     #[test]
     fn position_concurrency_defaults_to_sequential() {
         assert_eq!(declared_default("position_concurrency"), ["1"]);
-        assert_eq!(create_test_args().build_config().position_concurrency, 1);
+        assert_eq!(
+            create_test_args().build_config().position_concurrency.get(),
+            1
+        );
     }
 
+    /// `0` for the three nonzero knobs is rejected by the CLI itself — the
+    /// layer where the invariant now lives — not merely by the field types:
+    /// reverting any of them to a plain integer would leave std's parser
+    /// tests green while restoring the `buffer_unordered` hang.
     #[test]
-    fn position_concurrency_reaches_config_and_is_floored_at_one() {
+    fn zero_concurrency_and_loop_knobs_are_rejected_at_parse_time() {
+        for args in [
+            ["--position-concurrency", "0"],
+            ["--concurrency", "0"],
+            ["--max-loop-iterations", "0"],
+        ] {
+            let err =
+                try_parse_with(&args).expect_err("zero should fail to parse for a nonzero knob");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{args:?}"
+            );
+        }
         let args = parse_with(&["--position-concurrency", "8"]);
-        assert_eq!(args.build_config().position_concurrency, 8);
-
-        // `0` would make `buffer_unordered` hang forever — floor it at 1,
-        // same as the registry-listing `concurrency` knob.
-        let mut args = create_test_args();
-        args.position_concurrency = 0;
-        assert_eq!(args.build_config().position_concurrency, 1);
+        assert_eq!(args.build_config().position_concurrency.get(), 8);
     }
 
     /// A concurrent round can fire up to two notifications per in-flight
@@ -1192,7 +1198,7 @@ mod tests {
         );
 
         let mut args = create_test_args();
-        args.position_concurrency = 32;
+        args.position_concurrency = std::num::NonZeroUsize::new(32).unwrap();
         assert!(args.build_config().notifier.max_inflight() >= 64);
     }
 

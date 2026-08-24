@@ -569,60 +569,78 @@ impl LiquidationExecutor {
                 Ok((true, None))
             }
             Err(e) => {
+                // Named per phase, no wildcards: a new variant on either
+                // side must make an explicit funds-safety decision here to
+                // compile.
                 let issue = match &e.kind {
-                    crate::swap::SwapErrorKind::AmountTooLow { .. } => {
-                        tracing::info!(
-                            swap = %swap_name,
-                            error = %e,
-                            "JIT swap skipped - amount below provider minimum, will batch"
-                        );
-                        None // Not a notification-worthy issue
-                    }
-                    crate::swap::SwapErrorKind::QuoteFailed { .. } => {
-                        tracing::debug!(
-                            swap = %swap_name,
-                            "No swap route available for asset, holding collateral"
-                        );
-                        Some(SwapIssue::Failed {
-                            from: from_short,
-                            to: to_short,
-                            amount: amount_short,
-                            error: "No swap route available".to_string(),
-                        })
-                    }
-                    crate::swap::SwapErrorKind::Indeterminate { .. } => {
-                        tracing::warn!(
-                            swap = %swap_name,
-                            error = %e,
-                            "JIT swap outcome unknown - funds may have moved; not retrying, next inventory refresh reconciles"
-                        );
-                        Some(SwapIssue::Failed {
-                            from: from_short,
-                            to: to_short,
-                            amount: amount_short,
-                            error: e.to_string(),
-                        })
-                    }
-                    // Named, not a wildcard: a new SwapErrorKind variant must
-                    // make an explicit funds-safety decision here to compile.
-                    crate::swap::SwapErrorKind::NetworkError { .. }
-                    | crate::swap::SwapErrorKind::ServerError { .. }
-                    | crate::swap::SwapErrorKind::RateLimited
-                    | crate::swap::SwapErrorKind::Timeout { .. }
-                    | crate::swap::SwapErrorKind::ValidationError { .. }
-                    | crate::swap::SwapErrorKind::Unknown { .. } => {
-                        tracing::info!(
-                            swap = %swap_name,
-                            error = %e,
-                            "JIT swap failed, holding collateral"
-                        );
-                        Some(SwapIssue::Failed {
-                            from: from_short,
-                            to: to_short,
-                            amount: amount_short,
-                            error: e.to_string(),
-                        })
-                    }
+                    crate::swap::SwapErrorKind::PreDeposit(pre) => match pre {
+                        crate::swap::PreDepositError::AmountTooLow { .. } => {
+                            tracing::info!(
+                                swap = %swap_name,
+                                error = %e,
+                                "JIT swap skipped - amount below provider minimum, will batch"
+                            );
+                            None // Not a notification-worthy issue
+                        }
+                        crate::swap::PreDepositError::QuoteFailed { .. } => {
+                            tracing::debug!(
+                                swap = %swap_name,
+                                "No swap route available for asset, holding collateral"
+                            );
+                            Some(SwapIssue::Failed {
+                                from: from_short,
+                                to: to_short,
+                                amount: amount_short,
+                                error: "No swap route available".to_string(),
+                            })
+                        }
+                        crate::swap::PreDepositError::NetworkError { .. }
+                        | crate::swap::PreDepositError::ServerError { .. }
+                        | crate::swap::PreDepositError::RateLimited
+                        | crate::swap::PreDepositError::Timeout { .. }
+                        | crate::swap::PreDepositError::ValidationError { .. }
+                        | crate::swap::PreDepositError::Unknown { .. } => {
+                            tracing::info!(
+                                swap = %swap_name,
+                                error = %e,
+                                "JIT swap failed, holding collateral"
+                            );
+                            Some(SwapIssue::Failed {
+                                from: from_short,
+                                to: to_short,
+                                amount: amount_short,
+                                error: e.to_string(),
+                            })
+                        }
+                    },
+                    crate::swap::SwapErrorKind::PostDeposit(post) => match post {
+                        crate::swap::PostDepositError::Indeterminate { .. } => {
+                            tracing::warn!(
+                                swap = %swap_name,
+                                error = %e,
+                                "JIT swap outcome unknown - funds may have moved; not retrying, next inventory refresh reconciles"
+                            );
+                            Some(SwapIssue::Failed {
+                                from: from_short,
+                                to: to_short,
+                                amount: amount_short,
+                                error: e.to_string(),
+                            })
+                        }
+                        crate::swap::PostDepositError::Definitive { .. } => {
+                            tracing::warn!(
+                                swap = %swap_name,
+                                error = %e,
+                                "JIT swap failed definitively - outcome final; the next inventory refresh reflects the disposition (refund or retained collateral)"
+                            );
+                            Some(SwapIssue::Failed {
+                                from: from_short,
+                                to: to_short,
+                                amount: amount_short,
+                                error: e.to_string(),
+                            })
+                        }
+                    },
                 };
                 Ok((false, issue))
             }

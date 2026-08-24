@@ -79,8 +79,10 @@ One line per file in `src/`:
   variant here.
 - `swap/oneclick.rs` — 1-Click API provider (NEAR Intents cross-chain swaps):
   quote → deposit → poll.
-- `swap/retry.rs` — swap error classification (retryable vs. permanent) and
-  the generic retry wrapper swaps run through.
+- `swap/retry.rs` — swap error classification, phase-split at the deposit
+  transfer (`PreDeposit` kinds may retry; `PostDeposit` — `Indeterminate` /
+  `Definitive` — never do, structurally), and the generic retry wrapper
+  swaps run through.
 - `notifier.rs` — notifications; the notification extension seam: the
   `NotificationChannel` trait (Telegram is the shipped impl) behind a shell
   that owns dedup, the in-flight semaphore, and `drain()`.

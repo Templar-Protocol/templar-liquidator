@@ -18,7 +18,7 @@ pub mod retry;
 // Re-export for convenience
 pub use oneclick::OneClickSwap;
 pub use provider::SwapProviderImpl;
-pub use retry::{SwapError, SwapErrorKind, SwapRetryConfig};
+pub use retry::{PostDepositError, PreDepositError, SwapError, SwapErrorKind, SwapRetryConfig};
 
 use near_sdk::AccountId;
 use templar_common::asset::{AssetClass, FungibleAsset, FungibleAssetAmount};
@@ -112,16 +112,22 @@ pub trait SwapProvider: Send + Sync {
     /// execute, slippage exceeds acceptable limits, the deadline is
     /// exceeded, or the swap settles as anything other than a full fill
     /// (refund, partial deposit, or on-chain failure). Classification drives
-    /// retry policy, so an implementation must choose kinds honestly — above
-    /// all: any failure at or after the point where the *swapped* funds may
-    /// have left the account (the deposit transfer) MUST be
-    /// [`SwapErrorKind::Indeterminate`], never a retryable kind. Small
-    /// fixed-cost NEAR bonds before that point (storage registration,
-    /// deposit-account funding) are retry-safe and classify as ordinary
-    /// transient errors. Retrying a swap whose deposit already landed spends the funds
-    /// twice; `Indeterminate` is never auto-retried, and the next inventory
-    /// refresh re-reads chain balances so a late settlement or refund is
-    /// reflected before anything sizes a new swap.
+    /// retry policy, and the phase is part of the type: any failure at or
+    /// after the point where the *swapped* funds may have left the account
+    /// (the deposit transfer) MUST be a
+    /// [`SwapErrorKind::PostDeposit`](crate::swap::PostDepositError) —
+    /// [`Indeterminate`](crate::swap::PostDepositError::Indeterminate) when
+    /// the outcome is unknown,
+    /// [`Definitive`](crate::swap::PostDepositError::Definitive) when the
+    /// venue reported a terminal non-success — and no post-deposit kind is
+    /// retryable, structurally. Small fixed-cost NEAR bonds before that
+    /// point (storage registration, deposit-account funding) are retry-safe
+    /// and classify as ordinary transient
+    /// [`PreDeposit`](crate::swap::PreDepositError) errors. Retrying a swap
+    /// whose deposit already landed spends the funds twice; post-deposit
+    /// errors are never auto-retried, and the next inventory refresh
+    /// re-reads chain balances so a late settlement or refund is reflected
+    /// before anything sizes a new swap.
     async fn swap<F: AssetClass, T: AssetClass>(
         &self,
         from_asset: &FungibleAsset<F>,

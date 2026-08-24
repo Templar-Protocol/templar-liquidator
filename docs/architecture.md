@@ -33,7 +33,7 @@ flowchart TD
     SwapImpl --> OneClick["swap/oneclick.rs<br/>1-Click API"]
     OneClick --> Retry["swap/retry.rs<br/>classify + retry"]
 
-    Executor --> Notifier["notifier.rs<br/>Telegram"]
+    Executor --> Notifier["notifier.rs<br/>NotificationChannel<br/>(Telegram shipped)"]
     Liquidator --> Notifier
     Service --> Notifier
 
@@ -49,11 +49,11 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`config.rs`** — CLI argument parsing (`Args`, via `clap`'s `env`-aware derive) and translation into `ServiceConfig`. Owns the mutual-exclusivity checks (partial vs. fixed-amount strategy, Telegram token/chat-id pairing) that panic at startup rather than producing a half-configured bot.
 
-**`service.rs`** — service lifecycle. `LiquidatorService::new` wires the gateway client, inventory manager, swap providers, and oracle fetcher from `ServiceConfig`. `run()` is the long-lived loop: registry refresh and liquidation rounds tick on independent `tokio::time::interval`s. `run_once()` performs exactly one refresh and one round, then explicitly drains the notifier before returning — otherwise the tokio runtime shutting down when `main` exits could cancel an in-flight Telegram POST.
+**`service.rs`** — service lifecycle. `LiquidatorService::new` wires the gateway client, inventory manager, swap providers, and oracle fetcher from `ServiceConfig`. `run()` is the long-lived loop: registry refresh and liquidation rounds tick on independent `tokio::time::interval`s. `run_once()` performs exactly one refresh and one round, then explicitly drains the notifier before returning — otherwise the tokio runtime shutting down when `main` exits could cancel an in-flight notification send. Loop mode shuts down gracefully on SIGTERM/ctrl-C: in-flight positions finish, no new ones start (a round in flight stops feeding positions to its worker pool), pending notifications drain, and the process exits 0 — the contract `docker compose stop`, Kubernetes, and systemd all assume when they send SIGTERM and wait a grace period before SIGKILL. A second signal force-exits immediately (code 130).
 
 **`scanner.rs`** — `MarketScanner`: fetches a market's borrow positions (paginated for large markets) and evaluates liquidation status per position against a supplied oracle response. (Contract-version gating happens once, during the service's registry refresh — not here.)
 
-**`liquidator.rs`** — the lib root and orchestrator. Its round loop screens every fetched position locally — `MarketConfiguration::borrow_status`, the same function the contract runs, over the round's oracle prices — so only apparent liquidation candidates pay for an on-chain status read; the market contract's answer inside `liquidate()` stays authoritative for every candidate. Crate-level docs describe the pipeline and the three extension seams (`SwapProvider`, `LiquidationStrategy`, `Notifier`). Owns the error taxonomy (`LiquidatorError`, `ErrorPhase`, `NotificationKind`, `LiquidationOutcome`) and the `Liquidator` type, whose `liquidate()` drives one position through strategy sizing → profitability → execution → collateral handling → notification (with the loop-liquidation retry wrapped around all of it), and `run_liquidations()` drives every position in one market.
+**`liquidator.rs`** — the lib root and orchestrator. Its round loop screens every fetched position locally — `MarketConfiguration::borrow_status`, the same function the contract runs, over the round's oracle prices — so only apparent liquidation candidates pay for an on-chain status read; the market contract's answer inside `liquidate()` stays authoritative for every candidate. Crate-level docs describe the pipeline and the three extension seams (`SwapProvider`, `LiquidationStrategy`, `NotificationChannel`). Owns the error taxonomy (`LiquidatorError`, `ErrorPhase`, `NotificationKind`, `LiquidationOutcome`) and the `Liquidator` type, whose `liquidate()` drives one position through strategy sizing → profitability → execution → collateral handling → notification (with the loop-liquidation retry wrapped around all of it), and `run_liquidations()` drives every position in one market.
 
 **`liquidation_strategy.rs`** — the `LiquidationStrategy` trait plus the two built-ins: `PercentageLiquidationStrategy` (percentage-of-inventory, the default, also *is* full liquidation at 100%) and `FixedAmountLiquidationStrategy` (fixed USD amount per liquidation, USD-stablecoin borrow assets only). A strategy decides *how much* to repay and — via `should_liquidate` — whether the sizing is still worth submitting; it does not decide *whether* a position is liquidatable (the scanner already established that). `max_liquidation_percentage()` is logging-only, not enforced against the sizing output — see [docs/backlog.md](backlog.md).
 
@@ -75,7 +75,7 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`swap/retry.rs`** — shared error classification (retryable network/server/rate-limit errors vs. permanent validation errors) and the generic retry wrapper swaps run through.
 
-**`notifier.rs`** — Telegram notifications; the notification extension seam (no trait boundary yet — a fork wanting another channel extends or replaces this type directly). Also owns consecutive-scan-failure threshold tracking and per-(market, borrower, error-class) failure-notification dedup/cooldown.
+**`notifier.rs`** — notifications; the notification extension seam: the `NotificationChannel` trait (`send(&self, text)`; Telegram is the shipped implementation) behind a shell that owns failure dedup, the in-flight semaphore, and `drain()` — a fork's channel implements the trait and plugs into `Notifier::with_channel`.
 
 **`metrics.rs`** — dependency-free Prometheus text-format counters and one gauge, process-lifetime, exposed via `http.rs`.
 
@@ -87,8 +87,8 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 ## Extension seams
 
-A fork that needs behavior beyond what configuration exposes has three extension seams, in-tree — see the doc comments on each for the exact contract a conforming implementation must uphold. Two are traits; the third is a concrete type meant to be extended or replaced directly, not implemented against:
+A fork that needs behavior beyond what configuration exposes has three extension seams, in-tree — all traits; see the doc comments on each for the exact contract a conforming implementation must uphold:
 
 - [`swap::SwapProvider`](../src/swap/mod.rs) — a trait: a DEX/aggregator integration, for routing through a venue other than 1-Click. Implement it for a new type and add a variant to `SwapProviderImpl` (the enum is the dynamic-dispatch point; see `swap/mod.rs` on the slippage bar any AMM provider must clear).
 - [`liquidation_strategy::LiquidationStrategy`](../src/liquidation_strategy.rs) — a trait: the sizing policy, for logic beyond percentage-of-inventory or fixed-USD-amount (e.g. per-market caps, sizing off inventory pressure).
-- [`notifier::Notifier`](../src/notifier.rs) — a concrete struct, Telegram-only, with no trait in front of it; extending or replacing the type directly is today's path to another channel.
+- [`notifier::NotificationChannel`](../src/notifier.rs) — a trait: one method, `send(&self, text)`, delivering a single already-formatted message. Implement it for a new channel (Slack, PagerDuty, a webhook) and construct the notifier with `Notifier::with_channel` — the surrounding shell keeps failure dedup, the in-flight cap, and `drain()` regardless of channel. Telegram (`TelegramChannel`) is the shipped implementation.

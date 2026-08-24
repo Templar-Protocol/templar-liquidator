@@ -1,10 +1,14 @@
 //! Notification system for the liquidator bot.
 //!
-//! [`Notifier`] is the notification extension seam: it currently sends
-//! HTML-formatted Telegram messages and nothing else, with no trait in front of
-//! it. A fork that needs a different channel (another chat platform, a paging
-//! system, a metrics sink) extends or replaces this type directly — see the
-//! crate-level docs for how this fits alongside the other two extension seams.
+//! [`NotificationChannel`] is the notification extension seam: one method,
+//! delivering one already-formatted message ([`TelegramChannel`] is the
+//! shipped implementation). [`Notifier`] is the channel-independent shell
+//! around it — failure dedup, the in-flight semaphore, and
+//! [`drain`](Notifier::drain). A fork that needs a different channel
+//! (another chat platform, a paging system, a metrics sink) implements the
+//! trait and constructs the notifier with [`Notifier::with_channel`] — see
+//! the crate-level docs for how this fits alongside the other two extension
+//! seams.
 //!
 //! # What triggers each notification
 //!
@@ -133,15 +137,115 @@ pub const DEFAULT_FAILURE_NOTIFY_COOLDOWN: Duration =
 /// (market, borrower, error class).
 type DedupKey = (String, String, crate::NotificationKind);
 
+/// The transport one notification goes out on — the notification extension
+/// seam. The [`Notifier`] shell owns everything channel-independent (failure
+/// dedup, the in-flight semaphore, [`drain`](Notifier::drain)); an
+/// implementation only delivers. A fork's channel (Discord, Slack, a paging
+/// system) implements this and hands it to [`Notifier::with_channel`].
+///
+/// Contract: messages arrive already formatted, in Telegram-flavored HTML
+/// (`<b>`, `<code>`, entity-escaped values) — a non-HTML channel converts or
+/// strips. Failures must be logged and swallowed, never propagated or
+/// panicked: notifications are advisory and must not disturb liquidation
+/// flow. Two consequences of that rule are load-bearing: a panicking `send`
+/// kills at minimum its own task and message, and under the release
+/// profile's `panic = "abort"` — what the shipped Docker image runs —
+/// aborts the whole process, concurrently with liquidation work (the
+/// debug-profile convenience scripts merely unwind, so a panic that looks
+/// survivable in local runs is fatal in deployment). The shell imposes no
+/// deadline — a `send` that hangs holds its in-flight slot forever, and
+/// after `max_inflight` such hangs every later notification is silently
+/// dropped. Bound your own I/O the way [`TelegramChannel`] does (a 10s
+/// request timeout).
+#[async_trait::async_trait]
+pub trait NotificationChannel: Send + Sync + std::fmt::Debug {
+    /// Delivers one message.
+    async fn send(&self, text: &str);
+}
+
+/// Telegram delivery — the shipped [`NotificationChannel`].
+#[derive(Debug)]
+pub struct TelegramChannel {
+    config: TelegramConfig,
+    client: Client,
+}
+
+impl TelegramChannel {
+    #[must_use]
+    pub fn new(config: TelegramConfig) -> Self {
+        Self {
+            config,
+            client: Client::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl NotificationChannel for TelegramChannel {
+    /// Sends an HTML message to the configured Telegram chat.
+    /// Failures are logged and swallowed — never propagated.
+    async fn send(&self, text: &str) {
+        let config = &self.config;
+
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendMessage",
+            config.bot_token.as_str()
+        );
+
+        let mut payload = json!({
+            "chat_id": config.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": true,
+        });
+
+        if let Some(tid) = config.thread_id {
+            payload["message_thread_id"] = json!(tid);
+        }
+
+        match self
+            .client
+            .post(&url)
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(response) if response.status() == 429 => {
+                tracing::warn!("Telegram rate limit hit, skipping notification");
+            }
+            Ok(response) if !response.status().is_success() => {
+                let status = response.status();
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "unknown".to_string());
+                tracing::warn!(
+                    status = %status,
+                    body = %body,
+                    "Telegram notification failed"
+                );
+            }
+            Ok(_) => {
+                tracing::debug!("Telegram notification sent");
+            }
+            Err(e) => {
+                let safe_error = e.without_url();
+                tracing::warn!(error = %safe_error, "Failed to send Telegram notification");
+            }
+        }
+    }
+}
+
 /// Liquidator event notifier.
 ///
-/// When Telegram is configured, sends HTML-formatted messages via
-/// background tasks. When unconfigured, all methods are silent no-ops.
-/// A semaphore bounds the number of concurrent in-flight notifications.
+/// When a channel is configured, sends formatted messages via background
+/// tasks. When unconfigured, all methods are silent no-ops. A semaphore
+/// bounds the number of concurrent in-flight notifications; failure dedup
+/// and [`drain`](Notifier::drain) live here, channel-independent.
 #[derive(Debug)]
 pub struct Notifier {
-    telegram: Option<TelegramConfig>,
-    client: Client,
+    channel: Option<Arc<dyn NotificationChannel>>,
     semaphore: Arc<Semaphore>,
     /// The semaphore's total permit count — what [`drain`](Notifier::drain)
     /// must reacquire in full. Kept alongside the semaphore because tokio's
@@ -304,10 +408,27 @@ impl Notifier {
         failure_cooldown: Duration,
         max_inflight: usize,
     ) -> Self {
+        Self::with_channel(
+            telegram.map(|config| {
+                Arc::new(TelegramChannel::new(config)) as Arc<dyn NotificationChannel>
+            }),
+            failure_cooldown,
+            max_inflight,
+        )
+    }
+
+    /// Creates a notifier over any [`NotificationChannel`] — the constructor
+    /// a fork's channel plugs into; the Telegram constructors above delegate
+    /// here. Same `max_inflight` sizing rules as
+    /// [`with_limits`](Self::with_limits).
+    pub fn with_channel(
+        channel: Option<Arc<dyn NotificationChannel>>,
+        failure_cooldown: Duration,
+        max_inflight: usize,
+    ) -> Self {
         let max_inflight = max_inflight.max(1);
         Self {
-            telegram,
-            client: Client::new(),
+            channel,
             semaphore: Arc::new(Semaphore::new(max_inflight)),
             max_inflight,
             failure_dedup: Mutex::new(HashMap::new()),
@@ -320,22 +441,22 @@ impl Notifier {
         self.max_inflight
     }
 
-    /// Returns `true` if Telegram notifications are enabled.
+    /// Returns `true` if a notification channel is configured.
     pub fn is_enabled(&self) -> bool {
-        self.telegram.is_some()
+        self.channel.is_some()
     }
 
     /// Waits for all in-flight notifications to finish sending, up to `timeout`.
     ///
-    /// A no-op when Telegram is unconfigured — nothing was ever spawned. Works
-    /// by acquiring every semaphore permit: that only succeeds once every
-    /// `spawn_send` task has released its permit, i.e. once the background
-    /// sends have all completed. Single-cycle runs must call this before
-    /// returning, since dropping the runtime otherwise cancels any Telegram
-    /// POST still in flight; long-running modes never need this because the
-    /// process keeps running past any individual cycle.
+    /// A no-op when no channel is configured — nothing was ever spawned.
+    /// Works by acquiring every semaphore permit: that only succeeds once
+    /// every `spawn_send` task has released its permit, i.e. once the
+    /// background sends have all completed. Single-cycle runs must call this
+    /// before returning, since dropping the runtime otherwise cancels any
+    /// send still in flight; loop mode has the same obligation on its
+    /// graceful-shutdown path and drains after its event loop exits.
     pub async fn drain(&self, timeout: Duration) {
-        if self.telegram.is_none() {
+        if self.channel.is_none() {
             return;
         }
         let all_permits = u32::try_from(self.max_inflight).unwrap_or(u32::MAX);
@@ -493,81 +614,97 @@ impl Notifier {
     /// semaphore was full and the message was dropped due to overload.
     /// Callers that own dedup state can use the `false` return to roll back.
     fn spawn_send(self: &Arc<Self>, message: String) -> bool {
-        if self.telegram.is_none() {
+        let Some(channel) = self.channel.clone() else {
             return true;
-        }
+        };
         let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
             tracing::warn!("Notification dropped — too many in-flight messages");
             return false;
         };
-        let this = Arc::clone(self);
         tokio::spawn(async move {
-            this.send(&message).await;
+            channel.send(&message).await;
             drop(permit);
         });
         true
-    }
-
-    /// Sends an HTML message to the configured Telegram chat.
-    /// Failures are logged and swallowed — never propagated.
-    async fn send(&self, text: &str) {
-        let Some(config) = &self.telegram else {
-            return;
-        };
-
-        let url = format!(
-            "https://api.telegram.org/bot{}/sendMessage",
-            config.bot_token.as_str()
-        );
-
-        let mut payload = json!({
-            "chat_id": config.chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": true,
-        });
-
-        if let Some(tid) = config.thread_id {
-            payload["message_thread_id"] = json!(tid);
-        }
-
-        match self
-            .client
-            .post(&url)
-            .json(&payload)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-        {
-            Ok(response) if response.status() == 429 => {
-                tracing::warn!("Telegram rate limit hit, skipping notification");
-            }
-            Ok(response) if !response.status().is_success() => {
-                let status = response.status();
-                let body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "unknown".to_string());
-                tracing::warn!(
-                    status = %status,
-                    body = %body,
-                    "Telegram notification failed"
-                );
-            }
-            Ok(_) => {
-                tracing::debug!("Telegram notification sent");
-            }
-            Err(e) => {
-                let safe_error = e.without_url();
-                tracing::warn!(error = %safe_error, "Failed to send Telegram notification");
-            }
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A channel that records what it was asked to deliver — the seam test:
+    /// the shell's dedup/semaphore/drain machinery must route through the
+    /// trait, so a fork's channel receives exactly what Telegram would.
+    #[derive(Debug, Default)]
+    struct CapturingChannel {
+        messages: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl NotificationChannel for CapturingChannel {
+        async fn send(&self, text: &str) {
+            self.messages.lock().unwrap().push(text.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_channel_receives_formatted_notifications() {
+        let channel = Arc::new(CapturingChannel::default());
+        let notifier: SharedNotifier = Arc::new(Notifier::with_channel(
+            Some(channel.clone()),
+            DEFAULT_FAILURE_NOTIFY_COOLDOWN,
+            MAX_INFLIGHT_NOTIFICATIONS,
+        ));
+
+        notifier.notify_liquidation(
+            "market.near",
+            "borrower.near",
+            "1.00 USDC",
+            "0.0001 BTC",
+            "+0.05 USDC (+5.0%)",
+            None,
+            true,
+        );
+        notifier.drain(Duration::from_secs(5)).await;
+
+        let messages = channel.messages.lock().unwrap();
+        assert_eq!(
+            messages.len(),
+            1,
+            "the shell must deliver through the trait"
+        );
+        assert!(messages[0].contains("market.near"));
+        assert!(messages[0].contains("borrower.near"));
+    }
+
+    /// Failure dedup lives in the shell, not the channel: the second
+    /// identical failure within the cooldown never reaches the transport.
+    #[tokio::test]
+    async fn dedup_is_channel_independent() {
+        let channel = Arc::new(CapturingChannel::default());
+        let notifier: SharedNotifier = Arc::new(Notifier::with_channel(
+            Some(channel.clone()),
+            DEFAULT_FAILURE_NOTIFY_COOLDOWN,
+            MAX_INFLIGHT_NOTIFICATIONS,
+        ));
+
+        for _ in 0..2 {
+            notifier.notify_liquidation_failed(
+                "market.near",
+                "borrower.near",
+                crate::NotificationKind::TxFailedOther,
+                "boom",
+            );
+        }
+        notifier.drain(Duration::from_secs(5)).await;
+
+        assert_eq!(
+            channel.messages.lock().unwrap().len(),
+            1,
+            "the duplicate within the cooldown must be suppressed by the shell"
+        );
+    }
 
     /// The in-flight cap must scale with position-level concurrency: at the
     /// default cap of 10, a concurrent round can fire more notifications than

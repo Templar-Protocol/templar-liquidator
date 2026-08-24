@@ -170,10 +170,19 @@ impl LiquidationExecutor {
             collateral_amount,
             expected_collateral_value,
         } = request;
-        // The settlement variant is the single source of the mode — not
-        // `self.dry_run`, which callers already used to build it.
-        // Dry run mode - log what would happen, skip execution
+        // The settlement variant selects the dry-run branch, but it is only
+        // the token's carrier: `self.dry_run` gates each direction below,
+        // so a mismatched pair fails closed rather than moving funds or
+        // fabricating a result.
         if matches!(settlement, Settlement::DryRun) {
+            // A live executor must not report a simulated success as a
+            // liquidation — that would send non-dry-run notifications and
+            // clear failure dedup with nothing executed.
+            if !self.dry_run {
+                return Err(LiquidatorError::StrategyError(
+                    "dry-run settlement passed to a live executor; liquidation aborted".to_string(),
+                ));
+            }
             // Log JIT swap intent if applicable
             if matches!(self.collateral_strategy, CollateralStrategy::SwapToBorrow)
                 && self.swap_provider.is_some()
@@ -221,14 +230,14 @@ impl LiquidationExecutor {
                     .to_string(),
             ));
         }
-        // Fail closed on a mismatched token: settling a different amount
-        // than the transaction spends would silently mis-account inventory
-        // until the next refresh.
-        if reservation.amount() != liquidation_amount {
+        // Fail closed on a mismatched token — wrong amount *or wrong asset*:
+        // the transaction would spend one thing while settlement debited
+        // another, silently mis-accounting inventory until the next refresh.
+        if !reservation.covers(borrow_asset, liquidation_amount) {
             let reserved = u128::from(reservation.amount());
             self.inventory.write().await.release(reservation);
             return Err(LiquidatorError::StrategyError(format!(
-                "reservation amount {reserved} does not match liquidation amount {}; reservation released, liquidation aborted",
+                "reservation (amount {reserved}) does not cover {} of {borrow_asset}; reservation released, liquidation aborted",
                 u128::from(liquidation_amount)
             )));
         }
@@ -607,5 +616,173 @@ impl LiquidationExecutor {
                 Ok((false, issue))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn test_executor(dry_run: bool) -> (LiquidationExecutor, inventory::SharedInventory) {
+        let network = near_api::NetworkConfig::from_rpc_url(
+            "testnet",
+            "https://rpc.testnet.near.org".parse().unwrap(),
+        );
+        let secret_key: near_api::SecretKey =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "liquidator-test")
+                .to_string()
+                .parse()
+                .unwrap();
+        // No network I/O happens in these tests: both mismatch guards
+        // return before the executor issues any read or transaction.
+        let client = SigningClient::connect(
+            network,
+            AccountId::from_str("test.near").unwrap(),
+            secret_key,
+        )
+        .unwrap();
+        let account = AccountId::from_str("test.near").unwrap();
+        let inventory: inventory::SharedInventory = Arc::new(RwLock::new(
+            inventory::InventoryManager::new(client.clone(), account.clone()),
+        ));
+        let executor = LiquidationExecutor::new(
+            client,
+            inventory.clone(),
+            account,
+            dry_run,
+            crate::SwapConfig {
+                provider: None,
+                retry: crate::swap::SwapRetryConfig::default(),
+                min_swap_value_usd: 0.0,
+                collateral_strategy: CollateralStrategy::Hold,
+            },
+            MarketDecimals {
+                borrow: 6,
+                collateral: 8,
+            },
+        );
+        (executor, inventory)
+    }
+
+    fn request(amount: u128) -> ExecutionRequest {
+        ExecutionRequest {
+            liquidation_amount: BorrowAssetAmount::from(amount),
+            collateral_amount: CollateralAssetAmount::from(amount),
+            expected_collateral_value: BorrowAssetAmount::from(amount),
+        }
+    }
+
+    /// A live settlement handed to a dry-run executor must fail closed and
+    /// release the token — DRY_RUN=true is the crate's safety invariant, and
+    /// the executor's own mode stays the authority on whether money moves.
+    #[tokio::test]
+    async fn dry_run_executor_rejects_live_settlement_and_releases() {
+        let (executor, inventory) = test_executor(true);
+        let asset: FungibleAsset<BorrowAsset> =
+            FungibleAsset::from_str("nep141:usdc.near").unwrap();
+        let collateral: FungibleAsset<CollateralAsset> =
+            FungibleAsset::from_str("nep141:btc.near").unwrap();
+        inventory
+            .write()
+            .await
+            .seed_asset_for_tests(&asset, BorrowAssetAmount::from(1_000));
+        let reservation = inventory
+            .write()
+            .await
+            .reserve(&asset, BorrowAssetAmount::from(300))
+            .unwrap();
+
+        let borrower = AccountId::from_str("borrower.near").unwrap();
+        let result = executor
+            .execute_liquidation(
+                &borrower,
+                &asset,
+                &collateral,
+                request(300),
+                Settlement::Live(reservation),
+            )
+            .await;
+
+        assert!(result.is_err(), "must refuse to submit under dry-run");
+        assert_eq!(
+            inventory.read().await.get_reserved_balance(&asset).0,
+            0,
+            "the rejected token must be released, not leaked"
+        );
+    }
+
+    /// A dry-run settlement handed to a live executor must fail closed —
+    /// reporting a simulated success as Liquidated would send non-dry-run
+    /// notifications and clear failure dedup with nothing executed.
+    #[tokio::test]
+    async fn live_executor_rejects_dry_run_settlement() {
+        let (executor, _inventory) = test_executor(false);
+        let asset: FungibleAsset<BorrowAsset> =
+            FungibleAsset::from_str("nep141:usdc.near").unwrap();
+        let collateral: FungibleAsset<CollateralAsset> =
+            FungibleAsset::from_str("nep141:btc.near").unwrap();
+
+        let borrower = AccountId::from_str("borrower.near").unwrap();
+        let result = executor
+            .execute_liquidation(
+                &borrower,
+                &asset,
+                &collateral,
+                request(300),
+                Settlement::DryRun,
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a live executor must not fabricate Liquidated from a simulation"
+        );
+    }
+
+    /// A token for the wrong asset (same amount) must fail closed and be
+    /// released — spending asset A while debiting asset B would leave A
+    /// counted available for concurrent sizing.
+    #[tokio::test]
+    async fn mismatched_reservation_asset_fails_closed() {
+        let (executor, inventory) = test_executor(false);
+        let asset_a: FungibleAsset<BorrowAsset> =
+            FungibleAsset::from_str("nep141:usdc.near").unwrap();
+        let asset_b: FungibleAsset<BorrowAsset> =
+            FungibleAsset::from_str("nep141:usdt.near").unwrap();
+        let collateral: FungibleAsset<CollateralAsset> =
+            FungibleAsset::from_str("nep141:btc.near").unwrap();
+        inventory
+            .write()
+            .await
+            .seed_asset_for_tests(&asset_b, BorrowAssetAmount::from(1_000));
+        let reservation = inventory
+            .write()
+            .await
+            .reserve(&asset_b, BorrowAssetAmount::from(300))
+            .unwrap();
+
+        let borrower = AccountId::from_str("borrower.near").unwrap();
+        let result = executor
+            .execute_liquidation(
+                &borrower,
+                &asset_a,
+                &collateral,
+                request(300),
+                Settlement::Live(reservation),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "wrong-asset token must abort the liquidation"
+        );
+        assert_eq!(
+            inventory.read().await.get_reserved_balance(&asset_b).0,
+            0,
+            "the mismatched token must be released"
+        );
     }
 }

@@ -617,6 +617,37 @@ impl Reservation {
     pub fn amount(&self) -> BorrowAssetAmount {
         self.amount
     }
+
+    /// True when this token covers exactly `asset` for exactly `amount` —
+    /// the executor's pre-submission identity check. Fields stay private,
+    /// so this is the one way to interrogate a token: a same-sized
+    /// reservation of a *different* asset must not pass, or the transaction
+    /// would spend one asset while settlement debited another.
+    #[must_use]
+    pub fn covers(&self, asset: &FungibleAsset<BorrowAsset>, amount: BorrowAssetAmount) -> bool {
+        self.asset == *asset && self.amount == amount
+    }
+}
+
+#[cfg(test)]
+impl InventoryManager {
+    /// Test-only seeding: registers `asset` with a starting balance so
+    /// cross-module tests can reserve against it. Compiled out of
+    /// production builds.
+    pub(crate) fn seed_asset_for_tests(
+        &mut self,
+        asset: &FungibleAsset<BorrowAsset>,
+        balance: BorrowAssetAmount,
+    ) {
+        self.inventory.insert(
+            asset.clone(),
+            InventoryEntry {
+                balance,
+                reserved: BorrowAssetAmount::from(0),
+                last_updated: Instant::now(),
+            },
+        );
+    }
 }
 
 /// Shared inventory manager for concurrent access
@@ -716,6 +747,13 @@ mod tests {
             .reserve(&asset, BorrowAssetAmount::from(300))
             .unwrap();
         assert_eq!(u128::from(first.amount()), 300);
+        // `covers` is the executor's pre-submission identity check: both the
+        // asset and the amount must match, since the fields are private.
+        assert!(first.covers(&asset, BorrowAssetAmount::from(300)));
+        assert!(!first.covers(&asset, BorrowAssetAmount::from(299)));
+        let other: FungibleAsset<BorrowAsset> =
+            FungibleAsset::from_str("nep141:usdt.near").unwrap();
+        assert!(!first.covers(&other, BorrowAssetAmount::from(300)));
         assert_eq!(inventory.get_available_balance(&asset).0, 700);
         assert_eq!(inventory.get_reserved_balance(&asset).0, 300);
 

@@ -30,8 +30,6 @@ Documented, not implemented. This is the roadmap of things a fork or a future re
 
 **Add a real liveness endpoint.** `/healthz` is already correctly a pure readiness check — it 503s until at least one market has scanned cleanly recently, and never reports "process is up" on its own (see the module doc for [`http.rs`](../src/http.rs)). That's exactly why it's unsafe to wire to a liveness/restart probe: a bot stuck on a persistent RPC problem would restart-loop forever without fixing anything. What's actually missing is a *separate* liveness signal an orchestrator could use for that purpose — conventionally named `/livez` (not `/readyz`, which in the usual k8s-style split names the readiness check, the role `/healthz` already fills here) — so "restart me, the process is wedged" and "I'm up but not ready" stay distinguishable.
 
-**`# HELP` lines on `/metrics`.** The current Prometheus exposition (`Metrics::render`) emits `# TYPE` but not `# HELP` for each series — cosmetic for scraping, but `# HELP` is what shows up as the metric description in most dashboards/explorers.
-
 **Once-mode cycle-timeout wrapper.** `RUN_MODE=once` relies entirely on the external scheduler's own timeout to bound a stuck cycle. A wrapper timeout inside the binary itself would fail a stuck cycle deterministically rather than depending on the orchestrator to notice.
 
 ## Configuration and interface

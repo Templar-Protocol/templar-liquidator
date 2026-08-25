@@ -253,6 +253,17 @@ pub struct Args {
     #[arg(long, env = "IGNORED_COLLATERAL_ASSETS", value_delimiter = ',')]
     pub ignored_collateral_assets: Vec<String>,
 
+    /// Market account IDs to allow (comma-separated); when set, only these
+    /// markets are processed. `IGNORED_MARKETS` still subtracts within the
+    /// allowlist.
+    ///
+    /// Typed `AccountId` — deliberately stricter than `IGNORED_MARKETS`'
+    /// warn-and-skip: an unparseable entry silently dropped from an
+    /// ALLOWlist could empty it and fail open to every market, so a bad
+    /// entry refuses startup instead.
+    #[arg(long, env = "ALLOWED_MARKETS", value_delimiter = ',')]
+    pub allowed_markets: Vec<AccountId>,
+
     /// Market account IDs to ignore (comma-separated)
     #[arg(long, env = "IGNORED_MARKETS", value_delimiter = ',')]
     pub ignored_markets: Vec<String>,
@@ -413,6 +424,7 @@ impl std::fmt::Debug for Args {
             )
             .field("allowed_collateral_assets", &self.allowed_collateral_assets)
             .field("ignored_collateral_assets", &self.ignored_collateral_assets)
+            .field("allowed_markets", &self.allowed_markets)
             .field("ignored_markets", &self.ignored_markets)
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
@@ -609,6 +621,13 @@ impl Args {
             );
         }
 
+        if !self.allowed_markets.is_empty() {
+            tracing::info!(
+                allowed_markets = ?self.allowed_markets,
+                "Market filtering: only allowing specified markets"
+            );
+        }
+
         // Build notifier — require both bot token and chat ID. clap's mutual
         // `requires` on the two fields already rejects one being present
         // without the other at parse time, so `(Some, None)` / `(None, Some)`
@@ -688,6 +707,7 @@ impl Args {
             oneclick_api_token: self.oneclick_api_token.clone(),
             allowed_collateral_assets,
             ignored_collateral_assets,
+            allowed_markets: self.allowed_markets.clone(),
             ignored_markets,
             loop_liquidation: self.loop_liquidation,
             max_loop_iterations: self.max_loop_iterations,
@@ -777,6 +797,7 @@ mod tests {
             oneclick_api_token: None,
             allowed_collateral_assets: vec![],
             ignored_collateral_assets: vec![],
+            allowed_markets: vec![],
             ignored_markets: vec![],
             loop_liquidation: false,
             max_loop_iterations: std::num::NonZeroU32::new(10).unwrap(),
@@ -1257,6 +1278,24 @@ mod tests {
     /// sibling list knobs do; without the delimiter, `a.near,b.near` parses
     /// as ONE invalid account id and the only way to express two registries
     /// is the repeatable CLI flag.
+    /// The allowlist parses as typed account ids at the CLI boundary —
+    /// deliberately stricter than IGNORED_MARKETS' warn-and-skip: a typo'd
+    /// entry silently dropped from a DENYlist un-ignores one market, but
+    /// dropped from an ALLOWlist it can empty the list and fail open to
+    /// every market. A bad entry must refuse startup instead.
+    #[test]
+    fn allowed_markets_parse_typed_and_fail_closed() {
+        let args = parse_with(&["--allowed-markets", "a.tmplr.near,b.tmplr.near"]);
+        assert_eq!(args.allowed_markets.len(), 2);
+        let config = args.build_config().expect("valid test config");
+        assert_eq!(config.allowed_markets.len(), 2);
+        assert_eq!(config.allowed_markets[0].to_string(), "a.tmplr.near");
+
+        let err = try_parse_with(&["--allowed-markets", "not..valid..id"])
+            .expect_err("an unparseable allowlist entry must refuse startup");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
     #[test]
     fn registries_accept_a_comma_separated_list() {
         let key = test_signer_key();

@@ -1,7 +1,10 @@
 //! Swap error classification and retry logic.
 //!
 //! Provides:
-//! - `SwapErrorKind` for classifying swap failures as retryable or permanent
+//! - `SwapErrorKind`, phase-split at the deposit transfer: `PreDeposit`
+//!   kinds (idempotent phases; transient ones retry) and `PostDeposit`
+//!   kinds (`Indeterminate` / `Definitive`; never retried — structurally,
+//!   by phase match, not by variant list)
 //! - `SwapError` wrapper with context
 //! - `SwapRetryConfig` for configurable retry behavior
 //! - `swap_with_retry` for automatic retry of transient failures
@@ -12,9 +15,14 @@ use tokio::time::sleep;
 
 use crate::rpc::AppError;
 
-/// Classification of swap errors for retry decisions.
+/// Failures from phases **before the swap's deposit transfer is submitted**
+/// (quote, deposit-address validation, deposit-account funding, storage
+/// registration). These phases are idempotent — re-running them cannot
+/// double-spend inventory, even though account funding and storage
+/// registration bond small fixed amounts of NEAR — so whether to retry is a
+/// question of *worth* (`is_retryable`), never of safety.
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum SwapErrorKind {
+pub enum PreDepositError {
     /// Amount below bridge/swap minimum (not retryable, batchable)
     #[error("Amount too low: {message}")]
     AmountTooLow { message: String },
@@ -40,21 +48,47 @@ pub enum SwapErrorKind {
     #[error("Validation error: {message}")]
     ValidationError { message: String },
 
-    /// Timed out before the swap's deposit transfer was submitted
-    /// (retryable — the pre-deposit phases are idempotent: re-running a
-    /// quote or a storage registration cannot double-spend inventory, even
-    /// though storage registration bonds a small amount of NEAR). A timeout
-    /// at or after the deposit transfer must be `Indeterminate` instead —
-    /// retrying a whole swap whose deposit already landed double-spends.
+    /// Timed out (retryable — pre-deposit phases are idempotent). There is
+    /// deliberately no timeout variant on [`PostDepositError`]: a timeout at
+    /// or after the deposit transfer is an unknown outcome and must be
+    /// `Indeterminate` — retrying a swap whose deposit already landed
+    /// double-spends.
     #[error("Timeout: {message}")]
     Timeout { message: String },
 
-    /// The outcome is unknown and funds may already have moved: the failure
-    /// happened at or after the deposit transaction was submitted (deposit
-    /// RPC error, notify failure, status polling timed out). Never retried —
-    /// re-running the operation would deposit again. Reconciliation is the
-    /// next inventory refresh: balances are re-read from chain, so a late
-    /// settlement or refund is reflected before anything sizes a new swap.
+    /// Unknown / uncategorized error (not retryable)
+    #[error("Unknown error: {message}")]
+    Unknown { message: String },
+}
+
+impl PreDepositError {
+    /// Returns true if this error is worth retrying.
+    ///
+    /// `QuoteFailed` is not retried — "Failed to get quote" from the 1-Click
+    /// API means no swap route exists for the asset pair, which is a
+    /// permanent condition, not transient. Transient API failures are
+    /// captured by `NetworkError` and `ServerError` instead.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::NetworkError { .. }
+                | Self::ServerError { .. }
+                | Self::RateLimited
+                | Self::Timeout { .. }
+        )
+    }
+}
+
+/// Failures **at or after the deposit transfer** — inventory has left, or
+/// may have left, the account. Never retryable: re-running the swap would
+/// deposit again. Reconciliation is the next inventory refresh: balances are
+/// re-read from chain, so a settlement or refund is reflected before
+/// anything sizes a new swap.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PostDepositError {
+    /// The outcome is unknown and funds may already have moved (deposit RPC
+    /// error, notify failure, status polling timed out). The case worth
+    /// waking an operator for: nothing yet accounts for the deposit.
     #[error("Swap outcome unknown (deposit address {deposit_address}): {message}")]
     Indeterminate {
         message: String,
@@ -65,56 +99,85 @@ pub enum SwapErrorKind {
         deposit_address: String,
     },
 
-    /// Unknown / uncategorized error (not retryable)
-    #[error("Unknown error: {message}")]
-    Unknown { message: String },
+    /// The outcome is known and final **including where the funds are**:
+    /// the deposit transfer reverted on-chain (funds never left) or the
+    /// venue confirmed a refund. A terminal *failed* status alone does not
+    /// qualify — 1-Click models `FAILED` and `REFUNDED` separately, so
+    /// failure without a confirmed refund is
+    /// [`Indeterminate`](Self::Indeterminate). Nothing is left in flight
+    /// to reconcile; the
+    /// message states what happened to the funds, and the next inventory
+    /// refresh reflects the final balances.
+    #[error("Swap failed definitively (deposit address {deposit_address}): {message}")]
+    Definitive {
+        message: String,
+        /// Same reconciliation handle as
+        /// [`Indeterminate`](Self::Indeterminate) — kept even though the
+        /// outcome is known, so an operator auditing the venue's side has
+        /// the address without parsing prose.
+        deposit_address: String,
+    },
+}
+
+/// Classification of swap errors, split by the one boundary that decides
+/// retry safety: the deposit transfer. The phase is part of the type so a
+/// retryable-looking kind cannot exist on the post-deposit side at all —
+/// the invariant "never retry after funds may have moved" is structural,
+/// not a doc obligation on each construction site.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SwapErrorKind {
+    /// Before the deposit transfer: idempotent phases, retry is safe.
+    #[error(transparent)]
+    PreDeposit(#[from] PreDepositError),
+
+    /// At or after the deposit transfer: never retried.
+    #[error(transparent)]
+    PostDeposit(#[from] PostDepositError),
 }
 
 impl SwapErrorKind {
-    /// Returns true if this error type should be retried.
-    ///
-    /// `QuoteFailed` is not retried — "Failed to get quote" from the 1-Click API means no
-    /// swap route exists for the asset pair, which is a permanent condition, not transient.
-    /// Transient API failures are captured by `NetworkError` and `ServerError` instead.
+    /// Returns true if this error should be retried. Post-deposit failures
+    /// are non-retryable by phase, not by variant list — adding a variant to
+    /// [`PostDepositError`] cannot make it retryable.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::NetworkError { .. }
-                | Self::ServerError { .. }
-                | Self::RateLimited
-                | Self::Timeout { .. }
-        )
+        match self {
+            Self::PreDeposit(pre) => pre.is_retryable(),
+            Self::PostDeposit(_) => false,
+        }
     }
 
     /// Returns true if the amount was too small for the swap provider.
     pub fn is_amount_too_low(&self) -> bool {
-        matches!(self, Self::AmountTooLow { .. })
+        matches!(self, Self::PreDeposit(PreDepositError::AmountTooLow { .. }))
     }
 
-    /// Classify an HTTP response from the 1-Click API.
-    pub fn from_oneclick_response(status: u16, body: &str) -> Self {
+    /// Classify an HTTP response from a **pre-deposit** 1-Click API call
+    /// (quoting). Returns [`PreDepositError`] by type: an HTTP failure from
+    /// a post-deposit call (deposit notification) has already moved funds
+    /// and must classify as [`PostDepositError`] at its own site.
+    pub fn from_oneclick_response(status: u16, body: &str) -> PreDepositError {
         if body.contains("Amount is too low for bridge") {
-            return Self::AmountTooLow {
+            return PreDepositError::AmountTooLow {
                 message: body.to_string(),
             };
         }
 
         if body.contains("Failed to get quote") {
-            return Self::QuoteFailed {
+            return PreDepositError::QuoteFailed {
                 message: body.to_string(),
             };
         }
 
         match status {
-            429 => Self::RateLimited,
-            400..=499 => Self::ValidationError {
+            429 => PreDepositError::RateLimited,
+            400..=499 => PreDepositError::ValidationError {
                 message: body.to_string(),
             },
-            500..=599 => Self::ServerError {
+            500..=599 => PreDepositError::ServerError {
                 status,
                 message: body.to_string(),
             },
-            _ => Self::Unknown {
+            _ => PreDepositError::Unknown {
                 message: body.to_string(),
             },
         }
@@ -139,6 +202,16 @@ impl SwapError {
         }
     }
 
+    /// A failure from an idempotent phase before the deposit transfer.
+    pub fn pre(kind: PreDepositError, context: impl Into<String>) -> Self {
+        Self::new(SwapErrorKind::PreDeposit(kind), context)
+    }
+
+    /// A failure at or after the deposit transfer — never retried.
+    pub fn post(kind: PostDepositError, context: impl Into<String>) -> Self {
+        Self::new(SwapErrorKind::PostDeposit(kind), context)
+    }
+
     pub fn is_retryable(&self) -> bool {
         self.kind.is_retryable()
     }
@@ -149,22 +222,22 @@ impl SwapError {
 
     /// Classifies an [`AppError`] from a phase **before the swap's deposit
     /// transfer is submitted** (quotes, storage registration — idempotent
-    /// operations whose retry cannot double-spend inventory). Never produces
-    /// `Indeterminate` — a phase at or after the deposit transfer must
-    /// classify its own errors instead of using this; the name and
-    /// `pub(crate)` visibility exist so it cannot be reached for one.
+    /// operations whose retry cannot double-spend inventory). The phase is
+    /// in the return path's type: this can only build [`PreDepositError`]
+    /// kinds, so it structurally cannot classify a post-deposit failure as
+    /// retryable.
     pub(crate) fn from_pre_deposit_app_error(context: &str, error: &AppError) -> Self {
         let kind = match error {
-            AppError::Rpc(crate::rpc::RpcError::TimeoutError(_)) => SwapErrorKind::Timeout {
+            AppError::Rpc(crate::rpc::RpcError::TimeoutError(_)) => PreDepositError::Timeout {
                 message: error.to_string(),
             },
-            AppError::Rpc(_) => SwapErrorKind::NetworkError {
+            AppError::Rpc(_) => PreDepositError::NetworkError {
                 message: error.to_string(),
             },
-            AppError::ValidationError(m) => SwapErrorKind::ValidationError { message: m.clone() },
-            AppError::SerializationError(m) => SwapErrorKind::Unknown { message: m.clone() },
+            AppError::ValidationError(m) => PreDepositError::ValidationError { message: m.clone() },
+            AppError::SerializationError(m) => PreDepositError::Unknown { message: m.clone() },
         };
-        Self::new(kind, context)
+        Self::pre(kind, context)
     }
 }
 
@@ -217,7 +290,7 @@ impl SwapRetryConfig {
 ///
 /// Only errors where `SwapError::is_retryable()` returns true are retried.
 /// Non-retryable errors — amount-too-low, validation, and above all
-/// [`SwapErrorKind::Indeterminate`] (funds may have moved) — are returned
+/// [`PostDepositError`] (funds may have moved, or moved and failed) — are returned
 /// immediately.
 ///
 /// # Errors
@@ -257,8 +330,8 @@ where
 
     // Should not normally reach here, but be safe
     Err(last_error.unwrap_or_else(|| {
-        SwapError::new(
-            SwapErrorKind::Unknown {
+        SwapError::pre(
+            PreDepositError::Unknown {
                 message: "Retry loop exhausted".into(),
             },
             swap_name.to_string(),
@@ -273,38 +346,41 @@ mod tests {
     #[test]
     fn test_retryable_classification() {
         // QuoteFailed is not retryable — permanent "no route" condition
-        assert!(!SwapErrorKind::QuoteFailed {
+        assert!(!PreDepositError::QuoteFailed {
             message: String::new()
         }
         .is_retryable());
-        assert!(SwapErrorKind::NetworkError {
+        assert!(PreDepositError::NetworkError {
             message: String::new()
         }
         .is_retryable());
-        assert!(SwapErrorKind::ServerError {
+        assert!(PreDepositError::ServerError {
             status: 500,
             message: String::new()
         }
         .is_retryable());
-        assert!(SwapErrorKind::RateLimited.is_retryable());
-        assert!(SwapErrorKind::Timeout {
+        assert!(PreDepositError::RateLimited.is_retryable());
+        assert!(PreDepositError::Timeout {
             message: String::new()
         }
         .is_retryable());
 
         // Not retryable
-        assert!(!SwapErrorKind::AmountTooLow {
+        assert!(!PreDepositError::AmountTooLow {
             message: String::new()
         }
         .is_retryable());
-        assert!(!SwapErrorKind::ValidationError {
+        assert!(!PreDepositError::ValidationError {
             message: String::new()
         }
         .is_retryable());
-        assert!(!SwapErrorKind::Unknown {
+        assert!(!PreDepositError::Unknown {
             message: String::new()
         }
         .is_retryable());
+        // The wrapper delegates: a retryable pre-deposit kind stays
+        // retryable through SwapErrorKind.
+        assert!(SwapErrorKind::PreDeposit(PreDepositError::RateLimited).is_retryable());
     }
 
     #[test]
@@ -313,7 +389,8 @@ mod tests {
             400,
             r#"{"message":"Amount is too low for bridge, try at least 10000"}"#,
         );
-        assert!(kind.is_amount_too_low());
+        assert!(matches!(kind, PreDepositError::AmountTooLow { .. }));
+        assert!(SwapErrorKind::from(kind.clone()).is_amount_too_low());
         assert!(!kind.is_retryable());
     }
 
@@ -323,7 +400,7 @@ mod tests {
             SwapErrorKind::from_oneclick_response(400, r#"{"message":"Failed to get quote"}"#);
         // QuoteFailed is not retryable — "no route" is a permanent condition
         assert!(!kind.is_retryable());
-        assert!(!kind.is_amount_too_low());
+        assert!(matches!(kind, PreDepositError::QuoteFailed { .. }));
     }
 
     #[test]
@@ -336,7 +413,7 @@ mod tests {
     fn test_rate_limit_classification() {
         let kind = SwapErrorKind::from_oneclick_response(429, "Too Many Requests");
         assert!(kind.is_retryable());
-        assert!(matches!(kind, SwapErrorKind::RateLimited));
+        assert!(matches!(kind, PreDepositError::RateLimited));
     }
 
     /// An indeterminate error means funds may already have moved (the deposit
@@ -354,8 +431,8 @@ mod tests {
         let result = swap_with_retry(&config, "test", || {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             async {
-                Err(SwapError::new(
-                    SwapErrorKind::Indeterminate {
+                Err(SwapError::post(
+                    PostDepositError::Indeterminate {
                         message: "poll timed out after deposit".into(),
                         deposit_address: "deposit.near".into(),
                     },
@@ -367,7 +444,10 @@ mod tests {
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         let err = result.expect_err("indeterminate must surface as an error");
-        assert!(matches!(err.kind, SwapErrorKind::Indeterminate { .. }));
+        assert!(matches!(
+            err.kind,
+            SwapErrorKind::PostDeposit(PostDepositError::Indeterminate { .. })
+        ));
     }
 
     /// Transient errors before any funds move stay retryable: the wrapper
@@ -385,9 +465,9 @@ mod tests {
             async move {
                 if n == 0 {
                     Err(SwapError::new(
-                        SwapErrorKind::NetworkError {
+                        SwapErrorKind::PreDeposit(PreDepositError::NetworkError {
                             message: "connection reset".into(),
-                        },
+                        }),
                         "Quote request",
                     ))
                 } else {
@@ -401,13 +481,76 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Post-deposit failures are structurally non-retryable: the check is a
+    /// phase match, not a per-variant list, so no variant added to
+    /// [`PostDepositError`] can ever become retryable by omission.
     #[test]
-    fn indeterminate_is_not_retryable() {
-        assert!(!SwapErrorKind::Indeterminate {
-            message: String::new(),
-            deposit_address: String::new(),
+    fn post_deposit_errors_are_never_retryable() {
+        let post = [
+            PostDepositError::Indeterminate {
+                message: String::new(),
+                deposit_address: String::new(),
+            },
+            PostDepositError::Definitive {
+                message: String::new(),
+                deposit_address: String::new(),
+            },
+        ];
+        for kind in post {
+            assert!(
+                !SwapErrorKind::PostDeposit(kind).is_retryable(),
+                "post-deposit failures must never be retryable"
+            );
         }
-        .is_retryable());
+    }
+
+    /// A definitive failure (refund landed, on-chain revert, terminal failed
+    /// status) is final: the retry wrapper must return it without a second
+    /// attempt, exactly like an indeterminate one.
+    #[tokio::test]
+    async fn definitive_outcome_is_never_retried() {
+        let config = SwapRetryConfig {
+            max_attempts: 3,
+            base_delay_ms: 1,
+        };
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let result = swap_with_retry(&config, "test", || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async {
+                Err(SwapError::post(
+                    PostDepositError::Definitive {
+                        message: "deposit was refunded by 1-Click".into(),
+                        deposit_address: "deposit.near".into(),
+                    },
+                    "Deposit",
+                ))
+            }
+        })
+        .await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let err = result.expect_err("definitive must surface as an error");
+        assert!(matches!(
+            err.kind,
+            SwapErrorKind::PostDeposit(PostDepositError::Definitive { .. })
+        ));
+    }
+
+    /// The reconciliation handle must survive into the rendered message for
+    /// both post-deposit variants — it is what an operator keys on.
+    #[test]
+    fn post_deposit_display_names_the_deposit_address() {
+        let indeterminate = SwapErrorKind::PostDeposit(PostDepositError::Indeterminate {
+            message: "poll timed out".into(),
+            deposit_address: "abc123.near".into(),
+        });
+        assert!(indeterminate.to_string().contains("abc123.near"));
+        let definitive = SwapErrorKind::PostDeposit(PostDepositError::Definitive {
+            message: "refunded".into(),
+            deposit_address: "abc123.near".into(),
+        });
+        assert!(definitive.to_string().contains("abc123.near"));
     }
 
     /// A persistently retryable error is attempted exactly `max_attempts`
@@ -423,8 +566,8 @@ mod tests {
         let result = swap_with_retry(&config, "test", || {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             async {
-                Err(SwapError::new(
-                    SwapErrorKind::NetworkError {
+                Err(SwapError::pre(
+                    PreDepositError::NetworkError {
                         message: "connection reset".into(),
                     },
                     "Quote request",
@@ -435,30 +578,52 @@ mod tests {
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
         let err = result.expect_err("exhausted retries must surface an error");
-        assert!(matches!(err.kind, SwapErrorKind::NetworkError { .. }));
+        assert!(matches!(
+            err.kind,
+            SwapErrorKind::PreDeposit(PreDepositError::NetworkError { .. })
+        ));
     }
 
-    /// The pre-deposit classifier must never produce `Indeterminate`: that
-    /// kind asserts funds may have moved, which no pre-deposit phase can
-    /// cause — and producing it would be the signal the helper is being
-    /// reused post-deposit.
+    /// The pre-deposit classifier is phase-typed: it can only produce
+    /// `PreDeposit` kinds (post-deposit variants aren't reachable from its
+    /// implementation), so the old "never produces Indeterminate" test is a
+    /// compile-time fact. What remains testable is the mapping itself.
     #[test]
-    fn pre_deposit_classifier_never_produces_indeterminate() {
-        let errors = [
-            AppError::Rpc(crate::rpc::RpcError::TimeoutError(
+    fn pre_deposit_classifier_maps_app_errors_by_transience() {
+        let classified = SwapError::from_pre_deposit_app_error(
+            "Storage deposit",
+            &AppError::Rpc(crate::rpc::RpcError::TimeoutError(
                 "timed out after 30s".into(),
             )),
-            AppError::Rpc(crate::rpc::RpcError::WrongResponseKind("x".into())),
-            AppError::ValidationError("x".into()),
-            AppError::SerializationError("x".into()),
-        ];
-        for error in &errors {
-            let classified = SwapError::from_pre_deposit_app_error("Storage deposit", error);
-            assert!(
-                !matches!(classified.kind, SwapErrorKind::Indeterminate { .. }),
-                "pre-deposit classifier must never classify as Indeterminate"
-            );
-        }
+        );
+        assert!(matches!(
+            classified.kind,
+            SwapErrorKind::PreDeposit(PreDepositError::Timeout { .. })
+        ));
+        let classified = SwapError::from_pre_deposit_app_error(
+            "Storage deposit",
+            &AppError::Rpc(crate::rpc::RpcError::WrongResponseKind("x".into())),
+        );
+        assert!(matches!(
+            classified.kind,
+            SwapErrorKind::PreDeposit(PreDepositError::NetworkError { .. })
+        ));
+        let classified = SwapError::from_pre_deposit_app_error(
+            "Storage deposit",
+            &AppError::ValidationError("x".into()),
+        );
+        assert!(matches!(
+            classified.kind,
+            SwapErrorKind::PreDeposit(PreDepositError::ValidationError { .. })
+        ));
+        let classified = SwapError::from_pre_deposit_app_error(
+            "Storage deposit",
+            &AppError::SerializationError("x".into()),
+        );
+        assert!(matches!(
+            classified.kind,
+            SwapErrorKind::PreDeposit(PreDepositError::Unknown { .. })
+        ));
     }
 
     /// A large configured attempt count must not overflow the shift or the

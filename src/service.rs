@@ -1215,21 +1215,30 @@ impl LiquidatorService {
                     swapped += 1;
                 }
                 Err(e) => {
+                    // Named per phase, no wildcards: a new variant on
+                    // either side must make an explicit funds-safety and
+                    // notification decision here to compile.
                     match &e.kind {
-                        crate::swap::SwapErrorKind::AmountTooLow { .. } => {
+                        crate::swap::SwapErrorKind::PreDeposit(
+                            crate::swap::PreDepositError::AmountTooLow { .. },
+                        ) => {
                             tracing::debug!(
                                 from = %asset_key,
                                 error = %e,
                                 "Batch swap skipped - amount too low for provider"
                             );
                         }
-                        crate::swap::SwapErrorKind::QuoteFailed { .. } => {
+                        crate::swap::SwapErrorKind::PreDeposit(
+                            crate::swap::PreDepositError::QuoteFailed { .. },
+                        ) => {
                             tracing::debug!(
                                 from = %asset_key,
                                 "No swap route available for asset, skipping batch swap"
                             );
                         }
-                        crate::swap::SwapErrorKind::Indeterminate { .. } => {
+                        crate::swap::SwapErrorKind::PostDeposit(
+                            crate::swap::PostDepositError::Indeterminate { .. },
+                        ) => {
                             // Not "will retry": the balance re-read next round
                             // decides — a settled swap leaves nothing to
                             // re-swap, a refund reappears in the balance.
@@ -1252,18 +1261,31 @@ impl LiquidatorService {
                                 &e.to_string(),
                             );
                         }
-                        // Named, not a wildcard: a new SwapErrorKind variant
-                        // must make an explicit funds-safety and notification
-                        // decision here to compile. These re-attempt next
-                        // round (the batch loop re-runs over held balances)
-                        // and stay log-only, like every non-indeterminate
-                        // batch failure before this change.
-                        crate::swap::SwapErrorKind::NetworkError { .. }
-                        | crate::swap::SwapErrorKind::ServerError { .. }
-                        | crate::swap::SwapErrorKind::RateLimited
-                        | crate::swap::SwapErrorKind::Timeout { .. }
-                        | crate::swap::SwapErrorKind::ValidationError { .. }
-                        | crate::swap::SwapErrorKind::Unknown { .. } => {
+                        // A definitive post-deposit failure is final and
+                        // accounted (refund landed or transfer reverted), so
+                        // the refreshed balance re-attempts next round; no
+                        // alert, matching pre-split behavior for these
+                        // outcomes — only "funds unaccounted" pages anyone.
+                        crate::swap::SwapErrorKind::PostDeposit(
+                            crate::swap::PostDepositError::Definitive { .. },
+                        ) => {
+                            tracing::warn!(
+                                from = %asset_key,
+                                error = %e,
+                                "Batch swap failed definitively - funds retained or refunded; next round re-attempts from the refreshed balance"
+                            );
+                        }
+                        // These re-attempt next round (the batch loop re-runs
+                        // over held balances) and stay log-only, like every
+                        // non-indeterminate batch failure before this change.
+                        crate::swap::SwapErrorKind::PreDeposit(
+                            crate::swap::PreDepositError::NetworkError { .. }
+                            | crate::swap::PreDepositError::ServerError { .. }
+                            | crate::swap::PreDepositError::RateLimited
+                            | crate::swap::PreDepositError::Timeout { .. }
+                            | crate::swap::PreDepositError::ValidationError { .. }
+                            | crate::swap::PreDepositError::Unknown { .. },
+                        ) => {
                             tracing::info!(
                                 from = %asset_key,
                                 error = %e,

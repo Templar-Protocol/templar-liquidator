@@ -14,7 +14,7 @@ The bot refuses to start without these three:
 
 | Env var | CLI flag | Description |
 |---|---|---|
-| `REGISTRY_ACCOUNT_IDS` | `--registries`, `-r` | Market registry account(s) to discover markets from. As a **CLI flag**, repeatable (`--registries a.near --registries b.near`). As the **env var**, this `Vec` has no `value_delimiter`, unlike the comma-delimited filters below — one registry per assignment; `REGISTRY_ACCOUNT_IDS=a.near,b.near` parses as a single invalid account id, not two registries. Multiple registries via env aren't currently expressible; see [docs/backlog.md](backlog.md). |
+| `REGISTRY_ACCOUNT_IDS` | `--registries`, `-r` | Market registry account(s) to discover markets from. Comma-separated, like the filter knobs below (`REGISTRY_ACCOUNT_IDS=a.near,b.near`); the CLI flag is also repeatable (`--registries a.near --registries b.near`). |
 | `SIGNER_KEY` | `--signer-key`, `-k` | The signer account's private key, e.g. `ed25519:...`. |
 | `SIGNER_ACCOUNT_ID` | `--signer-account`, `-s` | The NEAR account the bot signs transactions as. |
 

@@ -72,6 +72,36 @@ pub(crate) fn borrow_to_collateral(
         .to_u128_floor()
 }
 
+/// Classifies a below-minimum decline for inventory-percentage sizing: a
+/// funding cause requires BOTH that the inventory-derived target bound the
+/// slice (the position's buffered cap did not clamp it) AND that a larger
+/// balance could actually reach the minimum — the slice only grows up to
+/// the cap, so the reachability test is whether the cap-derived repay
+/// itself clears the minimum. Inventory-bound-but-unreachable (a dust
+/// position with a small balance) must not page the top-up alert: no
+/// top-up ever clears it. A conversion failure on the cap fails toward
+/// [`DeclineReason::NotViable`].
+fn below_minimum_decline_reason(
+    requires_full: bool,
+    collateral_amount: u128,
+    liquidatable_collateral: u128,
+    price_pair: &PricePair,
+    liquidation_spread: Decimal,
+    contract_minimum: u128,
+) -> DeclineReason {
+    let cap_collateral = apply_liquidatable_cap_buffer(liquidatable_collateral);
+    let inventory_bound = !requires_full && collateral_amount < cap_collateral;
+    let cap_repay_reaches_minimum =
+        collateral_to_borrow(cap_collateral, price_pair, liquidation_spread)
+            .map(|repay| repay.saturating_add((repay * SAFETY_BUFFER_BPS) / 10_000))
+            .is_some_and(|repay| repay >= contract_minimum);
+    if inventory_bound && cap_repay_reaches_minimum {
+        DeclineReason::InsufficientInventory
+    } else {
+        DeclineReason::NotViable
+    }
+}
+
 /// Convert a collateral asset amount to borrow asset amount.
 ///
 /// Calculates the exact borrow amount needed to purchase the given collateral amount,
@@ -112,29 +142,33 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     ///
     /// # Returns
     ///
-    /// `Some((repay_amount, collateral_amount))` to attempt a liquidation, or
-    /// `None` to skip this position for this round — e.g. inventory too low,
-    /// below the contract's minimum borrow amount, or the buffered eligibility
-    /// cap rounds down to nothing for a dust-sized position. `None` is the
-    /// *only* "don't liquidate" signal this trait defines: the caller does not
-    /// separately check the returned amounts for zero before submitting a
-    /// liquidation transaction, so an implementation must never return
-    /// `Some((U128(0), _))` — that would attempt an on-chain liquidation for a
-    /// zero repay amount instead of skipping cleanly.
+    /// [`StrategyDecision::Sized`] to attempt a liquidation, or
+    /// [`StrategyDecision::Decline`] with a reason to skip this position
+    /// this round. Choose the reason honestly — it drives the operator's
+    /// unfunded alerting: [`DeclineReason::InsufficientInventory`] when
+    /// topping up inventory would permit the attempt,
+    /// [`DeclineReason::NotViable`] when nothing would (dust, repay below
+    /// the market minimum, conversion failure). A `Sized` with a zero
+    /// repay or collateral amount is rejected by the caller's fail-closed
+    /// validation (the position is skipped with a warning naming the
+    /// strategy) rather than submitted on-chain.
     ///
-    /// # Caller trust — no re-clamping
+    /// # Caller validation — checked, not re-clamped
     ///
-    /// [`crate::Liquidator::liquidate`] passes the returned amounts to the
-    /// liquidation transaction essentially unmodified (only wrapped into typed
-    /// amounts); it does not independently re-check them against
-    /// `available_balance` or the position's on-chain eligibility cap. Any
-    /// safety margin — headroom against price drift between scan and execution,
-    /// or staying under the contract's liquidatable-collateral cap — must be
-    /// built into the returned amount by the strategy itself. Both built-in
-    /// strategies do this via the module-level `SAFETY_BUFFER_BPS` and
-    /// `LIQUIDATABLE_CAP_BUFFER_BPS` constants (see `apply_liquidatable_cap_buffer`
-    /// and `min_with_cap_buffer`); a new strategy is free to use a different
-    /// margin, but needs one.
+    /// [`crate::Liquidator::liquidate`] validates the returned amounts and
+    /// then passes them to the liquidation transaction unmodified (only
+    /// wrapped into typed amounts) — it never silently adjusts them. The
+    /// validation rejects (skips the position, fail closed): zero amounts,
+    /// and a repay above the share of `available_balance` this strategy
+    /// declares via [`max_liquidation_percentage`](Self::max_liquidation_percentage).
+    /// It does NOT check the position's on-chain eligibility cap, so any
+    /// safety margin — headroom against price drift between scan and
+    /// execution, or staying under the contract's liquidatable-collateral
+    /// cap — must still be built into the returned amount by the strategy
+    /// itself. Both built-in strategies do this via the module-level
+    /// `SAFETY_BUFFER_BPS` and `LIQUIDATABLE_CAP_BUFFER_BPS` constants (see
+    /// `apply_liquidatable_cap_buffer` and `min_with_cap_buffer`); a new
+    /// strategy is free to use a different margin, but needs one.
     ///
     /// # Arguments
     ///
@@ -159,7 +193,7 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
         configuration: &MarketConfiguration,
         available_balance: U128,
         market_version: Option<crate::scanner::MarketVersion>,
-    ) -> LiquidatorResult<Option<(U128, U128)>>;
+    ) -> LiquidatorResult<StrategyDecision>;
 
     /// Determines whether a sized liquidation is still worth submitting.
     ///
@@ -179,11 +213,12 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     /// # Returns
     ///
     /// `true` if the liquidation should proceed, `false` otherwise. A `false`
-    /// here produces [`crate::LiquidationOutcome::Unprofitable`], distinct from
-    /// the `None` returned by `calculate_liquidation_amount` — both stop the
-    /// liquidation, but only this one implies the position genuinely isn't
-    /// worth repaying at current prices/gas, rather than "we lack the inventory
-    /// or eligibility to attempt it."
+    /// here produces [`crate::LiquidationOutcome::Unprofitable`], distinct
+    /// from a [`StrategyDecision::Decline`] from `calculate_liquidation_amount`
+    /// — both stop the liquidation, but only this one implies the position
+    /// genuinely isn't worth repaying at current prices/gas; a decline's
+    /// [`DeclineReason`] states whether inventory or viability was the
+    /// obstacle.
     ///
     /// # Errors
     /// Returns an error if profitability calculations fail.
@@ -225,16 +260,48 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     /// Returns the strategy name for logging and debugging.
     fn strategy_name(&self) -> &'static str;
 
-    /// Returns the maximum liquidation percentage (0-100) this strategy will
-    /// ever request, used for logging only — it is not enforced against the
-    /// value returned by [`calculate_liquidation_amount`](Self::calculate_liquidation_amount).
+    /// Returns the maximum share of available inventory (0-100, in
+    /// percent) this strategy will ever commit to one sizing. **Enforced by
+    /// the caller**: a `calculate_liquidation_amount` result whose repay
+    /// exceeds this share of the available balance is skipped fail-closed
+    /// (with a warning naming the strategy), so keep the declaration
+    /// truthful — an under-declared value silently vetoes your own sizing.
     ///
     /// # Default
     ///
-    /// Returns 100 (full liquidation) by default.
+    /// Returns 100 (may commit the full available balance) by default.
     fn max_liquidation_percentage(&self) -> u8 {
         100
     }
+}
+
+/// A sizing decision: the amounts to submit, or a typed decline. The
+/// decline reason is API, not just a log line, because the caller's
+/// unfunded accounting (`liquidations_skipped_unfunded_total`) depends on
+/// distinguishing "topping up inventory fixes this" from "nothing will".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategyDecision {
+    /// Attempt a liquidation: (repay amount, collateral amount), both
+    /// nonzero — zero amounts are rejected fail-closed by the caller.
+    Sized(U128, U128),
+    /// Skip this position this round, for the stated reason.
+    Decline(DeclineReason),
+}
+
+/// Why a strategy declined to size a position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclineReason {
+    /// Available inventory cannot fund the repay this position requires —
+    /// topping up inventory is the fix. Reported as
+    /// [`crate::LiquidationOutcome::SkippedUnfunded`] and counted in the
+    /// `liquidations_skipped_unfunded_total` metric.
+    InsufficientInventory,
+    /// A cause no amount of inventory can clear: dust-sized position,
+    /// repay below the market minimum, a failed conversion. Details are in
+    /// the strategy's own log line; reported as a plain
+    /// [`crate::LiquidationOutcome::Skipped`] so the unfunded alert cannot
+    /// latch on it.
+    NotViable,
 }
 
 /// A liquidation percentage, provably in `1..=100`: out-of-range values are
@@ -355,7 +422,7 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
         configuration: &MarketConfiguration,
         available_balance: U128,
         market_version: Option<crate::scanner::MarketVersion>,
-    ) -> LiquidatorResult<Option<(U128, U128)>> {
+    ) -> LiquidatorResult<StrategyDecision> {
         let available_u128: u128 = available_balance.into();
 
         let available_after_buffer = (available_u128 * (10_000 - SAFETY_BUFFER_BPS)) / 10_000;
@@ -368,7 +435,9 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
                 percentage = %self.target_percentage,
                 "Target liquidation amount is zero"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(
+                DeclineReason::InsufficientInventory,
+            ));
         }
 
         let price_pair = configuration
@@ -387,7 +456,7 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
                 borrow_amount = %target_amount,
                 "Could not calculate collateral amount from borrow amount"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(DeclineReason::NotViable));
         };
 
         // Pre-partial markets (version < 1.1.0, or unknown) require
@@ -404,7 +473,7 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
                 liquidatable_collateral = %u128::from(liquidatable_collateral),
                 "Buffered liquidatable cap rounded to zero — position too small to liquidate safely"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(DeclineReason::NotViable));
         }
 
         let Some(theoretical_amount) = collateral_to_borrow(
@@ -416,7 +485,7 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
                 collateral_amount = %target_collateral,
                 "Could not calculate borrow amount from collateral"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(DeclineReason::NotViable));
         };
 
         let final_amount =
@@ -436,20 +505,34 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
                     "Insufficient balance for liquidation"
                 );
             }
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(
+                DeclineReason::InsufficientInventory,
+            ));
         }
 
         let contract_minimum: u128 = configuration.borrow_range.minimum.into();
         if final_amount < contract_minimum {
+            let reason = below_minimum_decline_reason(
+                requires_full,
+                collateral_amount,
+                liquidatable_collateral.into(),
+                &price_pair,
+                configuration.liquidation_maximum_spread,
+                contract_minimum,
+            );
             tracing::warn!(
                 amount = %final_amount,
                 contract_minimum = %contract_minimum,
+                reason = ?reason,
                 "Liquidation amount below contract minimum"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(reason));
         }
 
-        Ok(Some((U128(final_amount), U128(target_collateral))))
+        Ok(StrategyDecision::Sized(
+            U128(final_amount),
+            U128(target_collateral),
+        ))
     }
 
     fn min_profit_margin_bps(&self) -> u32 {
@@ -461,7 +544,12 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
     }
 
     fn max_liquidation_percentage(&self) -> u8 {
-        self.target_percentage.get()
+        // The true ceiling is 100, not `target_percentage`: on markets
+        // without partial-liquidation support this strategy deliberately
+        // sizes the full required repay, bounded only by the available
+        // balance — declaring the partial target here would make the
+        // caller's cap veto exactly the large positions on those markets.
+        100
     }
 }
 
@@ -533,7 +621,7 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
         configuration: &MarketConfiguration,
         available_balance: U128,
         market_version: Option<crate::scanner::MarketVersion>,
-    ) -> LiquidatorResult<Option<(U128, U128)>> {
+    ) -> LiquidatorResult<StrategyDecision> {
         let decimals = configuration
             .price_oracle_configuration
             .borrow_asset_decimals;
@@ -549,7 +637,9 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
                 available_balance = %crate::format::format_amount(available_u128, decimals, &asset_id),
                 "Insufficient balance for fixed amount liquidation"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(
+                DeclineReason::InsufficientInventory,
+            ));
         }
 
         let price_pair = configuration
@@ -569,7 +659,7 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
                 fixed_amount = %crate::format::format_amount(fixed_amount, decimals, &asset_id),
                 "Could not calculate collateral amount from fixed amount"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(DeclineReason::NotViable));
         };
 
         // Pre-partial markets (version < 1.1.0, or unknown) require
@@ -587,7 +677,7 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
                 liquidatable_collateral = %liquidatable_u128,
                 "Buffered liquidatable cap rounded to zero — position too small to liquidate safely"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(DeclineReason::NotViable));
         }
 
         let Some(expected_minimum) = collateral_to_borrow(
@@ -599,7 +689,7 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
                 collateral_amount = %target_collateral,
                 "Could not calculate borrow amount from collateral"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(DeclineReason::NotViable));
         };
 
         let amount_with_buffer = expected_minimum
@@ -615,7 +705,7 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
                 fixed_amount = %crate::format::format_amount(fixed_amount, decimals, &asset_id),
                 "Fixed budget cannot fund the required full liquidation, skipping"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(DeclineReason::NotViable));
         }
 
         // Cap at fixed_amount (the maximum we're willing to send)
@@ -628,7 +718,7 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
                 contract_minimum = %contract_minimum,
                 "Fixed amount below contract minimum"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(DeclineReason::NotViable));
         }
 
         if requires_full && final_amount > available_u128 {
@@ -637,10 +727,15 @@ impl LiquidationStrategy for FixedAmountLiquidationStrategy {
                 available = %available_u128,
                 "Market requires full collateral liquidation but insufficient balance"
             );
-            return Ok(None);
+            return Ok(StrategyDecision::Decline(
+                DeclineReason::InsufficientInventory,
+            ));
         }
 
-        Ok(Some((U128(final_amount), U128(target_collateral))))
+        Ok(StrategyDecision::Sized(
+            U128(final_amount),
+            U128(target_collateral),
+        ))
     }
 
     fn min_profit_margin_bps(&self) -> u32 {
@@ -716,9 +811,15 @@ mod tests {
             let result = strategy
                 .calculate_liquidation_amount(&pos, &prices, &cfg, U128(1_000_000_000_000), version)
                 .expect("no error");
-            assert!(
-                result.is_none(),
-                "budget cannot fund a full liquidation; must skip (version {version:?}), got {result:?}"
+            // NotViable, not InsufficientInventory: the cap here is the
+            // operator's configured FIXED_LIQUIDATION_AMOUNT_USD, a
+            // deliberate config decision — topping up inventory changes
+            // nothing, so the unfunded alert must not page for it. (The
+            // wallet-balance branch is separately InsufficientInventory.)
+            assert_eq!(
+                result,
+                StrategyDecision::Decline(DeclineReason::NotViable),
+                "budget-capped full liquidation must decline as not-viable (version {version:?})"
             );
         }
     }
@@ -740,9 +841,75 @@ mod tests {
         let result = strategy
             .calculate_liquidation_amount(&pos, &prices, &cfg, U128(1_000_000_000_000), None)
             .expect("no error");
-        assert!(
-            result.is_none(),
-            "unvaluable collateral must skip, got {result:?}"
+        assert_eq!(
+            result,
+            StrategyDecision::Decline(DeclineReason::NotViable),
+            "unvaluable collateral must decline as not-viable — no inventory clears it"
+        );
+    }
+
+    /// On a partial-supporting market, a percentage slice that lands under
+    /// the contract minimum is inventory-clearable — the slice scales with
+    /// the balance — so it must decline as InsufficientInventory. A
+    /// position-capped (dust) slice is not: no inventory changes it.
+    #[test]
+    fn below_minimum_percentage_slice_classifies_by_binding_constraint() {
+        // The fixture's minimum is 1 raw unit; raise it so a small slice
+        // can land under it (the range type is construction-validated, so
+        // patch the JSON rather than the struct).
+        let cfg: MarketConfiguration = near_sdk::serde_json::from_str(&IBTC_CONFIG_JSON.replace(
+            r#""borrow_range":{"minimum":"1""#,
+            r#""borrow_range":{"minimum":"1000000""#,
+        ))
+        .expect("patched fixture parses");
+        let prices = btc_usdc_prices(&cfg);
+        let partial = Some(crate::scanner::MarketVersion::new(1, 1, 0));
+
+        // Large position, small inventory: the 10% inventory slice is the
+        // binding constraint and lands under the raised market minimum —
+        // more inventory clears it.
+        let big_pos = position(100_000_000, 3_980_000);
+        let strategy =
+            PercentageLiquidationStrategy::new("10".parse::<LiquidationPercentage>().unwrap(), 50);
+        let result = strategy
+            .calculate_liquidation_amount(&big_pos, &prices, &cfg, U128(2_000_000), partial)
+            .expect("no error");
+        assert_eq!(
+            result,
+            StrategyDecision::Decline(DeclineReason::InsufficientInventory),
+            "an inventory-bound slice under the minimum is a funding cause"
+        );
+
+        // Small position, roomy inventory: the position's buffered cap
+        // binds and the amount lands under the minimum; no inventory
+        // clears it.
+        let dust_pos = position(1_000, 40);
+        let result = strategy
+            .calculate_liquidation_amount(
+                &dust_pos,
+                &prices,
+                &cfg,
+                U128(1_000_000_000_000),
+                partial,
+            )
+            .expect("no error");
+        assert_eq!(
+            result,
+            StrategyDecision::Decline(DeclineReason::NotViable),
+            "a position-capped dust slice is not a funding cause"
+        );
+
+        // Dust position AND small inventory: the slice is inventory-bound
+        // right now, but growing the balance only moves it up to the
+        // position's cap — whose repay still cannot reach the minimum. A
+        // top-up never clears it, so it must NOT page the unfunded alert.
+        let result = strategy
+            .calculate_liquidation_amount(&dust_pos, &prices, &cfg, U128(50_000), partial)
+            .expect("no error");
+        assert_eq!(
+            result,
+            StrategyDecision::Decline(DeclineReason::NotViable),
+            "inventory-bound but not inventory-clearable must stay NotViable"
         );
     }
 
@@ -755,7 +922,7 @@ mod tests {
         let pos = position(100_000_000, 3_980_000);
         let strategy = FixedAmountLiquidationStrategy::new(100.0, 50);
 
-        let (repay, collateral) = strategy
+        let StrategyDecision::Sized(repay, collateral) = strategy
             .calculate_liquidation_amount(
                 &pos,
                 &prices,
@@ -764,7 +931,9 @@ mod tests {
                 Some(crate::scanner::MarketVersion::new(1, 1, 0)),
             )
             .expect("no error")
-            .expect("partial liquidation is fundable");
+        else {
+            panic!("partial liquidation is fundable");
+        };
         assert!(
             repay.0 <= 100_000_000,
             "repay {repay:?} within the $100 budget"
@@ -780,7 +949,10 @@ mod tests {
             PercentageLiquidationStrategy::new("50".parse::<LiquidationPercentage>().unwrap(), 50);
         assert_eq!(strategy.min_profit_margin_bps, 50);
         assert_eq!(strategy.strategy_name(), "Percentage Liquidation");
-        assert_eq!(strategy.max_liquidation_percentage(), 50);
+        // 100 even with a 50% partial target: the ceiling is what the
+        // caller enforces, and the full-liquidation path legitimately
+        // commits up to the whole available balance.
+        assert_eq!(strategy.max_liquidation_percentage(), 100);
     }
 
     /// The percentage bounds live in the type, not in a constructor panic:
@@ -938,7 +1110,7 @@ mod tests {
         // For 33: (33 * 9_700) / 10_000 = 320_100 / 10_000 = 32. Still > 0.
         // For 1: (1 * 9_700) / 10_000 = 9_700 / 10_000 = 0.
         assert_eq!(apply_liquidatable_cap_buffer(1), 0);
-        // Strategies must guard against this case (returns Ok(None) instead of
+        // Strategies must guard against this case (declines instead of
         // sending borrow with zero collateral request).
         assert_eq!(min_with_cap_buffer(100, 1), 0);
     }

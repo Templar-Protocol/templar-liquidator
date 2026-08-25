@@ -63,8 +63,10 @@ pub struct CollateralPriceInfo {
 pub struct ServiceConfig {
     /// Market registries to monitor
     pub registries: Vec<AccountId>,
-    /// Signer key for transactions
-    pub signer_key: near_crypto::SecretKey,
+    /// Signer key for transactions — validated at construction (see
+    /// [`crate::config::ValidatedSignerKey`]): a `ServiceConfig` cannot
+    /// hold a malformed or mismatched keypair.
+    pub signer_key: crate::config::ValidatedSignerKey,
     /// Signer account ID
     pub signer_account: AccountId,
     /// Network to operate on
@@ -243,9 +245,10 @@ impl LiquidatorService {
         // `near_crypto::SecretKey`, so round-trip through the shared string form.
         let secret_key: near_api::SecretKey = config
             .signer_key
+            .secret_key()
             .to_string()
             .parse()
-            .expect("invalid signer secret key");
+            .expect("invalid signer secret key (unreachable: ValidatedSignerKey performs this parse at construction)");
 
         // The methods client and the oracle-updates client share one operation driver
         // (store, signer pool, executor) and a base context, so idempotency and replay

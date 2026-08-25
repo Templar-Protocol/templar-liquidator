@@ -39,7 +39,15 @@ async fn main() -> std::process::ExitCode {
     let args = Args::parse_args();
     args.log_startup();
 
-    let config = args.build_config();
+    let config = match args.build_config() {
+        Ok(config) => config,
+        Err(message) => {
+            // A clean, actionable startup error — not a panic: the message
+            // already withholds secret material and names the fix.
+            tracing::error!("{message}");
+            return std::process::ExitCode::from(2);
+        }
+    };
     let run_mode = config.run_mode;
 
     // Create and run service

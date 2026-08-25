@@ -142,14 +142,17 @@ impl From<inventory::InventoryError> for LiquidatorError {
 pub struct RoundSummary {
     /// Positions that reached profitability evaluation or a submitted
     /// transaction this round. Excludes positions skipped for insufficient
-    /// inventory (bucketed as `not_liquidatable` alongside genuinely healthy
-    /// positions — see [`LiquidationOutcome::Skipped`]) and any
-    /// scan/preparation-phase error before evaluation (e.g. a failed RPC
-    /// read), since in both cases it isn't known whether the position was
-    /// actually liquidatable. This undercounts true underwater positions;
-    /// splitting `Skipped` into "healthy" vs. "liquidatable but unfunded" is
-    /// tracked as follow-up work, not done here.
+    /// inventory (counted in [`skipped_unfunded`](Self::skipped_unfunded)),
+    /// every other skip (maintenance-required, unpriceable, strategy
+    /// declined, iteration budget), and any scan/preparation-phase error
+    /// before evaluation. Precisely: positions whose evaluation reached an
+    /// economic submit/no-submit decision — attempted plus unprofitable.
     pub candidates: u64,
+    /// Positions that were liquidatable but funding did not permit an
+    /// attempt — see [`LiquidationOutcome::SkippedUnfunded`] for the
+    /// deliberately narrow definition. The "money left on the table"
+    /// number, exposed as the `liquidations_skipped_unfunded_total` metric.
+    pub skipped_unfunded: u64,
     /// Liquidation transactions submitted (or simulated in dry-run).
     pub attempted: u64,
     /// Liquidations that landed successfully.
@@ -167,6 +170,7 @@ impl RoundSummary {
     /// Folds another round's tally into this one.
     pub fn merge(&mut self, other: Self) {
         self.candidates += other.candidates;
+        self.skipped_unfunded += other.skipped_unfunded;
         self.attempted += other.attempted;
         self.succeeded += other.succeeded;
         self.failed += other.failed;
@@ -184,10 +188,22 @@ pub enum LiquidationOutcome {
     /// or was liquidated by someone else). Distinct from `Skipped` —
     /// `Healthy` means the chain confirmed the position is OK.
     Healthy,
-    /// We chose not to liquidate this round (insufficient inventory, below
-    /// contract minimum, strategy returned no target, etc.). The position
+    /// We chose not to liquidate this round for a non-funding reason
+    /// (maintenance-required, unpriceable, iteration budget). The position
     /// may still be liquidatable.
     Skipped,
+    /// The position was liquidatable, but funding did not permit an
+    /// attempt: balance below the contract's minimum borrow amount, the
+    /// strategy reporting
+    /// [`DeclineReason::InsufficientInventory`](crate::liquidation_strategy::DeclineReason),
+    /// or a lost inventory race. Deliberately excludes
+    /// [`NotViable`](crate::liquidation_strategy::DeclineReason::NotViable)
+    /// declines (dust, repay under the market minimum, conversion
+    /// failures, a config-capped fixed budget) — causes no inventory can
+    /// clear, which would latch the alert this outcome exists for. Alert
+    /// on the `liquidations_skipped_unfunded_total` counter growing:
+    /// topping up inventory is the fix.
+    SkippedUnfunded,
     /// Position is liquidatable but unprofitable
     Unprofitable,
 }
@@ -523,11 +539,13 @@ enum StatusCheck {
 enum Sizing {
     Sized(SizedLiquidation),
     /// Inventory is below the contract's minimum borrow amount — reported
-    /// `Skipped` regardless of iteration (matching the historical behavior;
-    /// the cause is logged at the decision site).
+    /// `SkippedUnfunded` on a first iteration, `Liquidated` after a
+    /// successful one (the executed transaction stays counted; the cause is
+    /// logged at the decision site).
     InventoryBelowMinimum,
-    /// The strategy declined to size (it logged why).
-    Declined,
+    /// The strategy declined to size, or its output failed caller-side
+    /// validation — the reason decides the skip bucket.
+    Declined(crate::liquidation_strategy::DeclineReason),
 }
 
 /// How the profitability assessment ended.
@@ -545,19 +563,43 @@ enum Assessment {
 enum Evaluation {
     /// Healthy or gone — nothing to do.
     Healthy,
-    /// Reported `Skipped` regardless of iteration: maintenance-required (not
-    /// healthy — that would clear dedup state — and never liquidatable), or
-    /// inventory below the contract minimum.
+    /// Maintenance-required: not healthy and never liquidatable.
+    /// `Skipped` on a first iteration — which leaves the borrower's
+    /// failure-dedup state in place. After a successful iteration the
+    /// position reports `Liquidated` (the executed transaction stays
+    /// counted), which — like every post-success mapping — clears the
+    /// borrower's failure dedup: a transaction landed, so suppressing the
+    /// next failure alert would hide a fresh problem.
     SkipTerminal,
     /// The loop's iteration budget is spent.
     MaxedOut,
-    /// Skip whose position-level outcome depends on the loop: `Skipped` on
-    /// the first iteration, `Liquidated` after a successful one.
-    Skip,
+    /// Skip whose position-level outcome depends on the loop: `Liquidated`
+    /// after a successful iteration, else per the cause.
+    Skip(SkipCause),
     /// Priced cleanly, but the margin isn't there.
     Unprofitable,
     /// Execute this plan.
     Proceed(LiquidationPlan),
+}
+
+/// Why a loop-dependent skip happened — decides which skip bucket a
+/// first-iteration stop reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipCause {
+    /// Unambiguously funding: inventory below the contract's minimum
+    /// borrow amount, or the strategy reporting
+    /// [`InsufficientInventory`](crate::liquidation_strategy::DeclineReason::InsufficientInventory)
+    /// — reports [`LiquidationOutcome::SkippedUnfunded`].
+    Unfunded,
+    /// The strategy declined as
+    /// [`NotViable`](crate::liquidation_strategy::DeclineReason::NotViable)
+    /// (a cause no inventory can clear — folding those into the unfunded
+    /// alert would latch it permanently), or its output failed caller-side
+    /// validation — reports [`LiquidationOutcome::Skipped`].
+    StrategyDeclined,
+    /// The position could not be priced — reports
+    /// [`LiquidationOutcome::Skipped`].
+    Unpriceable,
 }
 
 /// The end-of-position log the driver should emit for a terminal mapping —
@@ -582,10 +624,10 @@ struct Stop {
 /// Maps one iteration's evaluation to either a plan to execute or the stop
 /// that ends the loop. The rule: a stop on an iteration after a successful
 /// liquidation (`after_success`) reports `Liquidated` for the position,
-/// whatever stopped the loop — except the terminal skips
-/// (maintenance-required, inventory below the contract minimum), which
-/// report `Skipped` regardless, and a spent iteration budget with nothing
-/// executed, which is `Skipped`, never a fabricated `Liquidated`.
+/// whatever stopped the loop — a stop after an executed transaction must
+/// keep it in the attempted/succeeded counts. The one asymmetry left: a
+/// spent iteration budget with nothing executed is `Skipped`, never a
+/// fabricated `Liquidated`.
 fn map_evaluation(
     evaluation: Evaluation,
     after_success: bool,
@@ -600,7 +642,14 @@ fn map_evaluation(
                 stop(LiquidationOutcome::Healthy, StopLog::None)
             }
         }
-        Evaluation::SkipTerminal => stop(LiquidationOutcome::Skipped, StopLog::None),
+        Evaluation::SkipTerminal => stop(
+            if after_success {
+                LiquidationOutcome::Liquidated
+            } else {
+                LiquidationOutcome::Skipped
+            },
+            StopLog::None,
+        ),
         Evaluation::MaxedOut => {
             if after_success {
                 stop(LiquidationOutcome::Liquidated, StopLog::MaxedOut)
@@ -611,11 +660,16 @@ fn map_evaluation(
                 )
             }
         }
-        Evaluation::Skip => stop(
+        Evaluation::Skip(cause) => stop(
             if after_success {
                 LiquidationOutcome::Liquidated
             } else {
-                LiquidationOutcome::Skipped
+                match cause {
+                    SkipCause::Unfunded => LiquidationOutcome::SkippedUnfunded,
+                    SkipCause::StrategyDeclined | SkipCause::Unpriceable => {
+                        LiquidationOutcome::Skipped
+                    }
+                }
             },
             StopLog::None,
         ),
@@ -629,6 +683,54 @@ fn map_evaluation(
         ),
         Evaluation::Proceed(plan) => Continue(plan),
     }
+}
+
+/// Why a strategy's sizing output was refused by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizingViolation {
+    /// A zero repay or collateral amount: the trait contract says decline
+    /// (`StrategyDecision::Decline`) instead — a zero amount would be
+    /// submitted on-chain.
+    ZeroAmount,
+    /// The repay amount exceeds the share of available inventory the
+    /// strategy itself declares via `max_liquidation_percentage()`.
+    ExceedsDeclaredMax { cap: u128 },
+    /// The declaration itself is out of range: `max_liquidation_percentage`
+    /// is documented 0–100, and a wider `u8` would inflate the cap past the
+    /// available balance.
+    InvalidDeclaredPercentage { declared: u8 },
+}
+
+/// Caller-side enforcement of the two invariants the [`LiquidationStrategy`]
+/// contract asks of implementations but the compiler cannot: no zero
+/// amounts, and the repay stays within the declared
+/// `max_liquidation_percentage()` share of available inventory. Both
+/// built-ins satisfy these internally; a fork's strategy gets checked
+/// instead of trusted, and a violation skips the position fail-closed.
+/// Quotient-and-remainder arithmetic keeps the cap exact even for balances
+/// above `u128::MAX / 100`, where a plain multiply would overflow (and a
+/// saturating one would under-size the cap and veto a valid full-balance
+/// sizing).
+fn validate_sizing(
+    liquidation_amount: U128,
+    collateral_amount: U128,
+    available_balance: u128,
+    max_percentage: u8,
+) -> Result<(), SizingViolation> {
+    if liquidation_amount.0 == 0 || collateral_amount.0 == 0 {
+        return Err(SizingViolation::ZeroAmount);
+    }
+    if max_percentage > 100 {
+        return Err(SizingViolation::InvalidDeclaredPercentage {
+            declared: max_percentage,
+        });
+    }
+    let percentage = u128::from(max_percentage);
+    let cap = (available_balance / 100) * percentage + (available_balance % 100) * percentage / 100;
+    if liquidation_amount.0 > cap {
+        return Err(SizingViolation::ExceedsDeclaredMax { cap });
+    }
+    Ok(())
 }
 
 /// Loop bookkeeping the evaluation steps need for their logs.
@@ -941,27 +1043,52 @@ impl Liquidator {
             "Using liquidatable collateral for liquidation calculation"
         );
 
-        let Some((liquidation_amount, collateral_amount)) =
-            self.strategy.calculate_liquidation_amount(
-                &adjusted_position,
-                oracle_response,
-                &self.market_config,
-                available_balance,
-                self.market_version,
-            )?
-        else {
-            if ctx.iteration > 1 {
-                let (borrow_dec, borrow_asset, _, _) = self.asset_info();
-                tracing::warn!(
-                    borrower = %borrow_account,
-                    iteration = %format::format_iteration(ctx.iteration, ctx.max_iterations),
-                    available_balance = %format::format_amount(available_balance.0, borrow_dec, &borrow_asset),
-                    "Loop liquidation: insufficient balance to continue, stopping"
-                );
+        let decision = self.strategy.calculate_liquidation_amount(
+            &adjusted_position,
+            oracle_response,
+            &self.market_config,
+            available_balance,
+            self.market_version,
+        )?;
+        let (liquidation_amount, collateral_amount) = match decision {
+            crate::liquidation_strategy::StrategyDecision::Sized(repay, collateral) => {
+                (repay, collateral)
             }
-            // Strategy already logged the specific reason (insufficient inventory, below minimum, etc.)
-            return Ok(Sizing::Declined);
+            crate::liquidation_strategy::StrategyDecision::Decline(reason) => {
+                if ctx.iteration > 1 {
+                    let (borrow_dec, borrow_asset, _, _) = self.asset_info();
+                    tracing::warn!(
+                        borrower = %borrow_account,
+                        iteration = %format::format_iteration(ctx.iteration, ctx.max_iterations),
+                        available_balance = %format::format_amount(available_balance.0, borrow_dec, &borrow_asset),
+                        "Loop liquidation: strategy declined to continue, stopping"
+                    );
+                }
+                // The strategy already logged the specific cause; the typed
+                // reason decides the skip bucket.
+                return Ok(Sizing::Declined(reason));
+            }
         };
+
+        if let Err(violation) = validate_sizing(
+            liquidation_amount,
+            collateral_amount,
+            available_balance.0,
+            self.strategy.max_liquidation_percentage(),
+        ) {
+            tracing::warn!(
+                borrower = %borrow_account,
+                strategy = %self.strategy.strategy_name(),
+                violation = ?violation,
+                liquidation_amount = %liquidation_amount.0,
+                collateral_amount = %collateral_amount.0,
+                available_balance = %available_balance.0,
+                "Strategy sizing output failed caller-side validation - skipping position (fail closed)"
+            );
+            return Ok(Sizing::Declined(
+                crate::liquidation_strategy::DeclineReason::NotViable,
+            ));
+        }
 
         Ok(Sizing::Sized(SizedLiquidation {
             liquidation_amount,
@@ -1165,8 +1292,13 @@ impl Liquidator {
             .await?
         {
             Sizing::Sized(sized) => sized,
-            Sizing::InventoryBelowMinimum => return Ok(Evaluation::SkipTerminal),
-            Sizing::Declined => return Ok(Evaluation::Skip),
+            Sizing::InventoryBelowMinimum => return Ok(Evaluation::Skip(SkipCause::Unfunded)),
+            Sizing::Declined(crate::liquidation_strategy::DeclineReason::InsufficientInventory) => {
+                return Ok(Evaluation::Skip(SkipCause::Unfunded));
+            }
+            Sizing::Declined(crate::liquidation_strategy::DeclineReason::NotViable) => {
+                return Ok(Evaluation::Skip(SkipCause::StrategyDeclined));
+            }
         };
 
         match self.assess_profitability(
@@ -1178,7 +1310,7 @@ impl Liquidator {
             ctx,
         )? {
             Assessment::Plan(plan) => Ok(Evaluation::Proceed(plan)),
-            Assessment::Unpriceable => Ok(Evaluation::Skip),
+            Assessment::Unpriceable => Ok(Evaluation::Skip(SkipCause::Unpriceable)),
             Assessment::Unprofitable => Ok(Evaluation::Unprofitable),
         }
     }
@@ -1470,7 +1602,7 @@ impl Liquidator {
                 return Ok(if after_success {
                     LiquidationOutcome::Liquidated
                 } else {
-                    LiquidationOutcome::Skipped
+                    LiquidationOutcome::SkippedUnfunded
                 });
             };
 
@@ -1548,7 +1680,7 @@ impl Liquidator {
 
         tracing::info!(
             strategy = %self.strategy.strategy_name(),
-            percentage = max_percentage,
+            declared_max_percentage = max_percentage,
             "Starting liquidation run"
         );
 
@@ -1610,6 +1742,7 @@ impl Liquidator {
         // Process positions
         let mut liquidated = 0u64;
         let mut not_liquidatable = 0u64;
+        let mut skipped_unfunded = 0u64;
         let mut unprofitable = 0u64;
         let mut failed = 0u64;
         // Subset of `failed` where a transaction was actually submitted
@@ -1739,6 +1872,7 @@ impl Liquidator {
                     not_liquidatable += 1;
                 }
                 Ok(LiquidationOutcome::Skipped) => not_liquidatable += 1,
+                Ok(LiquidationOutcome::SkippedUnfunded) => skipped_unfunded += 1,
                 Ok(LiquidationOutcome::Unprofitable) => unprofitable += 1,
                 Err(e) => {
                     let phase = e.phase();
@@ -1771,6 +1905,7 @@ impl Liquidator {
         tracing::info!(
             liquidated,
             not_liquidatable,
+            skipped_unfunded,
             unprofitable,
             failed,
             "Liquidation run completed"
@@ -1792,6 +1927,7 @@ impl Liquidator {
         // has nothing to report there.
         let round_summary = RoundSummary {
             candidates: liquidated + unprofitable + failed_execution,
+            skipped_unfunded,
             attempted: liquidated + failed_execution,
             succeeded: liquidated,
             failed: failed_execution,
@@ -2018,8 +2154,19 @@ mod tests {
             )
         );
         assert_eq!(
-            map(Evaluation::Skip, false),
+            map(Evaluation::Skip(SkipCause::Unpriceable), false),
             (LiquidationOutcome::Skipped, StopLog::None)
+        );
+        // Strategy-declined is NOT the unfunded bucket: its causes include
+        // ones no inventory can clear (dust, repay under market minimum),
+        // which would latch the unfunded alert permanently.
+        assert_eq!(
+            map(Evaluation::Skip(SkipCause::StrategyDeclined), false),
+            (LiquidationOutcome::Skipped, StopLog::None)
+        );
+        assert_eq!(
+            map(Evaluation::Skip(SkipCause::Unfunded), false),
+            (LiquidationOutcome::SkippedUnfunded, StopLog::None)
         );
         assert_eq!(
             map(Evaluation::Unprofitable, false),
@@ -2030,22 +2177,36 @@ mod tests {
             Continue(_)
         ));
 
-        // After a successful iteration: any stop reports Liquidated for the
-        // position — except maintenance/below-minimum, which stay Skipped.
+        // After a successful iteration: any stop reports Liquidated for
+        // the position — the executed transaction must stay counted.
         assert_eq!(
             map(Evaluation::Healthy, true),
             (LiquidationOutcome::Liquidated, StopLog::CompletedHealthy)
         );
+        // Maintenance after an executed iteration keeps the transaction
+        // counted; like every Liquidated mapping this clears the
+        // borrower's failure dedup, which is right — a transaction landed.
         assert_eq!(
             map(Evaluation::SkipTerminal, true),
-            (LiquidationOutcome::Skipped, StopLog::None)
+            (LiquidationOutcome::Liquidated, StopLog::None)
         );
         assert_eq!(
             map(Evaluation::MaxedOut, true),
             (LiquidationOutcome::Liquidated, StopLog::MaxedOut)
         );
         assert_eq!(
-            map(Evaluation::Skip, true),
+            map(Evaluation::Skip(SkipCause::Unpriceable), true),
+            (LiquidationOutcome::Liquidated, StopLog::None)
+        );
+        assert_eq!(
+            map(Evaluation::Skip(SkipCause::StrategyDeclined), true),
+            (LiquidationOutcome::Liquidated, StopLog::None)
+        );
+        // An inventory stop after a successful iteration reports
+        // Liquidated: the executed transaction must stay in the
+        // attempted/succeeded counts, not vanish into a skip bucket.
+        assert_eq!(
+            map(Evaluation::Skip(SkipCause::Unfunded), true),
             (LiquidationOutcome::Liquidated, StopLog::None)
         );
         assert_eq!(
@@ -2068,6 +2229,50 @@ mod tests {
         assert_eq!(Liquidator::signed_profit(700, 1_000), -300);
         assert_eq!(Liquidator::signed_profit(u128::MAX, 0), i128::MAX);
         assert_eq!(Liquidator::signed_profit(0, u128::MAX), -i128::MAX);
+    }
+
+    /// Caller-side enforcement of the strategy contract: zero amounts must
+    /// have been a `Decline`, and the repay must stay within the declared
+    /// `max_liquidation_percentage()` share of available inventory. A
+    /// misbehaving third-party strategy is skipped fail-closed, not trusted.
+    #[test]
+    fn sizing_validation_rejects_zero_and_over_declared_cap() {
+        assert_eq!(
+            validate_sizing(U128(0), U128(5), 1_000, 50),
+            Err(SizingViolation::ZeroAmount)
+        );
+        assert_eq!(
+            validate_sizing(U128(5), U128(0), 1_000, 50),
+            Err(SizingViolation::ZeroAmount)
+        );
+        // 50% of 1000 available => cap 500, inclusive.
+        assert_eq!(validate_sizing(U128(500), U128(1), 1_000, 50), Ok(()));
+        assert_eq!(
+            validate_sizing(U128(501), U128(1), 1_000, 50),
+            Err(SizingViolation::ExceedsDeclaredMax { cap: 500 })
+        );
+        // Full percentage admits the full balance and nothing above it.
+        assert_eq!(validate_sizing(U128(1_000), U128(1), 1_000, 100), Ok(()));
+        assert_eq!(
+            validate_sizing(U128(1_001), U128(1), 1_000, 100),
+            Err(SizingViolation::ExceedsDeclaredMax { cap: 1_000 })
+        );
+        // The cap is exact at the top of the range: a 100% declaration
+        // admits the full balance even at u128::MAX, where a saturating
+        // multiply would have under-sized the cap and failed a valid
+        // full-balance sizing closed.
+        assert_eq!(
+            validate_sizing(U128(u128::MAX), U128(1), u128::MAX, 100),
+            Ok(())
+        );
+        // A declaration outside 0-100 is itself the violation: a wider u8
+        // would inflate the cap past the available balance.
+        for declared in [101, 200, 255] {
+            assert_eq!(
+                validate_sizing(U128(1), U128(1), 1_000, declared),
+                Err(SizingViolation::InvalidDeclaredPercentage { declared })
+            );
+        }
     }
 
     #[test]

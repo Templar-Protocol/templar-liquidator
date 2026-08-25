@@ -4,15 +4,7 @@ Documented, not implemented. This is the roadmap of things a fork or a future re
 
 ## Correctness and robustness
 
-**Enforce `LiquidationStrategy::max_liquidation_percentage()`.** It exists today purely for logging (`liquidator.rs`'s `run_liquidations()` logs it, nothing checks the sizing output against it) — see the doc comment on [`LiquidationStrategy::max_liquidation_percentage`](../src/liquidation_strategy.rs). Both built-in strategies happen to respect their own configured percentage internally, so this is currently an unenforced convention rather than a bug, but a third-party strategy implementation has no compiler- or runtime-level guarantee its `calculate_liquidation_amount` actually stays within what it claims via this method.
-
-**Zero-check strategy output before submission.** [`Liquidator::liquidate`](../src/liquidator.rs) passes whatever `calculate_liquidation_amount` returns straight through to `execute_liquidation` — it never independently checks the repay/collateral amounts for zero. The trait's doc comment is explicit that returning `Some((U128(0), _))` instead of `None` would attempt a zero-amount on-chain liquidation, and both shipped strategies self-guard against this (each checks and returns `None` before ever constructing a zero amount). A new strategy implementation must uphold the same invariant itself — the caller doesn't do it for you.
-
-**Split `LiquidationOutcome::Skipped`.** Today it covers two different situations that get folded into one bucket: a position that's genuinely healthy, and one that's liquidatable but the bot lacked the inventory (or hit the contract minimum) to act on it. `RoundSummary::candidates` explicitly excludes both from its count for exactly this reason — see the doc comment on the field. Splitting them would make "how much liquidatable debt did we have to skip due to insufficient inventory" a countable, alertable number instead of invisible.
-
 **Per-account cooldown after failed liquidation attempts.** A position that fails repeatedly (e.g. a persistent `OfferTooLow` or `ExcessiveLiquidation` from price drift) currently gets re-attempted every scan cycle with no backoff. A cooldown after N consecutive failures for the same account would reduce wasted RPC/gas churn.
-
-**Validate `SIGNER_KEY` before startup, don't panic on it.** A mismatched-but-well-formed key (parses as a valid `near_crypto::SecretKey` but doesn't match `SIGNER_ACCOUNT_ID` on-chain) currently panics deep in `LiquidatorService::new` (`src/service.rs`) with a raw "invalid signer secret key: ... Mismatched Keypair detected" message and a nonzero-but-unstructured exit, instead of failing with a clean, actionable error and exit code at config-parse time. Verified live against a real misconfigured key.
 
 ## Scaling
 
@@ -36,8 +28,6 @@ Documented, not implemented. This is the roadmap of things a fork or a future re
 
 **Config-file support (`--config config.toml`).** Would complete the CLI ≡ env ≡ file trinity — right now every setting is CLI-flag-or-env-var only, with no way to check a full configuration into version control short of a `.env` file (which mixes secrets with non-secret settings).
 
-**`value_delimiter = ','` on `REGISTRY_ACCOUNT_IDS`.** Unlike `ALLOWED_COLLATERAL_ASSETS` / `IGNORED_COLLATERAL_ASSETS` / `IGNORED_MARKETS`, the `--registries` arg (`src/config.rs`) has no `value_delimiter`, so `REGISTRY_ACCOUNT_IDS=a.near,b.near` parses as one invalid `AccountId` instead of two registries — only the CLI flag's repeatable form (`--registries a.near --registries b.near`) currently expresses multiple registries. Adding the delimiter would make the env var consistent with the other list-typed settings.
-
 **`--dry-run` accepting `0`/`1`/`yes`/`no`.** The env var form is intentionally strict — only the literal strings `true`/`false` parse, anything else aborts at startup (see [docs/configuration.md](configuration.md#safety-dry_run)). That strictness is a deliberate safety property and should stay; what's open is whether the *value space* itself should widen to include a few more unambiguous truthy/falsy spellings while keeping everything else fail-closed.
 
 **Compose overlay for prod.** `docker-compose.prod.yml` today is a full second file with its own copy of most settings rather than a Compose override layered on top of `docker-compose.yml`. An overlay would shrink the surface that can drift between the two.
@@ -45,8 +35,6 @@ Documented, not implemented. This is the roadmap of things a fork or a future re
 ## Build and dependencies
 
 **cargo-chef Docker layer caching.** The current [`Dockerfile`](../Dockerfile) copies `Cargo.toml`/`Cargo.lock`/`src` and runs `cargo build --release` in one layer; any source change invalidates that layer and triggers a full from-scratch dependency compile (there's no separate dependency-only layer to reuse). `cargo-chef` would cache the dependency-compilation layer independently of source changes.
-
-**`reqwest` 0.11 → 0.12.** Tracked in [`deny.toml`](../deny.toml) as the real fix for the `rustls-pemfile` unmaintained-advisory allowance: `reqwest` 0.12 drops `rustls-pemfile` entirely. No functional motivation beyond that today.
 
 ## Architecture
 

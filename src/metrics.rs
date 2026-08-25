@@ -44,7 +44,7 @@ pub struct Metrics {
     /// "never scanned".
     last_successful_scan_unix: AtomicU64,
     /// Raw units currently reserved for in-flight liquidations, per asset —
-    /// the labelled family `inventory_reserved_raw{asset=…}`. An asset stays
+    /// the labelled family `templar_liquidator_inventory_reserved_raw{asset=…}`. An asset stays
     /// in the map after settling back to zero: a gauge reading 0 is signal,
     /// a vanished series is a scrape gap. Raw token units (u128, rendered as
     /// an integer): scrapers parse Prometheus values as f64, so very large

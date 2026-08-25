@@ -40,7 +40,7 @@ A couple of repo-specific lint notes:
 
 ## Docs and code generation
 
-There's no OpenAPI/codegen step in this repo (that's a backend-monorepo pattern, not this one) — if you change behavior that's documented, update the relevant page under `docs/` or the README in the same PR rather than letting docs drift.
+There's no OpenAPI/codegen step in this repo — if you change behavior that's documented, update the relevant page under `docs/` or the README in the same PR rather than letting docs drift.
 
 ## Submitting a PR
 

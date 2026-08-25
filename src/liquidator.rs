@@ -563,8 +563,11 @@ enum Assessment {
 enum Evaluation {
     /// Healthy or gone — nothing to do.
     Healthy,
-    /// Reported `Skipped` regardless of iteration: maintenance-required (not
-    /// healthy — that would clear dedup state — and never liquidatable).
+    /// Maintenance-required: not healthy (that would clear dedup state)
+    /// and never liquidatable. `Skipped` on a first iteration; after a
+    /// successful one the position reports `Liquidated` (the executed
+    /// transaction stays counted) — dedup state is untouched either way,
+    /// since only the `Healthy` outcome clears it.
     SkipTerminal,
     /// The loop's iteration budget is spent.
     MaxedOut,
@@ -619,11 +622,10 @@ struct Stop {
 /// Maps one iteration's evaluation to either a plan to execute or the stop
 /// that ends the loop. The rule: a stop on an iteration after a successful
 /// liquidation (`after_success`) reports `Liquidated` for the position,
-/// whatever stopped the loop — except maintenance-required, which reports
-/// `Skipped` unconditionally, and a spent iteration budget with nothing
-/// executed, which is `Skipped`, never a fabricated `Liquidated`. An
-/// inventory stop after a successful iteration reports `Liquidated`: the
-/// executed transaction must stay in the attempted/succeeded counts.
+/// whatever stopped the loop — a stop after an executed transaction must
+/// keep it in the attempted/succeeded counts. The one asymmetry left: a
+/// spent iteration budget with nothing executed is `Skipped`, never a
+/// fabricated `Liquidated`.
 fn map_evaluation(
     evaluation: Evaluation,
     after_success: bool,
@@ -638,7 +640,14 @@ fn map_evaluation(
                 stop(LiquidationOutcome::Healthy, StopLog::None)
             }
         }
-        Evaluation::SkipTerminal => stop(LiquidationOutcome::Skipped, StopLog::None),
+        Evaluation::SkipTerminal => stop(
+            if after_success {
+                LiquidationOutcome::Liquidated
+            } else {
+                LiquidationOutcome::Skipped
+            },
+            StopLog::None,
+        ),
         Evaluation::MaxedOut => {
             if after_success {
                 stop(LiquidationOutcome::Liquidated, StopLog::MaxedOut)
@@ -677,8 +686,9 @@ fn map_evaluation(
 /// Why a strategy's sizing output was refused by the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SizingViolation {
-    /// A zero repay or collateral amount: the trait contract says return
-    /// `None` instead — a zero amount would be submitted on-chain.
+    /// A zero repay or collateral amount: the trait contract says decline
+    /// (`StrategyDecision::Decline`) instead — a zero amount would be
+    /// submitted on-chain.
     ZeroAmount,
     /// The repay amount exceeds the share of available inventory the
     /// strategy itself declares via `max_liquidation_percentage()`.
@@ -695,8 +705,10 @@ enum SizingViolation {
 /// `max_liquidation_percentage()` share of available inventory. Both
 /// built-ins satisfy these internally; a fork's strategy gets checked
 /// instead of trusted, and a violation skips the position fail-closed.
-/// Saturating multiply errs toward rejection: a balance large enough to
-/// saturate produces an under-sized cap, never an over-sized one.
+/// Quotient-and-remainder arithmetic keeps the cap exact even for balances
+/// above `u128::MAX / 100`, where a plain multiply would overflow (and a
+/// saturating one would under-size the cap and veto a valid full-balance
+/// sizing).
 fn validate_sizing(
     liquidation_amount: U128,
     collateral_amount: U128,
@@ -711,7 +723,8 @@ fn validate_sizing(
             declared: max_percentage,
         });
     }
-    let cap = available_balance.saturating_mul(u128::from(max_percentage)) / 100;
+    let percentage = u128::from(max_percentage);
+    let cap = (available_balance / 100) * percentage + (available_balance % 100) * percentage / 100;
     if liquidation_amount.0 > cap {
         return Err(SizingViolation::ExceedsDeclaredMax { cap });
     }
@@ -2168,9 +2181,11 @@ mod tests {
             map(Evaluation::Healthy, true),
             (LiquidationOutcome::Liquidated, StopLog::CompletedHealthy)
         );
+        // Maintenance after an executed iteration keeps the transaction
+        // counted; dedup is unaffected (only the Healthy outcome clears it).
         assert_eq!(
             map(Evaluation::SkipTerminal, true),
-            (LiquidationOutcome::Skipped, StopLog::None)
+            (LiquidationOutcome::Liquidated, StopLog::None)
         );
         assert_eq!(
             map(Evaluation::MaxedOut, true),
@@ -2214,7 +2229,7 @@ mod tests {
     }
 
     /// Caller-side enforcement of the strategy contract: zero amounts must
-    /// have been `None`, and the repay must stay within the declared
+    /// have been a `Decline`, and the repay must stay within the declared
     /// `max_liquidation_percentage()` share of available inventory. A
     /// misbehaving third-party strategy is skipped fail-closed, not trusted.
     #[test]
@@ -2238,6 +2253,14 @@ mod tests {
         assert_eq!(
             validate_sizing(U128(1_001), U128(1), 1_000, 100),
             Err(SizingViolation::ExceedsDeclaredMax { cap: 1_000 })
+        );
+        // The cap is exact at the top of the range: a 100% declaration
+        // admits the full balance even at u128::MAX, where a saturating
+        // multiply would have under-sized the cap and failed a valid
+        // full-balance sizing closed.
+        assert_eq!(
+            validate_sizing(U128(u128::MAX), U128(1), u128::MAX, 100),
+            Ok(())
         );
         // A declaration outside 0-100 is itself the violation: a wider u8
         // would inflate the cap past the available balance.

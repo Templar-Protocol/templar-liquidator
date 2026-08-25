@@ -183,11 +183,12 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     /// # Returns
     ///
     /// `true` if the liquidation should proceed, `false` otherwise. A `false`
-    /// here produces [`crate::LiquidationOutcome::Unprofitable`], distinct from
-    /// the `None` returned by `calculate_liquidation_amount` — both stop the
-    /// liquidation, but only this one implies the position genuinely isn't
-    /// worth repaying at current prices/gas, rather than "we lack the inventory
-    /// or eligibility to attempt it."
+    /// here produces [`crate::LiquidationOutcome::Unprofitable`], distinct
+    /// from a [`StrategyDecision::Decline`] from `calculate_liquidation_amount`
+    /// — both stop the liquidation, but only this one implies the position
+    /// genuinely isn't worth repaying at current prices/gas; a decline's
+    /// [`DeclineReason`] states whether inventory or viability was the
+    /// obstacle.
     ///
     /// # Errors
     /// Returns an error if profitability calculations fail.
@@ -481,12 +482,26 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
 
         let contract_minimum: u128 = configuration.borrow_range.minimum.into();
         if final_amount < contract_minimum {
+            // Which constraint bound the slice decides the reason: when the
+            // inventory-derived target was binding (the position's buffered
+            // cap did not clamp it), a larger balance raises the slice past
+            // the minimum — a funding cause. A position-capped slice, or a
+            // full-liquidation amount, is inventory-independent.
+            let inventory_bound = !requires_full
+                && collateral_amount
+                    < apply_liquidatable_cap_buffer(liquidatable_collateral.into());
+            let reason = if inventory_bound {
+                DeclineReason::InsufficientInventory
+            } else {
+                DeclineReason::NotViable
+            };
             tracing::warn!(
                 amount = %final_amount,
                 contract_minimum = %contract_minimum,
+                reason = ?reason,
                 "Liquidation amount below contract minimum"
             );
-            return Ok(StrategyDecision::Decline(DeclineReason::NotViable));
+            return Ok(StrategyDecision::Decline(reason));
         }
 
         Ok(StrategyDecision::Sized(
@@ -805,6 +820,58 @@ mod tests {
             result,
             StrategyDecision::Decline(DeclineReason::NotViable),
             "unvaluable collateral must decline as not-viable — no inventory clears it"
+        );
+    }
+
+    /// On a partial-supporting market, a percentage slice that lands under
+    /// the contract minimum is inventory-clearable — the slice scales with
+    /// the balance — so it must decline as InsufficientInventory. A
+    /// position-capped (dust) slice is not: no inventory changes it.
+    #[test]
+    fn below_minimum_percentage_slice_classifies_by_binding_constraint() {
+        // The fixture's minimum is 1 raw unit; raise it so a small slice
+        // can land under it (the range type is construction-validated, so
+        // patch the JSON rather than the struct).
+        let cfg: MarketConfiguration = near_sdk::serde_json::from_str(&IBTC_CONFIG_JSON.replace(
+            r#""borrow_range":{"minimum":"1""#,
+            r#""borrow_range":{"minimum":"1000000""#,
+        ))
+        .expect("patched fixture parses");
+        let prices = btc_usdc_prices(&cfg);
+        let partial = Some(crate::scanner::MarketVersion::new(1, 1, 0));
+
+        // Large position, small inventory: the 10% inventory slice is the
+        // binding constraint and lands under the raised market minimum —
+        // more inventory clears it.
+        let big_pos = position(100_000_000, 3_980_000);
+        let strategy =
+            PercentageLiquidationStrategy::new("10".parse::<LiquidationPercentage>().unwrap(), 50);
+        let result = strategy
+            .calculate_liquidation_amount(&big_pos, &prices, &cfg, U128(2_000_000), partial)
+            .expect("no error");
+        assert_eq!(
+            result,
+            StrategyDecision::Decline(DeclineReason::InsufficientInventory),
+            "an inventory-bound slice under the minimum is a funding cause"
+        );
+
+        // Small position, roomy inventory: the position's buffered cap
+        // binds and the amount lands under the minimum; no inventory
+        // clears it.
+        let dust_pos = position(1_000, 40);
+        let result = strategy
+            .calculate_liquidation_amount(
+                &dust_pos,
+                &prices,
+                &cfg,
+                U128(1_000_000_000_000),
+                partial,
+            )
+            .expect("no error");
+        assert_eq!(
+            result,
+            StrategyDecision::Decline(DeclineReason::NotViable),
+            "a position-capped dust slice is not a funding cause"
         );
     }
 

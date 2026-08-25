@@ -119,6 +119,10 @@ pub struct InventoryManager {
     /// This manager's identity, stamped into every [`Reservation`] it
     /// issues so a token cannot settle in a different manager.
     id: u64,
+    /// Publishes the per-asset reserved gauge when attached
+    /// ([`set_metrics`](Self::set_metrics)); `None` leaves accounting
+    /// behavior identical with no metrics surface.
+    metrics: Option<std::sync::Arc<crate::metrics::Metrics>>,
 }
 
 /// Source of [`InventoryManager::id`] values — process-unique, never reused.
@@ -139,6 +143,7 @@ impl InventoryManager {
             collateral_inventory: HashMap::new(),
             min_refresh_interval: Duration::from_secs(30),
             last_full_refresh: None,
+            metrics: None,
             id: NEXT_MANAGER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -409,12 +414,33 @@ impl InventoryManager {
             .ok_or_else(|| InventoryError::AssetNotTracked(asset.to_string()))?;
 
         entry.reserve(amount)?;
+        self.publish_reserved(asset);
 
         Ok(Reservation {
             asset: asset.clone(),
             amount,
             manager_id: self.id,
         })
+    }
+
+    /// Attaches the metrics sink the reserved gauge publishes to. Optional:
+    /// an unattached manager (tests, forks without the HTTP surface) keeps
+    /// identical accounting behavior.
+    pub fn set_metrics(&mut self, metrics: std::sync::Arc<crate::metrics::Metrics>) {
+        self.metrics = Some(metrics);
+    }
+
+    /// Publishes `asset`'s current reserved total to the gauge, if a sink
+    /// is attached. Called after every reservation-lifecycle mutation so
+    /// the gauge tracks live state, not a per-cycle snapshot.
+    fn publish_reserved(&self, asset: &FungibleAsset<BorrowAsset>) {
+        if let Some(metrics) = &self.metrics {
+            let reserved = self
+                .inventory
+                .get(asset)
+                .map_or(0, |entry| u128::from(entry.reserved));
+            metrics.set_reserved_raw(&asset.to_string(), reserved);
+        }
     }
 
     /// Releases a reservation: the tokens never left the account and are
@@ -427,6 +453,7 @@ impl InventoryManager {
         if let Some(entry) = self.inventory.get_mut(&asset) {
             entry.release(amount);
         }
+        self.publish_reserved(&asset);
     }
 
     /// Records that a reserved amount was actually spent on-chain: debits the
@@ -441,6 +468,7 @@ impl InventoryManager {
         if let Some(entry) = self.inventory.get_mut(&asset) {
             entry.consume(amount);
         }
+        self.publish_reserved(&asset);
     }
 
     /// True when this manager issued `reservation` — the executor's
@@ -712,23 +740,48 @@ mod tests {
     /// construction; the inventory unit tests only exercise in-memory
     /// reserve/release accounting and never issue reads.
     fn create_test_client() -> SigningClient {
-        let network = near_api::NetworkConfig::from_rpc_url(
-            "testnet",
-            "https://rpc.testnet.near.org".parse().unwrap(),
-        );
-        // Derive a self-consistent ed25519 keypair so `SigningClient::connect`
-        // (which validates the secret against its embedded public key) accepts it.
-        let secret_key: near_api::SecretKey =
-            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "liquidator-test")
-                .to_string()
-                .parse()
-                .unwrap();
-        SigningClient::connect(
-            network,
+        crate::rpc::test_support::signing_client_for("https://rpc.testnet.near.org")
+    }
+
+    /// The reserved gauge follows the reservation lifecycle live: issuing a
+    /// reservation publishes the asset's reserved total, and either way of
+    /// settling (release or consume) publishes the return to zero — the
+    /// series that lets an operator alert on "reservation stuck nonzero".
+    #[test]
+    fn reservations_publish_the_per_asset_reserved_gauge() {
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let mut manager = InventoryManager::new(
+            create_test_client(),
             AccountId::from_str("test.near").unwrap(),
-            secret_key,
-        )
-        .unwrap()
+        );
+        manager.set_metrics(Arc::clone(&metrics));
+        let asset = create_test_asset();
+        manager.seed_asset_for_tests(&asset, BorrowAssetAmount::from(1000));
+
+        let r1 = manager
+            .reserve(&asset, BorrowAssetAmount::from(300))
+            .unwrap();
+        let r2 = manager
+            .reserve(&asset, BorrowAssetAmount::from(200))
+            .unwrap();
+        assert!(
+            metrics.render().contains(&format!(
+                "templar_liquidator_inventory_reserved_raw{{asset=\"{asset}\"}} 500"
+            )),
+            "gauge must show the asset's current reserved total"
+        );
+
+        manager.release(r1);
+        assert!(metrics.render().contains(&format!(
+            "templar_liquidator_inventory_reserved_raw{{asset=\"{asset}\"}} 200"
+        )));
+        manager.consume(r2);
+        assert!(
+            metrics.render().contains(&format!(
+                "templar_liquidator_inventory_reserved_raw{{asset=\"{asset}\"}} 0"
+            )),
+            "settling must publish the return to zero, keeping the series"
+        );
     }
 
     #[test]

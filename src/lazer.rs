@@ -686,65 +686,7 @@ mod tests {
         assert!(!FetchFailure::Transport.is_feed_level_rejection());
     }
 
-    /// Scripted localhost HTTP server: serves canned (status, body)
-    /// responses in order and records each request body. Lets the split
-    /// logic run against real HTTP without a production seam — the client
-    /// struct is built directly (same module), which is also why these
-    /// tests can use a plain-http URL that `LazerApiConfig::new` would
-    /// rightly refuse.
-    async fn scripted_server(
-        responses: Vec<(u16, String)>,
-    ) -> (Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let log = requests.clone();
-        tokio::spawn(async move {
-            for (status, body) in responses {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    return;
-                };
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                let header_end = loop {
-                    let n = stream.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        break None;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        break Some(pos + 4);
-                    }
-                };
-                let Some(header_end) = header_end else { return };
-                let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
-                let content_length: usize = headers
-                    .lines()
-                    .find_map(|l| l.strip_prefix("content-length:"))
-                    .and_then(|v| v.trim().parse().ok())
-                    .unwrap_or(0);
-                while buf.len() < header_end + content_length {
-                    let n = stream.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                log.lock().unwrap().push(
-                    String::from_utf8_lossy(&buf[header_end..header_end + content_length])
-                        .to_string(),
-                );
-                let response = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            }
-        });
-        (format!("http://{addr}").parse().unwrap(), requests)
-    }
+    use crate::rpc::test_support::scripted_server;
 
     fn test_client(base_url: Url) -> LazerApiClient {
         LazerApiClient {

@@ -68,6 +68,7 @@ All comma-delimited (`value_delimiter = ','` in clap — repeat the flag or comm
 |---|---|---|---|
 | `ALLOWED_COLLATERAL_ASSETS` | `--allowed-collateral-assets` | empty (all assets allowed) | Allowlist of collateral asset ids; if set, only markets with these collateral assets are processed. |
 | `IGNORED_COLLATERAL_ASSETS` | `--ignored-collateral-assets` | empty | Collateral asset ids to skip. |
+| `ALLOWED_MARKETS` | `--allowed-markets` | empty (all markets) | Allowlist of market account ids; when set, only these markets are processed. `IGNORED_MARKETS` still subtracts within the allowlist (a market on both lists is skipped). Entries are parsed as account ids at startup — an unparseable entry refuses to start rather than silently emptying the allowlist (which would fail open to every market). |
 | `IGNORED_MARKETS` | `--ignored-markets` | empty | Market account ids to skip entirely. |
 
 ## Oracle price sources

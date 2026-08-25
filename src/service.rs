@@ -100,6 +100,9 @@ pub struct ServiceConfig {
     /// Collateral assets to ignore in market filtering
     pub ignored_collateral_assets:
         Vec<templar_common::asset::FungibleAsset<templar_common::asset::CollateralAsset>>,
+    /// Market account IDs to allow; when non-empty, only these markets are
+    /// processed (`ignored_markets` still subtracts within the allowlist)
+    pub allowed_markets: Vec<near_sdk::AccountId>,
     /// Market account IDs to ignore
     pub ignored_markets: Vec<near_sdk::AccountId>,
     /// Enable loop liquidation - repeatedly liquidate until position is healthy
@@ -169,6 +172,7 @@ impl std::fmt::Debug for ServiceConfig {
             )
             .field("allowed_collateral_assets", &self.allowed_collateral_assets)
             .field("ignored_collateral_assets", &self.ignored_collateral_assets)
+            .field("allowed_markets", &self.allowed_markets)
             .field("ignored_markets", &self.ignored_markets)
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
@@ -763,11 +767,16 @@ impl LiquidatorService {
                 crate::scanner::MarketVersion,
             )> = Vec::new();
             for market in &all_markets {
-                // Step 0: Skip ignored markets before any RPC calls
-                if self.config.ignored_markets.contains(market) {
+                // Step 0: admission by allow/deny lists, before any RPC calls
+                if let Some(reason) = market_rejection_reason(
+                    market,
+                    &self.config.allowed_markets,
+                    &self.config.ignored_markets,
+                ) {
                     tracing::info!(
                         market = %market,
-                        "Market filtered out (ignored market)"
+                        reason,
+                        "Market filtered out"
                     );
                     continue;
                 }
@@ -1430,6 +1439,28 @@ impl LiquidatorService {
     }
 }
 
+/// Why one registry market is rejected by the operator's allow/deny
+/// lists — `Some(reason)` rejects, `None` admits. An empty
+/// allowlist admits everything (the pre-knob behavior); a non-empty one is
+/// the universe, and the denylist subtracts within it — a market on both
+/// lists is ignored. Checked before any per-market RPC.
+fn market_rejection_reason(
+    market: &AccountId,
+    allowed_markets: &[AccountId],
+    ignored_markets: &[AccountId],
+) -> Option<&'static str> {
+    // Allowlist first: it defines the universe, and the denylist subtracts
+    // within it — so a market outside the allowlist reports the allowlist
+    // as its reason even if it also appears in IGNORED_MARKETS.
+    if !allowed_markets.is_empty() && !allowed_markets.contains(market) {
+        return Some("not in ALLOWED_MARKETS");
+    }
+    if ignored_markets.contains(market) {
+        return Some("ignored market");
+    }
+    None
+}
+
 /// Fetch every deployment across `registries` (paginated, concurrently).
 ///
 /// Propagates the first read error encountered, matching the pre-migration
@@ -1549,6 +1580,43 @@ mod usdc_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The allowlist defines the universe when set (empty = all markets, the
+    /// pre-knob behavior), and IGNORED_MARKETS still subtracts within it —
+    /// a market on both lists is ignored.
+    #[test]
+    fn allowlist_admits_members_and_denylist_subtracts() {
+        let m = |s: &str| s.parse::<AccountId>().unwrap();
+        let allowed = vec![m("a.near"), m("b.near")];
+        let ignored = vec![m("b.near"), m("c.near")];
+        let none: Vec<AccountId> = vec![];
+
+        assert_eq!(market_rejection_reason(&m("x.near"), &none, &none), None);
+        assert_eq!(
+            market_rejection_reason(&m("a.near"), &allowed, &none),
+            None,
+            "allowlisted market admitted"
+        );
+        assert_eq!(
+            market_rejection_reason(&m("x.near"), &allowed, &none),
+            Some("not in ALLOWED_MARKETS"),
+        );
+        assert_eq!(
+            market_rejection_reason(&m("c.near"), &none, &ignored),
+            Some("ignored market"),
+        );
+        assert_eq!(
+            market_rejection_reason(&m("b.near"), &allowed, &ignored),
+            Some("ignored market"),
+            "a market on both lists is ignored"
+        );
+        // Outside the allowlist AND denylisted: the allowlist is the
+        // universe, so it names the reason.
+        assert_eq!(
+            market_rejection_reason(&m("c.near"), &allowed, &ignored),
+            Some("not in ALLOWED_MARKETS"),
+        );
+    }
+
     use super::*;
 
     /// Out-of-range decimals would silently corrupt every conversion —

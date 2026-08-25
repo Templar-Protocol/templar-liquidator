@@ -78,6 +78,36 @@ pub(crate) fn borrow_to_collateral(
 /// accounting for the liquidation spread.
 ///
 /// Formula: `borrow = collateral * price * (1 - spread)`
+/// Classifies a below-minimum decline for inventory-percentage sizing: a
+/// funding cause requires BOTH that the inventory-derived target bound the
+/// slice (the position's buffered cap did not clamp it) AND that a larger
+/// balance could actually reach the minimum — the slice only grows up to
+/// the cap, so the reachability test is whether the cap-derived repay
+/// itself clears the minimum. Inventory-bound-but-unreachable (a dust
+/// position with a small balance) must not page the top-up alert: no
+/// top-up ever clears it. A conversion failure on the cap fails toward
+/// [`DeclineReason::NotViable`].
+fn below_minimum_decline_reason(
+    requires_full: bool,
+    collateral_amount: u128,
+    liquidatable_collateral: u128,
+    price_pair: &PricePair,
+    liquidation_spread: Decimal,
+    contract_minimum: u128,
+) -> DeclineReason {
+    let cap_collateral = apply_liquidatable_cap_buffer(liquidatable_collateral);
+    let inventory_bound = !requires_full && collateral_amount < cap_collateral;
+    let cap_repay_reaches_minimum =
+        collateral_to_borrow(cap_collateral, price_pair, liquidation_spread)
+            .map(|repay| repay.saturating_add((repay * SAFETY_BUFFER_BPS) / 10_000))
+            .is_some_and(|repay| repay >= contract_minimum);
+    if inventory_bound && cap_repay_reaches_minimum {
+        DeclineReason::InsufficientInventory
+    } else {
+        DeclineReason::NotViable
+    }
+}
+
 pub(crate) fn collateral_to_borrow(
     collateral_amount: u128,
     price_pair: &PricePair,
@@ -482,29 +512,14 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
 
         let contract_minimum: u128 = configuration.borrow_range.minimum.into();
         if final_amount < contract_minimum {
-            // A funding cause requires two things: the inventory-derived
-            // target is what bound the slice (the position's buffered cap
-            // did not clamp it), AND a larger balance could actually reach
-            // the minimum — the slice only grows up to the cap, so the
-            // reachability test is whether the cap-derived repay itself
-            // clears the minimum. Inventory-bound-but-unreachable (a dust
-            // position with a small balance) must not page the top-up
-            // alert: no top-up ever clears it. A conversion failure on the
-            // cap fails toward NotViable.
-            let cap_collateral = apply_liquidatable_cap_buffer(liquidatable_collateral.into());
-            let inventory_bound = !requires_full && collateral_amount < cap_collateral;
-            let cap_repay_reaches_minimum = collateral_to_borrow(
-                cap_collateral,
+            let reason = below_minimum_decline_reason(
+                requires_full,
+                collateral_amount,
+                liquidatable_collateral.into(),
                 &price_pair,
                 configuration.liquidation_maximum_spread,
-            )
-            .map(|repay| repay.saturating_add((repay * SAFETY_BUFFER_BPS) / 10_000))
-            .is_some_and(|repay| repay >= contract_minimum);
-            let reason = if inventory_bound && cap_repay_reaches_minimum {
-                DeclineReason::InsufficientInventory
-            } else {
-                DeclineReason::NotViable
-            };
+                contract_minimum,
+            );
             tracing::warn!(
                 amount = %final_amount,
                 contract_minimum = %contract_minimum,

@@ -482,15 +482,25 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
 
         let contract_minimum: u128 = configuration.borrow_range.minimum.into();
         if final_amount < contract_minimum {
-            // Which constraint bound the slice decides the reason: when the
-            // inventory-derived target was binding (the position's buffered
-            // cap did not clamp it), a larger balance raises the slice past
-            // the minimum — a funding cause. A position-capped slice, or a
-            // full-liquidation amount, is inventory-independent.
-            let inventory_bound = !requires_full
-                && collateral_amount
-                    < apply_liquidatable_cap_buffer(liquidatable_collateral.into());
-            let reason = if inventory_bound {
+            // A funding cause requires two things: the inventory-derived
+            // target is what bound the slice (the position's buffered cap
+            // did not clamp it), AND a larger balance could actually reach
+            // the minimum — the slice only grows up to the cap, so the
+            // reachability test is whether the cap-derived repay itself
+            // clears the minimum. Inventory-bound-but-unreachable (a dust
+            // position with a small balance) must not page the top-up
+            // alert: no top-up ever clears it. A conversion failure on the
+            // cap fails toward NotViable.
+            let cap_collateral = apply_liquidatable_cap_buffer(liquidatable_collateral.into());
+            let inventory_bound = !requires_full && collateral_amount < cap_collateral;
+            let cap_repay_reaches_minimum = collateral_to_borrow(
+                cap_collateral,
+                &price_pair,
+                configuration.liquidation_maximum_spread,
+            )
+            .map(|repay| repay.saturating_add((repay * SAFETY_BUFFER_BPS) / 10_000))
+            .is_some_and(|repay| repay >= contract_minimum);
+            let reason = if inventory_bound && cap_repay_reaches_minimum {
                 DeclineReason::InsufficientInventory
             } else {
                 DeclineReason::NotViable
@@ -872,6 +882,19 @@ mod tests {
             result,
             StrategyDecision::Decline(DeclineReason::NotViable),
             "a position-capped dust slice is not a funding cause"
+        );
+
+        // Dust position AND small inventory: the slice is inventory-bound
+        // right now, but growing the balance only moves it up to the
+        // position's cap — whose repay still cannot reach the minimum. A
+        // top-up never clears it, so it must NOT page the unfunded alert.
+        let result = strategy
+            .calculate_liquidation_amount(&dust_pos, &prices, &cfg, U128(50_000), partial)
+            .expect("no error");
+        assert_eq!(
+            result,
+            StrategyDecision::Decline(DeclineReason::NotViable),
+            "inventory-bound but not inventory-clearable must stay NotViable"
         );
     }
 

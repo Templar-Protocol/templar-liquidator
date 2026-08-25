@@ -563,11 +563,13 @@ enum Assessment {
 enum Evaluation {
     /// Healthy or gone — nothing to do.
     Healthy,
-    /// Maintenance-required: not healthy (that would clear dedup state)
-    /// and never liquidatable. `Skipped` on a first iteration; after a
-    /// successful one the position reports `Liquidated` (the executed
-    /// transaction stays counted) — dedup state is untouched either way,
-    /// since only the `Healthy` outcome clears it.
+    /// Maintenance-required: not healthy and never liquidatable.
+    /// `Skipped` on a first iteration — which leaves the borrower's
+    /// failure-dedup state in place. After a successful iteration the
+    /// position reports `Liquidated` (the executed transaction stays
+    /// counted), which — like every post-success mapping — clears the
+    /// borrower's failure dedup: a transaction landed, so suppressing the
+    /// next failure alert would hide a fresh problem.
     SkipTerminal,
     /// The loop's iteration budget is spent.
     MaxedOut,
@@ -2175,14 +2177,15 @@ mod tests {
             Continue(_)
         ));
 
-        // After a successful iteration: any stop reports Liquidated for the
-        // position — except maintenance/below-minimum, which stay Skipped.
+        // After a successful iteration: any stop reports Liquidated for
+        // the position — the executed transaction must stay counted.
         assert_eq!(
             map(Evaluation::Healthy, true),
             (LiquidationOutcome::Liquidated, StopLog::CompletedHealthy)
         );
         // Maintenance after an executed iteration keeps the transaction
-        // counted; dedup is unaffected (only the Healthy outcome clears it).
+        // counted; like every Liquidated mapping this clears the
+        // borrower's failure dedup, which is right — a transaction landed.
         assert_eq!(
             map(Evaluation::SkipTerminal, true),
             (LiquidationOutcome::Liquidated, StopLog::None)

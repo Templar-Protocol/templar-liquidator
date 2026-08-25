@@ -99,12 +99,15 @@ pub enum PostDepositError {
         deposit_address: String,
     },
 
-    /// The outcome is known and final: the venue reported a terminal
-    /// non-success — the deposit transfer reverted on-chain (funds never
-    /// left), the deposit was refunded, or the swap ended in a terminal
-    /// failed status. Nothing is left in flight to reconcile; the message
-    /// states what happened to the funds, and the next inventory refresh
-    /// reflects the final balances.
+    /// The outcome is known and final **including where the funds are**:
+    /// the deposit transfer reverted on-chain (funds never left) or the
+    /// venue confirmed a refund. A terminal *failed* status alone does not
+    /// qualify — 1-Click models `FAILED` and `REFUNDED` separately, so
+    /// failure without a confirmed refund is
+    /// [`Indeterminate`](Self::Indeterminate). Nothing is left in flight
+    /// to reconcile; the
+    /// message states what happened to the funds, and the next inventory
+    /// refresh reflects the final balances.
     #[error("Swap failed definitively (deposit address {deposit_address}): {message}")]
     Definitive {
         message: String,
@@ -604,6 +607,14 @@ mod tests {
         assert!(matches!(
             classified.kind,
             SwapErrorKind::PreDeposit(PreDepositError::NetworkError { .. })
+        ));
+        let classified = SwapError::from_pre_deposit_app_error(
+            "Storage deposit",
+            &AppError::ValidationError("x".into()),
+        );
+        assert!(matches!(
+            classified.kind,
+            SwapErrorKind::PreDeposit(PreDepositError::ValidationError { .. })
         ));
         let classified = SwapError::from_pre_deposit_app_error(
             "Storage deposit",

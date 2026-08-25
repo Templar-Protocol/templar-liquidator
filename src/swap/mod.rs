@@ -114,13 +114,13 @@ pub trait SwapProvider: Send + Sync {
     /// (refund, partial deposit, or on-chain failure). Classification drives
     /// retry policy, and the phase is part of the type: any failure at or
     /// after the point where the *swapped* funds may have left the account
-    /// (the deposit transfer) MUST be a
-    /// [`SwapErrorKind::PostDeposit`](crate::swap::PostDepositError) —
-    /// [`Indeterminate`](crate::swap::PostDepositError::Indeterminate) when
-    /// the outcome is unknown,
-    /// [`Definitive`](crate::swap::PostDepositError::Definitive) when the
-    /// venue reported a terminal non-success — and no post-deposit kind is
-    /// retryable, structurally. Small fixed-cost NEAR bonds before that
+    /// (the deposit transfer) MUST be a [`SwapErrorKind::PostDeposit`]
+    /// carrying a [`PostDepositError`] —
+    /// [`Indeterminate`](PostDepositError::Indeterminate) when the outcome
+    /// is unknown, [`Definitive`](PostDepositError::Definitive) only when
+    /// the funds' disposition is confirmed (on-chain revert or
+    /// venue-confirmed refund) — and no post-deposit kind is retryable,
+    /// structurally. Small fixed-cost NEAR bonds before that
     /// point (storage registration, deposit-account funding) are retry-safe
     /// and classify as ordinary transient
     /// [`PreDeposit`](crate::swap::PreDepositError) errors. Retrying a swap

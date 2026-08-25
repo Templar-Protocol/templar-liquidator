@@ -73,7 +73,7 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`swap/oneclick.rs`** — 1-Click API provider for NEAR Intents (NEP-245) cross-chain swaps: quote → deposit → poll to a terminal status.
 
-**`swap/retry.rs`** — swap error classification split by the one boundary that decides retry safety: `SwapErrorKind` is `PreDeposit` (idempotent phases — network/server/rate-limit errors retry, validation errors don't) or `PostDeposit` (`Indeterminate`: outcome unknown, funds may have moved; `Definitive`: terminal non-success, funds accounted — both carry the deposit address and neither is ever retried, structurally). Plus the generic retry wrapper swaps run through.
+**`swap/retry.rs`** — swap error classification split by the one boundary that decides retry safety: `SwapErrorKind` is `PreDeposit` (idempotent phases — network/server/rate-limit errors retry, validation errors don't) or `PostDeposit` (`Indeterminate`: outcome unknown, funds may have moved; `Definitive`: funds disposition confirmed, on-chain revert or venue-confirmed refund — both carry the deposit address and neither is ever retried, structurally). Plus the generic retry wrapper swaps run through.
 
 **`notifier.rs`** — notifications; the notification extension seam: the `NotificationChannel` trait (`send(&self, text)`; Telegram is the shipped implementation) behind a shell that owns failure dedup, the in-flight semaphore, and `drain()` — a fork's channel implements the trait and plugs into `Notifier::with_channel`.
 

@@ -184,7 +184,7 @@ struct DepositSubmitRequest {
 }
 
 /// Swap status from the 1-Click API
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SwapStatus {
     /// Waiting for deposit
@@ -1284,6 +1284,38 @@ impl OneClickSwap {
     }
 }
 
+/// Classifies a non-`Success` return from status polling. Only a
+/// venue-confirmed refund proves the funds' disposition and may claim
+/// [`Definitive`](crate::swap::PostDepositError::Definitive): `FAILED` and
+/// `REFUNDED` are separate 1-Click statuses, so `FAILED` alone does not
+/// establish that a refund was issued, and an incomplete deposit is tokens
+/// sitting at a one-shot deposit address with the venue status still able
+/// to advance. Everything except `Refunded` therefore classifies as
+/// [`Indeterminate`](crate::swap::PostDepositError::Indeterminate) — the
+/// reconcile-and-alert path.
+fn classify_non_success_status(
+    status: SwapStatus,
+    deposit_address: &str,
+) -> crate::swap::PostDepositError {
+    match status {
+        SwapStatus::Refunded => crate::swap::PostDepositError::Definitive {
+            message: "swap was refunded by the venue; funds returned".to_string(),
+            deposit_address: deposit_address.to_string(),
+        },
+        SwapStatus::Success
+        | SwapStatus::Failed
+        | SwapStatus::IncompleteDeposit
+        | SwapStatus::PendingDeposit
+        | SwapStatus::KnownDepositTx
+        | SwapStatus::Processing => crate::swap::PostDepositError::Indeterminate {
+            message: format!(
+                "swap ended with status {status:?}, which does not establish where the funds are"
+            ),
+            deposit_address: deposit_address.to_string(),
+        },
+    }
+}
+
 /// Whether the supported-token cache admits a pair. An empty cache fails
 /// closed: it means `/v0/tokens` could not be fetched, and the trait contract
 /// prefers declining a routable pair over deferring the failure to after the
@@ -1386,10 +1418,7 @@ impl SwapProvider for OneClickSwap {
                 "1-Click swap did not succeed"
             );
             Err(crate::swap::SwapError::post(
-                crate::swap::PostDepositError::Definitive {
-                    message: format!("swap ended with terminal non-success status {status:?}"),
-                    deposit_address: deposit_address.clone(),
-                },
+                classify_non_success_status(status, deposit_address),
                 "1-Click swap",
             ))
         }
@@ -1488,5 +1517,41 @@ mod cache_tests {
             "nep141:a.near",
             "nep141:c.near"
         ));
+    }
+
+    /// Only a venue-confirmed refund proves the funds' disposition. FAILED
+    /// and REFUNDED are separate 1-Click statuses, so FAILED alone does not
+    /// establish a refund; an incomplete deposit is tokens sitting at the
+    /// deposit address with the venue status still able to advance. Both
+    /// must classify as Indeterminate — the reconcile-and-alert path — and
+    /// so must any pending status that leaks through.
+    #[test]
+    fn terminal_status_classification_is_honest_about_disposition() {
+        let definitive = classify_non_success_status(SwapStatus::Refunded, "dep.near");
+        assert!(matches!(
+            definitive,
+            crate::swap::PostDepositError::Definitive { .. }
+        ));
+
+        for status in [
+            SwapStatus::Failed,
+            SwapStatus::IncompleteDeposit,
+            SwapStatus::PendingDeposit,
+            SwapStatus::KnownDepositTx,
+            SwapStatus::Processing,
+        ] {
+            let label = format!("{status:?}");
+            let classified = classify_non_success_status(status, "dep.near");
+            assert!(
+                matches!(
+                    classified,
+                    crate::swap::PostDepositError::Indeterminate { .. }
+                ),
+                "{label} does not prove the funds' disposition and must be Indeterminate"
+            );
+        }
+        // The reconciliation handle survives into both classifications.
+        let rendered = classify_non_success_status(SwapStatus::Refunded, "dep.near").to_string();
+        assert!(rendered.contains("dep.near"));
     }
 }

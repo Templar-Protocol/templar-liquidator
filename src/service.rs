@@ -1449,11 +1449,14 @@ fn market_rejection_reason(
     allowed_markets: &[AccountId],
     ignored_markets: &[AccountId],
 ) -> Option<&'static str> {
-    if ignored_markets.contains(market) {
-        return Some("ignored market");
-    }
+    // Allowlist first: it defines the universe, and the denylist subtracts
+    // within it — so a market outside the allowlist reports the allowlist
+    // as its reason even if it also appears in IGNORED_MARKETS.
     if !allowed_markets.is_empty() && !allowed_markets.contains(market) {
         return Some("not in ALLOWED_MARKETS");
+    }
+    if ignored_markets.contains(market) {
+        return Some("ignored market");
     }
     None
 }
@@ -1605,6 +1608,12 @@ mod tests {
             market_rejection_reason(&m("b.near"), &allowed, &ignored),
             Some("ignored market"),
             "a market on both lists is ignored"
+        );
+        // Outside the allowlist AND denylisted: the allowlist is the
+        // universe, so it names the reason.
+        assert_eq!(
+            market_rejection_reason(&m("c.near"), &allowed, &ignored),
+            Some("not in ALLOWED_MARKETS"),
         );
     }
 

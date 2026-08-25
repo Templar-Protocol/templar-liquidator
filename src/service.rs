@@ -768,7 +768,7 @@ impl LiquidatorService {
             )> = Vec::new();
             for market in &all_markets {
                 // Step 0: admission by allow/deny lists, before any RPC calls
-                if let Some(reason) = market_admitted(
+                if let Some(reason) = market_rejection_reason(
                     market,
                     &self.config.allowed_markets,
                     &self.config.ignored_markets,
@@ -1439,12 +1439,12 @@ impl LiquidatorService {
     }
 }
 
-/// Admission decision for one registry market against the operator's
-/// allow/deny lists: `None` admits; `Some(reason)` names why not. An empty
+/// Why one registry market is rejected by the operator's allow/deny
+/// lists — `Some(reason)` rejects, `None` admits. An empty
 /// allowlist admits everything (the pre-knob behavior); a non-empty one is
 /// the universe, and the denylist subtracts within it — a market on both
 /// lists is ignored. Checked before any per-market RPC.
-fn market_admitted(
+fn market_rejection_reason(
     market: &AccountId,
     allowed_markets: &[AccountId],
     ignored_markets: &[AccountId],
@@ -1577,8 +1577,6 @@ mod usdc_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::market_admitted;
-
     /// The allowlist defines the universe when set (empty = all markets, the
     /// pre-knob behavior), and IGNORED_MARKETS still subtracts within it —
     /// a market on both lists is ignored.
@@ -1589,22 +1587,22 @@ mod tests {
         let ignored = vec![m("b.near"), m("c.near")];
         let none: Vec<AccountId> = vec![];
 
-        assert_eq!(market_admitted(&m("x.near"), &none, &none), None);
+        assert_eq!(market_rejection_reason(&m("x.near"), &none, &none), None);
         assert_eq!(
-            market_admitted(&m("a.near"), &allowed, &none),
+            market_rejection_reason(&m("a.near"), &allowed, &none),
             None,
             "allowlisted market admitted"
         );
         assert_eq!(
-            market_admitted(&m("x.near"), &allowed, &none),
+            market_rejection_reason(&m("x.near"), &allowed, &none),
             Some("not in ALLOWED_MARKETS"),
         );
         assert_eq!(
-            market_admitted(&m("c.near"), &none, &ignored),
+            market_rejection_reason(&m("c.near"), &none, &ignored),
             Some("ignored market"),
         );
         assert_eq!(
-            market_admitted(&m("b.near"), &allowed, &ignored),
+            market_rejection_reason(&m("b.near"), &allowed, &ignored),
             Some("ignored market"),
             "a market on both lists is ignored"
         );

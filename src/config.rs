@@ -1278,24 +1278,6 @@ mod tests {
     /// sibling list knobs do; without the delimiter, `a.near,b.near` parses
     /// as ONE invalid account id and the only way to express two registries
     /// is the repeatable CLI flag.
-    /// The allowlist parses as typed account ids at the CLI boundary —
-    /// deliberately stricter than IGNORED_MARKETS' warn-and-skip: a typo'd
-    /// entry silently dropped from a DENYlist un-ignores one market, but
-    /// dropped from an ALLOWlist it can empty the list and fail open to
-    /// every market. A bad entry must refuse startup instead.
-    #[test]
-    fn allowed_markets_parse_typed_and_fail_closed() {
-        let args = parse_with(&["--allowed-markets", "a.tmplr.near,b.tmplr.near"]);
-        assert_eq!(args.allowed_markets.len(), 2);
-        let config = args.build_config().expect("valid test config");
-        assert_eq!(config.allowed_markets.len(), 2);
-        assert_eq!(config.allowed_markets[0].to_string(), "a.tmplr.near");
-
-        let err = try_parse_with(&["--allowed-markets", "not..valid..id"])
-            .expect_err("an unparseable allowlist entry must refuse startup");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-    }
-
     #[test]
     fn registries_accept_a_comma_separated_list() {
         let key = test_signer_key();
@@ -1312,6 +1294,24 @@ mod tests {
         assert_eq!(args.registries.len(), 2);
         assert_eq!(args.registries[0].to_string(), "a.near");
         assert_eq!(args.registries[1].to_string(), "b.near");
+    }
+
+    /// The allowlist parses as typed account ids at the CLI boundary —
+    /// deliberately stricter than IGNORED_MARKETS' warn-and-skip: a typo'd
+    /// entry silently dropped from a DENYlist un-ignores one market, but
+    /// dropped from an ALLOWlist it can empty the list and fail open to
+    /// every market. A bad entry must refuse startup instead.
+    #[test]
+    fn allowed_markets_parse_typed_and_fail_closed() {
+        let args = parse_with(&["--allowed-markets", "a.tmplr.near,b.tmplr.near"]);
+        assert_eq!(args.allowed_markets.len(), 2);
+        let config = args.build_config().expect("valid test config");
+        assert_eq!(config.allowed_markets.len(), 2);
+        assert_eq!(config.allowed_markets[0].to_string(), "a.tmplr.near");
+
+        let err = try_parse_with(&["--allowed-markets", "not..valid..id"])
+            .expect_err("an unparseable allowlist entry must refuse startup");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     /// A well-formed key whose embedded public half does not match its

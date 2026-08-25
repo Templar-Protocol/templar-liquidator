@@ -71,6 +71,56 @@ pub enum CollateralStrategyArg {
     SwapToBorrow,
 }
 
+/// A signer key whose validity is established at construction — the only
+/// way in, so a [`crate::service::ServiceConfig`] cannot represent an
+/// invalid one: it parses as a NEAR secret key, and its embedded public
+/// half matches its secret half (the gateway signer rejects a mismatched
+/// pair; before this type existed that surfaced as a panic deep in service
+/// construction). Errors never contain key material, and neither does the
+/// `Debug` impl.
+#[derive(Clone)]
+pub struct ValidatedSignerKey(near_crypto::SecretKey);
+
+impl TryFrom<&str> for ValidatedSignerKey {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        // Both errors deliberately omit the value: a mistyped key is still
+        // near-complete key material, and these messages reach stderr.
+        let parsed: near_crypto::SecretKey = value.trim().parse().map_err(|_| {
+            "SIGNER_KEY is not a valid NEAR secret key (expected `ed25519:<base58>`); value withheld"
+                .to_string()
+        })?;
+        // Round-trip through the parser the gateway signer actually uses:
+        // it is the layer that detects a well-formed key whose embedded
+        // public half does not match its secret half.
+        parsed
+            .to_string()
+            .parse::<near_api::SecretKey>()
+            .map_err(|_| {
+                "SIGNER_KEY parses but is not a usable signer key: its embedded public half does \
+                 not match its secret half (mismatched keypair) — re-export the key for \
+                 SIGNER_ACCOUNT_ID from your wallet; value withheld"
+                    .to_string()
+            })?;
+        Ok(Self(parsed))
+    }
+}
+
+impl ValidatedSignerKey {
+    /// The validated key, for handing to the gateway signer.
+    #[must_use]
+    pub fn secret_key(&self) -> &near_crypto::SecretKey {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ValidatedSignerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ValidatedSignerKey(<redacted>)")
+    }
+}
+
 /// Command-line arguments for the liquidator bot.
 ///
 /// `Debug` is implemented by hand rather than derived: this struct holds the
@@ -615,25 +665,7 @@ impl Args {
             notification_capacity,
         ));
 
-        // Both errors deliberately omit the value: a mistyped key is still
-        // near-complete key material, and these messages reach stderr.
-        let signer_key: near_crypto::SecretKey = self.signer_key.trim().parse().map_err(|_| {
-            "SIGNER_KEY is not a valid NEAR secret key (expected `ed25519:<base58>`); value withheld"
-                .to_string()
-        })?;
-        // Round-trip through the parser the gateway signer actually uses:
-        // it is the layer that detects a well-formed key whose embedded
-        // public half does not match its secret half. Catch it here as a
-        // clean startup error instead of a panic in service construction.
-        signer_key
-            .to_string()
-            .parse::<near_api::SecretKey>()
-            .map_err(|_| {
-                "SIGNER_KEY parses but is not a usable signer key: its embedded public half does \
-                 not match its secret half (mismatched keypair) — re-export the key for \
-                 SIGNER_ACCOUNT_ID from your wallet; value withheld"
-                    .to_string()
-            })?;
+        let signer_key = ValidatedSignerKey::try_from(self.signer_key.as_str())?;
 
         Ok(ServiceConfig {
             registries: self.registries.clone(),
@@ -919,7 +951,11 @@ mod tests {
 
         let strategy = args.create_strategy();
         assert_eq!(strategy.strategy_name(), "Percentage Liquidation");
-        assert_eq!(strategy.max_liquidation_percentage(), 75);
+        // The declared ceiling is 100 regardless of the partial target: on
+        // full-liquidation markets this strategy sizes the full repay,
+        // bounded only by the balance — and the declaration is enforced by
+        // the caller, so declaring the partial target would veto those.
+        assert_eq!(strategy.max_liquidation_percentage(), 100);
     }
 
     #[test]
@@ -1217,10 +1253,6 @@ mod tests {
         );
     }
 
-    /// `0` for the three nonzero knobs is rejected by the CLI itself — the
-    /// layer where the invariant now lives — not merely by the field types:
-    /// reverting any of them to a plain integer would leave std's parser
-    /// tests green while restoring the `buffer_unordered` hang.
     /// The env-var form of a list knob must accept commas like its three
     /// sibling list knobs do; without the delimiter, `a.near,b.near` parses
     /// as ONE invalid account id and the only way to express two registries
@@ -1289,6 +1321,10 @@ mod tests {
         assert!(!rendered.contains("not-base58"));
     }
 
+    /// `0` for the three nonzero knobs is rejected by the CLI itself — the
+    /// layer where the invariant now lives — not merely by the field types:
+    /// reverting any of them to a plain integer would leave std's parser
+    /// tests green while restoring the `buffer_unordered` hang.
     #[test]
     fn zero_concurrency_and_loop_knobs_are_rejected_at_parse_time() {
         for args in [

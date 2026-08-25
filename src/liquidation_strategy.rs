@@ -116,25 +116,27 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     /// `None` to skip this position for this round — e.g. inventory too low,
     /// below the contract's minimum borrow amount, or the buffered eligibility
     /// cap rounds down to nothing for a dust-sized position. `None` is the
-    /// *only* "don't liquidate" signal this trait defines: the caller does not
-    /// separately check the returned amounts for zero before submitting a
-    /// liquidation transaction, so an implementation must never return
-    /// `Some((U128(0), _))` — that would attempt an on-chain liquidation for a
-    /// zero repay amount instead of skipping cleanly.
+    /// correct "don't liquidate" signal: a `Some` with a zero repay or
+    /// collateral amount is rejected by the caller's fail-closed validation
+    /// (the position is skipped with a warning naming the strategy) rather
+    /// than submitted on-chain.
     ///
-    /// # Caller trust — no re-clamping
+    /// # Caller validation — checked, not re-clamped
     ///
-    /// [`crate::Liquidator::liquidate`] passes the returned amounts to the
-    /// liquidation transaction essentially unmodified (only wrapped into typed
-    /// amounts); it does not independently re-check them against
-    /// `available_balance` or the position's on-chain eligibility cap. Any
-    /// safety margin — headroom against price drift between scan and execution,
-    /// or staying under the contract's liquidatable-collateral cap — must be
-    /// built into the returned amount by the strategy itself. Both built-in
-    /// strategies do this via the module-level `SAFETY_BUFFER_BPS` and
-    /// `LIQUIDATABLE_CAP_BUFFER_BPS` constants (see `apply_liquidatable_cap_buffer`
-    /// and `min_with_cap_buffer`); a new strategy is free to use a different
-    /// margin, but needs one.
+    /// [`crate::Liquidator::liquidate`] validates the returned amounts and
+    /// then passes them to the liquidation transaction unmodified (only
+    /// wrapped into typed amounts) — it never silently adjusts them. The
+    /// validation rejects (skips the position, fail closed): zero amounts,
+    /// and a repay above the share of `available_balance` this strategy
+    /// declares via [`max_liquidation_percentage`](Self::max_liquidation_percentage).
+    /// It does NOT check the position's on-chain eligibility cap, so any
+    /// safety margin — headroom against price drift between scan and
+    /// execution, or staying under the contract's liquidatable-collateral
+    /// cap — must still be built into the returned amount by the strategy
+    /// itself. Both built-in strategies do this via the module-level
+    /// `SAFETY_BUFFER_BPS` and `LIQUIDATABLE_CAP_BUFFER_BPS` constants (see
+    /// `apply_liquidatable_cap_buffer` and `min_with_cap_buffer`); a new
+    /// strategy is free to use a different margin, but needs one.
     ///
     /// # Arguments
     ///
@@ -464,7 +466,12 @@ impl LiquidationStrategy for PercentageLiquidationStrategy {
     }
 
     fn max_liquidation_percentage(&self) -> u8 {
-        self.target_percentage.get()
+        // The true ceiling is 100, not `target_percentage`: on markets
+        // without partial-liquidation support this strategy deliberately
+        // sizes the full required repay, bounded only by the available
+        // balance — declaring the partial target here would make the
+        // caller's cap veto exactly the large positions on those markets.
+        100
     }
 }
 
@@ -783,7 +790,10 @@ mod tests {
             PercentageLiquidationStrategy::new("50".parse::<LiquidationPercentage>().unwrap(), 50);
         assert_eq!(strategy.min_profit_margin_bps, 50);
         assert_eq!(strategy.strategy_name(), "Percentage Liquidation");
-        assert_eq!(strategy.max_liquidation_percentage(), 50);
+        // 100 even with a 50% partial target: the ceiling is what the
+        // caller enforces, and the full-liquidation path legitimately
+        // commits up to the whole available balance.
+        assert_eq!(strategy.max_liquidation_percentage(), 100);
     }
 
     /// The percentage bounds live in the type, not in a constructor panic:

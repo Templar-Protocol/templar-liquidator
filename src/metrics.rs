@@ -30,9 +30,9 @@ pub struct Metrics {
     liquidations_attempted_total: AtomicU64,
     /// Liquidations that landed successfully.
     liquidations_succeeded_total: AtomicU64,
-    /// Liquidatable positions skipped because inventory or sizing did not
-    /// permit an attempt — the "money left on the table" counter; alert on
-    /// it growing. See `LiquidationOutcome::SkippedUnfunded`.
+    /// Liquidatable positions skipped for funding alone (below the market's minimum borrow amount, the strategy reporting insufficient inventory, or a lost inventory race) —
+    /// the "money left on the table" counter; alert on it growing: topping
+    /// up inventory is the fix. See `LiquidationOutcome::SkippedUnfunded`.
     liquidations_skipped_unfunded_total: AtomicU64,
     /// Liquidations that failed after a transaction was submitted
     /// (`ErrorPhase::Execution` only). Narrower than the `failed` field in
@@ -177,7 +177,7 @@ impl Metrics {
             ),
             c(
                 "liquidations_skipped_unfunded_total",
-                "Liquidatable positions skipped because inventory or sizing did not permit an attempt.",
+                "Liquidatable positions skipped for funding alone; topping up inventory is the fix.",
                 self.liquidations_skipped_unfunded_total.load(Ordering::Relaxed),
             ),
             g(

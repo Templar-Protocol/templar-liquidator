@@ -193,14 +193,16 @@ pub enum LiquidationOutcome {
     /// may still be liquidatable.
     Skipped,
     /// The position was liquidatable, but funding did not permit an
-    /// attempt: balance below the contract's minimum borrow amount, or the
-    /// inventory race was lost. Deliberately narrow — a strategy declining
-    /// to size stays [`Skipped`](Self::Skipped), because its `None` covers
-    /// causes no inventory can clear (dust, repay under the market minimum,
-    /// conversion failures) and folding them in would latch the alert this
-    /// outcome exists for. Alert on the
-    /// `liquidations_skipped_unfunded_total` counter growing: topping up
-    /// inventory is the fix.
+    /// attempt: balance below the contract's minimum borrow amount, the
+    /// strategy reporting
+    /// [`DeclineReason::InsufficientInventory`](crate::liquidation_strategy::DeclineReason),
+    /// or a lost inventory race. Deliberately excludes
+    /// [`NotViable`](crate::liquidation_strategy::DeclineReason::NotViable)
+    /// declines (dust, repay under the market minimum, conversion
+    /// failures, a config-capped fixed budget) — causes no inventory can
+    /// clear, which would latch the alert this outcome exists for. Alert
+    /// on the `liquidations_skipped_unfunded_total` counter growing:
+    /// topping up inventory is the fix.
     SkippedUnfunded,
     /// Position is liquidatable but unprofitable
     Unprofitable,
@@ -541,8 +543,9 @@ enum Sizing {
     /// successful one (the executed transaction stays counted; the cause is
     /// logged at the decision site).
     InventoryBelowMinimum,
-    /// The strategy declined to size (it logged why).
-    Declined,
+    /// The strategy declined to size, or its output failed caller-side
+    /// validation — the reason decides the skip bucket.
+    Declined(crate::liquidation_strategy::DeclineReason),
 }
 
 /// How the profitability assessment ended.
@@ -578,15 +581,16 @@ enum Evaluation {
 /// first-iteration stop reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SkipCause {
-    /// Unambiguously funding: inventory below the contract's minimum borrow
-    /// amount — reports [`LiquidationOutcome::SkippedUnfunded`]. The
-    /// strategy declining to size is deliberately NOT here: its `None`
-    /// covers causes no inventory can clear (dust positions, repay under
-    /// the market minimum, conversion failures), and folding those in
-    /// would latch the unfunded alert permanently.
+    /// Unambiguously funding: inventory below the contract's minimum
+    /// borrow amount, or the strategy reporting
+    /// [`InsufficientInventory`](crate::liquidation_strategy::DeclineReason::InsufficientInventory)
+    /// — reports [`LiquidationOutcome::SkippedUnfunded`].
     Unfunded,
-    /// The strategy declined to size (it logged why) or its output failed
-    /// caller-side validation — reports [`LiquidationOutcome::Skipped`].
+    /// The strategy declined as
+    /// [`NotViable`](crate::liquidation_strategy::DeclineReason::NotViable)
+    /// (a cause no inventory can clear — folding those into the unfunded
+    /// alert would latch it permanently), or its output failed caller-side
+    /// validation — reports [`LiquidationOutcome::Skipped`].
     StrategyDeclined,
     /// The position could not be priced — reports
     /// [`LiquidationOutcome::Skipped`].
@@ -1024,26 +1028,31 @@ impl Liquidator {
             "Using liquidatable collateral for liquidation calculation"
         );
 
-        let Some((liquidation_amount, collateral_amount)) =
-            self.strategy.calculate_liquidation_amount(
-                &adjusted_position,
-                oracle_response,
-                &self.market_config,
-                available_balance,
-                self.market_version,
-            )?
-        else {
-            if ctx.iteration > 1 {
-                let (borrow_dec, borrow_asset, _, _) = self.asset_info();
-                tracing::warn!(
-                    borrower = %borrow_account,
-                    iteration = %format::format_iteration(ctx.iteration, ctx.max_iterations),
-                    available_balance = %format::format_amount(available_balance.0, borrow_dec, &borrow_asset),
-                    "Loop liquidation: insufficient balance to continue, stopping"
-                );
+        let decision = self.strategy.calculate_liquidation_amount(
+            &adjusted_position,
+            oracle_response,
+            &self.market_config,
+            available_balance,
+            self.market_version,
+        )?;
+        let (liquidation_amount, collateral_amount) = match decision {
+            crate::liquidation_strategy::StrategyDecision::Sized(repay, collateral) => {
+                (repay, collateral)
             }
-            // Strategy already logged the specific reason (insufficient inventory, below minimum, etc.)
-            return Ok(Sizing::Declined);
+            crate::liquidation_strategy::StrategyDecision::Decline(reason) => {
+                if ctx.iteration > 1 {
+                    let (borrow_dec, borrow_asset, _, _) = self.asset_info();
+                    tracing::warn!(
+                        borrower = %borrow_account,
+                        iteration = %format::format_iteration(ctx.iteration, ctx.max_iterations),
+                        available_balance = %format::format_amount(available_balance.0, borrow_dec, &borrow_asset),
+                        "Loop liquidation: strategy declined to continue, stopping"
+                    );
+                }
+                // The strategy already logged the specific cause; the typed
+                // reason decides the skip bucket.
+                return Ok(Sizing::Declined(reason));
+            }
         };
 
         if let Err(violation) = validate_sizing(
@@ -1061,7 +1070,9 @@ impl Liquidator {
                 available_balance = %available_balance.0,
                 "Strategy sizing output failed caller-side validation - skipping position (fail closed)"
             );
-            return Ok(Sizing::Declined);
+            return Ok(Sizing::Declined(
+                crate::liquidation_strategy::DeclineReason::NotViable,
+            ));
         }
 
         Ok(Sizing::Sized(SizedLiquidation {
@@ -1267,7 +1278,12 @@ impl Liquidator {
         {
             Sizing::Sized(sized) => sized,
             Sizing::InventoryBelowMinimum => return Ok(Evaluation::Skip(SkipCause::Unfunded)),
-            Sizing::Declined => return Ok(Evaluation::Skip(SkipCause::StrategyDeclined)),
+            Sizing::Declined(crate::liquidation_strategy::DeclineReason::InsufficientInventory) => {
+                return Ok(Evaluation::Skip(SkipCause::Unfunded));
+            }
+            Sizing::Declined(crate::liquidation_strategy::DeclineReason::NotViable) => {
+                return Ok(Evaluation::Skip(SkipCause::StrategyDeclined));
+            }
         };
 
         match self.assess_profitability(
@@ -1649,7 +1665,7 @@ impl Liquidator {
 
         tracing::info!(
             strategy = %self.strategy.strategy_name(),
-            percentage = max_percentage,
+            declared_max_percentage = max_percentage,
             "Starting liquidation run"
         );
 

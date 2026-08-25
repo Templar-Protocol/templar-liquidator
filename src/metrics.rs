@@ -30,6 +30,10 @@ pub struct Metrics {
     liquidations_attempted_total: AtomicU64,
     /// Liquidations that landed successfully.
     liquidations_succeeded_total: AtomicU64,
+    /// Liquidatable positions skipped because inventory or sizing did not
+    /// permit an attempt — the "money left on the table" counter; alert on
+    /// it growing. See `LiquidationOutcome::SkippedUnfunded`.
+    liquidations_skipped_unfunded_total: AtomicU64,
     /// Liquidations that failed after a transaction was submitted
     /// (`ErrorPhase::Execution` only). Narrower than the `failed` field in
     /// the per-market "Liquidation run completed" log line, which also
@@ -82,6 +86,8 @@ impl Metrics {
             .fetch_add(summary.succeeded, Ordering::Relaxed);
         self.liquidations_failed_total
             .fetch_add(summary.failed, Ordering::Relaxed);
+        self.liquidations_skipped_unfunded_total
+            .fetch_add(summary.skipped_unfunded, Ordering::Relaxed);
     }
 
     /// Records a scan cycle in which at least one market scanned without
@@ -169,6 +175,11 @@ impl Metrics {
                 "Liquidations that failed after a transaction was submitted.",
                 self.liquidations_failed_total.load(Ordering::Relaxed),
             ),
+            c(
+                "liquidations_skipped_unfunded_total",
+                "Liquidatable positions skipped because inventory or sizing did not permit an attempt.",
+                self.liquidations_skipped_unfunded_total.load(Ordering::Relaxed),
+            ),
             g(
                 "last_successful_scan_timestamp_seconds",
                 "Unix time of the last cycle with at least one clean market scan; 0 = never.",
@@ -207,6 +218,7 @@ mod tests {
             "templar_liquidator_liquidations_attempted_total",
             "templar_liquidator_liquidations_succeeded_total",
             "templar_liquidator_liquidations_failed_total",
+            "templar_liquidator_liquidations_skipped_unfunded_total",
             "templar_liquidator_last_successful_scan_timestamp_seconds",
         ] {
             assert!(out.contains(name), "missing {name}");
@@ -226,6 +238,7 @@ mod tests {
             "templar_liquidator_liquidations_attempted_total",
             "templar_liquidator_liquidations_succeeded_total",
             "templar_liquidator_liquidations_failed_total",
+            "templar_liquidator_liquidations_skipped_unfunded_total",
             "templar_liquidator_last_successful_scan_timestamp_seconds",
             "templar_liquidator_inventory_reserved_raw",
         ] {

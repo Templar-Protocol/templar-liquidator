@@ -225,13 +225,16 @@ pub trait LiquidationStrategy: Send + Sync + std::fmt::Debug {
     /// Returns the strategy name for logging and debugging.
     fn strategy_name(&self) -> &'static str;
 
-    /// Returns the maximum liquidation percentage (0-100) this strategy will
-    /// ever request, used for logging only — it is not enforced against the
-    /// value returned by [`calculate_liquidation_amount`](Self::calculate_liquidation_amount).
+    /// Returns the maximum share of available inventory (0-100, in
+    /// percent) this strategy will ever commit to one sizing. **Enforced by
+    /// the caller**: a `calculate_liquidation_amount` result whose repay
+    /// exceeds this share of the available balance is skipped fail-closed
+    /// (with a warning naming the strategy), so keep the declaration
+    /// truthful — an under-declared value silently vetoes your own sizing.
     ///
     /// # Default
     ///
-    /// Returns 100 (full liquidation) by default.
+    /// Returns 100 (may commit the full available balance) by default.
     fn max_liquidation_percentage(&self) -> u8 {
         100
     }

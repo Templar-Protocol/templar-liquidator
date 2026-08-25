@@ -85,7 +85,7 @@ pub enum CollateralStrategyArg {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Args {
     /// Market registries to run liquidations for
-    #[arg(short, long, env = "REGISTRY_ACCOUNT_IDS")]
+    #[arg(short, long, env = "REGISTRY_ACCOUNT_IDS", value_delimiter = ',')]
     pub registries: Vec<AccountId>,
 
     /// Signer key to use for signing transactions, as `ed25519:<base58>`
@@ -471,7 +471,14 @@ impl Args {
 
     /// Build service configuration from arguments
     #[allow(clippy::too_many_lines)]
-    pub fn build_config(&self) -> ServiceConfig {
+    /// # Errors
+    ///
+    /// Rejects a `SIGNER_KEY` that does not parse as a NEAR secret key, or
+    /// that parses but carries a mismatched keypair (the embedded public
+    /// half disagrees with the secret half — the gateway signer would
+    /// refuse it later, previously as a panic deep in service
+    /// construction). Error messages never contain the key material.
+    pub fn build_config(&self) -> Result<ServiceConfig, String> {
         let strategy = self.create_strategy();
         let collateral_strategy = self.parse_collateral_strategy();
 
@@ -608,13 +615,27 @@ impl Args {
             notification_capacity,
         ));
 
-        // The error deliberately omits the value: a mistyped key is still
-        // near-complete key material, and this message reaches stderr.
-        let signer_key: near_crypto::SecretKey = self.signer_key.trim().parse().unwrap_or_else(|_| {
-            panic!("SIGNER_KEY is not a valid NEAR secret key (expected `ed25519:<base58>`); value withheld")
-        });
+        // Both errors deliberately omit the value: a mistyped key is still
+        // near-complete key material, and these messages reach stderr.
+        let signer_key: near_crypto::SecretKey = self.signer_key.trim().parse().map_err(|_| {
+            "SIGNER_KEY is not a valid NEAR secret key (expected `ed25519:<base58>`); value withheld"
+                .to_string()
+        })?;
+        // Round-trip through the parser the gateway signer actually uses:
+        // it is the layer that detects a well-formed key whose embedded
+        // public half does not match its secret half. Catch it here as a
+        // clean startup error instead of a panic in service construction.
+        signer_key
+            .to_string()
+            .parse::<near_api::SecretKey>()
+            .map_err(|_| {
+                "SIGNER_KEY parses but is not a usable signer key: its embedded public half does \
+                 not match its secret half (mismatched keypair) — re-export the key for \
+                 SIGNER_ACCOUNT_ID from your wallet; value withheld"
+                    .to_string()
+            })?;
 
-        ServiceConfig {
+        Ok(ServiceConfig {
             registries: self.registries.clone(),
             signer_key,
             signer_account: self.signer_account.clone(),
@@ -662,7 +683,7 @@ impl Args {
             scan_failure_notify_threshold: self.scan_failure_notify_threshold,
             http_port: self.http_port,
             http_bind_addr: self.http_bind_addr,
-        }
+        })
     }
 
     /// Log startup information
@@ -692,13 +713,18 @@ mod tests {
 
     /// Signer key shared by all config tests. Any valid ed25519 key works —
     /// only its presence (a required arg) matters here.
-    const TEST_SIGNER_KEY: &str =
-        "ed25519:5JQFYvABVhxnvvvULXqZUSP8QtEiRBMUi5dHfkqZmJ2FLVJqMn3mEhZpF8p8qvC6SvdZLd5VDSvkeVJdyBDZfGi1";
+    /// A self-consistent test keypair: `build_config` validates that the
+    /// embedded public half matches the secret half, which a made-up base58
+    /// string cannot satisfy.
+    fn test_signer_key() -> String {
+        near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "liquidator-test")
+            .to_string()
+    }
 
     fn create_test_args() -> Args {
         Args {
             registries: vec!["registry.testnet".parse().unwrap()],
-            signer_key: TEST_SIGNER_KEY.to_string(),
+            signer_key: test_signer_key(),
             signer_account: "liquidator.testnet".parse().unwrap(),
             network: Network::Testnet,
             near_rpc_url: None,
@@ -754,12 +780,13 @@ mod tests {
     /// (clap usage errors from `conflicts_with` / `requires` / a rejecting
     /// `value_parser`) can assert on the error instead of unwrapping.
     fn try_parse_with(extra: &[&str]) -> Result<Args, clap::Error> {
+        let key = test_signer_key();
         let mut argv = vec![
             "templar-liquidator",
             "--registries",
             "registry.testnet",
             "--signer-key",
-            TEST_SIGNER_KEY,
+            &key,
             "--signer-account",
             "liquidator.testnet",
         ];
@@ -803,7 +830,10 @@ mod tests {
     #[test]
     fn run_mode_once_parses_and_reaches_config() {
         let args = parse_with(&["--run-mode", "once"]);
-        assert_eq!(args.build_config().run_mode, RunMode::Once);
+        assert_eq!(
+            args.build_config().expect("valid test config").run_mode,
+            RunMode::Once
+        );
     }
 
     /// A VAA is only accepted by the Pyth receiver whose guardian set signed it.
@@ -814,7 +844,10 @@ mod tests {
             args.network = network;
             args.hermes_url = None;
 
-            assert_eq!(args.build_config().hermes_url, network.hermes_url());
+            assert_eq!(
+                args.build_config().expect("valid test config").hermes_url,
+                network.hermes_url()
+            );
         }
     }
 
@@ -824,7 +857,10 @@ mod tests {
         let mut args = create_test_args();
         args.hermes_url = Some(override_url.clone());
 
-        assert_eq!(args.build_config().hermes_url, override_url);
+        assert_eq!(
+            args.build_config().expect("valid test config").hermes_url,
+            override_url
+        );
     }
 
     #[test]
@@ -937,7 +973,7 @@ mod tests {
         args.allowed_collateral_assets = vec!["nep141:usdc.testnet".to_string()];
         args.ignored_collateral_assets = vec!["nep141:scam.testnet".to_string()];
 
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert_eq!(config.registries.len(), 1);
         assert_eq!(config.network, Network::Testnet);
         assert_eq!(
@@ -1000,7 +1036,7 @@ mod tests {
     fn test_telegram_disabled_both_empty() {
         let args = create_test_args();
         // Both unset → notifier disabled
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert!(!config.notifier.is_enabled());
     }
 
@@ -1009,7 +1045,7 @@ mod tests {
         let mut args = create_test_args();
         args.telegram_bot_token = Some("123:ABC".to_string());
         args.telegram_chat_id = Some("-100123".to_string());
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert!(config.notifier.is_enabled());
     }
 
@@ -1019,7 +1055,7 @@ mod tests {
         args.telegram_bot_token = Some("123:ABC".to_string());
         args.telegram_chat_id = Some("-100123".to_string());
         args.telegram_thread_id = "42".to_string();
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert!(config.notifier.is_enabled());
     }
 
@@ -1044,7 +1080,7 @@ mod tests {
         let mut args = create_test_args();
         args.telegram_bot_token = Some("  ".to_string());
         args.telegram_chat_id = Some("  ".to_string());
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert!(!config.notifier.is_enabled());
     }
 
@@ -1058,7 +1094,7 @@ mod tests {
         let mut args = create_test_args();
         args.telegram_bot_token = Some("123:ABC".to_string());
         args.telegram_chat_id = Some("  ".to_string());
-        args.build_config();
+        args.build_config().expect("valid test config");
     }
 
     #[test]
@@ -1085,7 +1121,7 @@ mod tests {
         args.telegram_bot_token = Some("123:ABC".to_string());
         args.telegram_chat_id = Some("-100123".to_string());
         args.telegram_thread_id = String::new();
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert!(config.notifier.is_enabled());
     }
 
@@ -1093,7 +1129,7 @@ mod tests {
     fn test_scan_failure_threshold_default() {
         let args = create_test_args();
         assert_eq!(args.scan_failure_notify_threshold, 2);
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert_eq!(config.scan_failure_notify_threshold, 2);
     }
 
@@ -1101,7 +1137,7 @@ mod tests {
     fn test_scan_failure_threshold_disabled() {
         let mut args = create_test_args();
         args.scan_failure_notify_threshold = 0;
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert_eq!(config.scan_failure_notify_threshold, 0);
     }
 
@@ -1109,21 +1145,30 @@ mod tests {
     fn test_scan_failure_threshold_custom() {
         let mut args = create_test_args();
         args.scan_failure_notify_threshold = 5;
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert_eq!(config.scan_failure_notify_threshold, 5);
     }
 
     #[test]
     fn http_port_defaults_to_disabled() {
         assert_eq!(parse_with(&[]).http_port, None);
-        assert_eq!(create_test_args().build_config().http_port, None);
+        assert_eq!(
+            create_test_args()
+                .build_config()
+                .expect("valid test config")
+                .http_port,
+            None
+        );
     }
 
     #[test]
     fn http_port_reaches_config() {
         let mut args = create_test_args();
         args.http_port = Some(9090);
-        assert_eq!(args.build_config().http_port, Some(9090));
+        assert_eq!(
+            args.build_config().expect("valid test config").http_port,
+            Some(9090)
+        );
     }
 
     /// The endpoints expose no secrets, but binding every interface makes
@@ -1136,7 +1181,10 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         );
         assert_eq!(
-            create_test_args().build_config().http_bind_addr,
+            create_test_args()
+                .build_config()
+                .expect("valid test config")
+                .http_bind_addr,
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         );
     }
@@ -1146,7 +1194,9 @@ mod tests {
         let args = parse_with(&["--http-bind-addr", "0.0.0.0"]);
         assert_eq!(args.http_bind_addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(
-            args.build_config().http_bind_addr,
+            args.build_config()
+                .expect("valid test config")
+                .http_bind_addr,
             IpAddr::V4(Ipv4Addr::UNSPECIFIED)
         );
     }
@@ -1158,7 +1208,11 @@ mod tests {
     fn position_concurrency_defaults_to_sequential() {
         assert_eq!(declared_default("position_concurrency"), ["1"]);
         assert_eq!(
-            create_test_args().build_config().position_concurrency.get(),
+            create_test_args()
+                .build_config()
+                .expect("valid test config")
+                .position_concurrency
+                .get(),
             1
         );
     }
@@ -1167,6 +1221,74 @@ mod tests {
     /// layer where the invariant now lives — not merely by the field types:
     /// reverting any of them to a plain integer would leave std's parser
     /// tests green while restoring the `buffer_unordered` hang.
+    /// The env-var form of a list knob must accept commas like its three
+    /// sibling list knobs do; without the delimiter, `a.near,b.near` parses
+    /// as ONE invalid account id and the only way to express two registries
+    /// is the repeatable CLI flag.
+    #[test]
+    fn registries_accept_a_comma_separated_list() {
+        let key = test_signer_key();
+        let args = Args::try_parse_from([
+            "templar-liquidator",
+            "--registries",
+            "a.near,b.near",
+            "--signer-key",
+            &key,
+            "--signer-account",
+            "liquidator.testnet",
+        ])
+        .expect("comma-separated registries must parse");
+        assert_eq!(args.registries.len(), 2);
+        assert_eq!(args.registries[0].to_string(), "a.near");
+        assert_eq!(args.registries[1].to_string(), "b.near");
+    }
+
+    /// A well-formed key whose embedded public half does not match its
+    /// secret half must fail at parse time with an actionable message —
+    /// not panic deep in service construction — and the message must never
+    /// contain the key material.
+    #[test]
+    fn mismatched_signer_key_is_rejected_at_parse_time_without_echoing_it() {
+        let a = near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "seed-a");
+        let b = near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "seed-b");
+        let (near_crypto::SecretKey::ED25519(a_inner), near_crypto::PublicKey::ED25519(b_pub)) =
+            (a, b.public_key())
+        else {
+            unreachable!("from_seed with KeyType::ED25519 yields ed25519 keys");
+        };
+        let mut spliced = a_inner.0;
+        spliced[32..].copy_from_slice(&b_pub.0);
+        let mismatched =
+            near_crypto::SecretKey::ED25519(near_crypto::ED25519SecretKey(spliced)).to_string();
+
+        // Deliberately NOT a clap value_parser: clap echoes offending
+        // values in its errors, and a mistyped key is still near-complete
+        // key material. Validation lives in `build_config`, whose errors
+        // withhold the value.
+        let args_with_key = |key: &str| {
+            let mut args = parse_with(&[]);
+            args.signer_key = key.to_string();
+            args
+        };
+        let rendered = args_with_key(&mismatched)
+            .build_config()
+            .expect_err("a mismatched keypair must be rejected at config build time");
+        assert!(
+            rendered.contains("mismatched keypair"),
+            "message must name the failure mode: {rendered}"
+        );
+        assert!(
+            !rendered.contains(mismatched.trim_start_matches("ed25519:")),
+            "message must never echo key material"
+        );
+
+        // A garbage key is also a clean error, value withheld.
+        let rendered = args_with_key("ed25519:not-base58!!")
+            .build_config()
+            .expect_err("garbage must be rejected at config build time");
+        assert!(!rendered.contains("not-base58"));
+    }
+
     #[test]
     fn zero_concurrency_and_loop_knobs_are_rejected_at_parse_time() {
         for args in [
@@ -1183,7 +1305,13 @@ mod tests {
             );
         }
         let args = parse_with(&["--position-concurrency", "8"]);
-        assert_eq!(args.build_config().position_concurrency.get(), 8);
+        assert_eq!(
+            args.build_config()
+                .expect("valid test config")
+                .position_concurrency
+                .get(),
+            8
+        );
     }
 
     /// A concurrent round can fire up to two notifications per in-flight
@@ -1191,7 +1319,9 @@ mod tests {
     /// scale with the knob or the busiest rounds silently drop alerts.
     #[test]
     fn notifier_inflight_capacity_scales_with_position_concurrency() {
-        let default_cfg = create_test_args().build_config();
+        let default_cfg = create_test_args()
+            .build_config()
+            .expect("valid test config");
         assert_eq!(
             default_cfg.notifier.max_inflight(),
             crate::notifier::MAX_INFLIGHT_NOTIFICATIONS,
@@ -1199,7 +1329,13 @@ mod tests {
 
         let mut args = create_test_args();
         args.position_concurrency = std::num::NonZeroUsize::new(32).unwrap();
-        assert!(args.build_config().notifier.max_inflight() >= 64);
+        assert!(
+            args.build_config()
+                .expect("valid test config")
+                .notifier
+                .max_inflight()
+                >= 64
+        );
     }
 
     /// Scan-side proxy-price composition reads the RedStone public API. The
@@ -1212,7 +1348,11 @@ mod tests {
             "https://api.redstone.finance/"
         );
         assert_eq!(
-            create_test_args().build_config().redstone_api_url.as_str(),
+            create_test_args()
+                .build_config()
+                .expect("valid test config")
+                .redstone_api_url
+                .as_str(),
             "https://api.redstone.finance/"
         );
     }
@@ -1239,7 +1379,7 @@ mod tests {
     fn once_flag_forces_once_mode() {
         let mut args = create_test_args();
         args.once = true;
-        let config = args.build_config();
+        let config = args.build_config().expect("valid test config");
         assert_eq!(config.run_mode, RunMode::Once);
     }
 
@@ -1263,15 +1403,9 @@ mod tests {
         let mut args = parse_with(&[]);
         args.signer_key = TYPO.to_string();
 
-        let panic = std::panic::catch_unwind(move || args.build_config())
+        let message = args
+            .build_config()
             .expect_err("a malformed key must be rejected");
-        // `panic!` with a literal yields a `&'static str` payload; a formatted
-        // one yields `String`. Check both so the assertion can't pass vacuously.
-        let message = panic.downcast_ref::<String>().map_or_else(
-            || (*panic.downcast_ref::<&'static str>().unwrap_or(&"")).to_string(),
-            Clone::clone,
-        );
-        assert!(!message.is_empty(), "panic payload was not a string");
 
         assert!(message.contains("value withheld"), "got: {message}");
         assert!(
@@ -1304,9 +1438,8 @@ mod tests {
         args.lazer_api_token = Some("lazer-token-value".to_string());
         let rendered = format!("{:?}", args.build_config());
 
-        let secret = TEST_SIGNER_KEY
-            .strip_prefix("ed25519:")
-            .expect("test key is ed25519");
+        let key = test_signer_key();
+        let secret = key.strip_prefix("ed25519:").expect("test key is ed25519");
         assert!(
             !rendered.contains(secret),
             "signer key leaked into Debug output: {rendered}"
@@ -1339,9 +1472,8 @@ mod tests {
         args.telegram_chat_id = Some("-100123".to_string());
         let rendered = format!("{args:?}");
 
-        let secret = TEST_SIGNER_KEY
-            .strip_prefix("ed25519:")
-            .expect("test key is ed25519");
+        let key = test_signer_key();
+        let secret = key.strip_prefix("ed25519:").expect("test key is ed25519");
         assert!(
             !rendered.contains(secret),
             "signer key leaked into Debug output: {rendered}"
@@ -1379,8 +1511,18 @@ mod tests {
         // The assertion production safety rests on: docker-compose.prod.yml
         // sets DRY_RUN=false, and that opt-out must survive all the way to
         // ServiceConfig, not just to Args.
-        assert!(!parse_with(&["--dry-run=false"]).build_config().dry_run);
-        assert!(!parse_with(&["--dry-run", "false"]).build_config().dry_run);
+        assert!(
+            !parse_with(&["--dry-run=false"])
+                .build_config()
+                .expect("valid test config")
+                .dry_run
+        );
+        assert!(
+            !parse_with(&["--dry-run", "false"])
+                .build_config()
+                .expect("valid test config")
+                .dry_run
+        );
     }
 
     #[test]

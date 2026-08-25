@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `liquidations_skipped_unfunded_total` — liquidatable positions skipped because inventory or sizing did not permit an attempt (balance below the contract minimum, strategy declined to size, inventory race lost). Previously folded into the same bucket as maintenance-required and unpriceable skips, making "liquidatable debt we could not fund" invisible; it is now a distinct `LiquidationOutcome::SkippedUnfunded`, a `RoundSummary.skipped_unfunded` field, a field in the "Liquidation run completed" log line, and the new counter — the number to alert on for inventory sizing. [**breaking**] for forks matching `LiquidationOutcome` or constructing `RoundSummary` exhaustively.
+
+- Caller-side enforcement of the `LiquidationStrategy` contract: the sizing output is validated before use — zero amounts (the trait says return `None`) and a repay exceeding the strategy's own declared `max_liquidation_percentage()` share of available inventory now skip the position fail-closed with a warning naming the strategy, instead of being submitted on-chain. Both built-in strategies already satisfied these internally; the change is that a third-party strategy is checked rather than trusted.
+
 - `/metrics` series now carry `# HELP`/`# TYPE` lines, and the dependency-free renderer supports labelled families. First labelled series: `templar_liquidator_inventory_reserved_raw{asset=…}` — raw token units currently reserved for in-flight liquidations, published live from the inventory manager on every reservation issue and settle (an asset stays in the family at 0 after settling, so "reservation stuck nonzero" is alertable without scrape gaps). Raw-unit values are rendered as integers; scrapers parse Prometheus values as `f64`, so very large 24-decimal amounts lose low-order precision at the scraper — fine for the stuck-reservation alerting this exists for.
 
 - A test-only RPC seam (`rpc::test_support`): a scripted localhost JSON-RPC server plus constructors that build the real gateway clients against it — no mock client type, deliberately, so error-propagation tests exercise the shipped wiring. First user: a test pinning that a failed LST transformer read fails the round loudly (`PriceFetchError`) instead of reading as "no prices". The lazer, executor, and inventory test modules now share these helpers instead of carrying three private copies.
@@ -32,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `LiquidationStrategy::min_profit_margin_bps()` — strategies now report the margin they gate on, and `should_liquidate` became a provided trait method implemented in terms of it (both built-ins previously carried byte-identical copies). [**breaking**] for out-of-tree strategies: implementing `min_profit_margin_bps` is now required; `should_liquidate` may be dropped unless the fork's go/no-go policy genuinely differs.
 
 ### Changed
+
+- [**breaking**] `Args::build_config` returns `Result<ServiceConfig, String>`: a `SIGNER_KEY` that does not parse — or that parses but carries a mismatched keypair (the embedded public half disagrees with the secret half) — is now a clean, actionable startup error (exit code 2) instead of a panic deep in service construction. Error messages never contain key material; validation deliberately does not live in a clap `value_parser`, because clap echoes offending values into stderr.
+
+- `REGISTRY_ACCOUNT_IDS` accepts a comma-separated list, like the other list-typed knobs (`ALLOWED_COLLATERAL_ASSETS` etc.); previously `a.near,b.near` parsed as one invalid account id and only the repeatable CLI flag could express multiple registries.
 
 - `LiquidationExecutor`'s JIT collateral-swap helper is infallible in its signature (`(bool, Option<SwapIssue>)`, no `Result`): every path already returned `Ok`, and the caller's `.unwrap_or((false, None))` silently discarded any error a future edit might have added — that swallow-point is gone.
 

@@ -72,12 +72,6 @@ pub(crate) fn borrow_to_collateral(
         .to_u128_floor()
 }
 
-/// Convert a collateral asset amount to borrow asset amount.
-///
-/// Calculates the exact borrow amount needed to purchase the given collateral amount,
-/// accounting for the liquidation spread.
-///
-/// Formula: `borrow = collateral * price * (1 - spread)`
 /// Classifies a below-minimum decline for inventory-percentage sizing: a
 /// funding cause requires BOTH that the inventory-derived target bound the
 /// slice (the position's buffered cap did not clamp it) AND that a larger
@@ -108,6 +102,12 @@ fn below_minimum_decline_reason(
     }
 }
 
+/// Convert a collateral asset amount to borrow asset amount.
+///
+/// Calculates the exact borrow amount needed to purchase the given collateral amount,
+/// accounting for the liquidation spread.
+///
+/// Formula: `borrow = collateral * price * (1 - spread)`
 pub(crate) fn collateral_to_borrow(
     collateral_amount: u128,
     price_pair: &PricePair,

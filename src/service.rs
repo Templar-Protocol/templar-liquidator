@@ -272,10 +272,12 @@ impl LiquidatorService {
         .into_signing(config.signer_account.clone())
         .expect("failed to bind gateway signer");
 
-        let inventory = Arc::new(RwLock::new(InventoryManager::new(
-            client.clone(),
-            config.signer_account.clone(),
-        )));
+        let metrics = Arc::new(Metrics::default());
+        let inventory = Arc::new(RwLock::new({
+            let mut manager = InventoryManager::new(client.clone(), config.signer_account.clone());
+            manager.set_metrics(Arc::clone(&metrics));
+            manager
+        }));
 
         // Create swap provider for executor
         let oneclick_provider = Self::create_swap_provider(&config, &client);
@@ -313,7 +315,7 @@ impl LiquidatorService {
             shutdown_wake_tx,
             shutdown_wake,
             scan_failure_counts: HashMap::new(),
-            metrics: Arc::new(Metrics::default()),
+            metrics,
         }
     }
 

@@ -43,6 +43,14 @@ pub struct Metrics {
     /// never-scanned process reads as "last scanned in 1970" instead of
     /// "never scanned".
     last_successful_scan_unix: AtomicU64,
+    /// Raw units currently reserved for in-flight liquidations, per asset —
+    /// the labelled family `templar_liquidator_inventory_reserved_raw{asset=…}`. An asset stays
+    /// in the map after settling back to zero: a gauge reading 0 is signal,
+    /// a vanished series is a scrape gap. Raw token units (u128, rendered as
+    /// an integer): scrapers parse Prometheus values as f64, so very large
+    /// 24-decimal amounts lose low-order precision at the scraper — fine
+    /// for the alerting this exists for ("reservations stuck nonzero").
+    reserved_by_asset: std::sync::Mutex<std::collections::BTreeMap<String, u128>>,
 }
 
 fn now_unix() -> u64 {
@@ -86,6 +94,15 @@ impl Metrics {
             .store(now_unix(), Ordering::Relaxed);
     }
 
+    /// Sets the reserved-inventory gauge for one asset (raw token units).
+    /// Call with the asset's current total whenever a reservation is issued
+    /// or settled; zero keeps the series present rather than removing it.
+    pub fn set_reserved_raw(&self, asset: &str, amount: u128) {
+        if let Ok(mut map) = self.reserved_by_asset.lock() {
+            map.insert(asset.to_string(), amount);
+        }
+    }
+
     /// True when a successful scan happened within `max_age_secs`.
     pub fn healthy(&self, max_age_secs: u64) -> bool {
         let last = self.last_successful_scan_unix.load(Ordering::Relaxed);
@@ -94,41 +111,82 @@ impl Metrics {
 
     /// Prometheus text exposition (format 0.0.4).
     pub fn render(&self) -> String {
-        let c = |n: &str, v: u64| {
-            format!("# TYPE templar_liquidator_{n} counter\ntemplar_liquidator_{n} {v}\n")
+        let c = |n: &str, help: &str, v: u64| {
+            format!(
+                "# HELP templar_liquidator_{n} {help}\n# TYPE templar_liquidator_{n} counter\ntemplar_liquidator_{n} {v}\n"
+            )
         };
-        let g = |n: &str, v: u64| {
-            format!("# TYPE templar_liquidator_{n} gauge\ntemplar_liquidator_{n} {v}\n")
+        let g = |n: &str, help: &str, v: u64| {
+            format!(
+                "# HELP templar_liquidator_{n} {help}\n# TYPE templar_liquidator_{n} gauge\ntemplar_liquidator_{n} {v}\n"
+            )
+        };
+        let reserved = {
+            let mut out = String::from(
+                "# HELP templar_liquidator_inventory_reserved_raw Raw token units currently reserved for in-flight liquidations, per asset.\n# TYPE templar_liquidator_inventory_reserved_raw gauge\n",
+            );
+            if let Ok(map) = self.reserved_by_asset.lock() {
+                use std::fmt::Write as _;
+                for (asset, amount) in map.iter() {
+                    // Infallible for String; ignore the fmt::Result.
+                    let _ = writeln!(
+                        out,
+                        "templar_liquidator_inventory_reserved_raw{{asset=\"{}\"}} {amount}",
+                        escape_label_value(asset)
+                    );
+                }
+            }
+            out
         };
         [
-            c("scans_total", self.scans_total.load(Ordering::Relaxed)),
+            c(
+                "scans_total",
+                "Liquidation scan cycles started.",
+                self.scans_total.load(Ordering::Relaxed),
+            ),
             c(
                 "market_scan_failures_total",
+                "Individual market scan failures; one cycle can contribute several.",
                 self.market_scan_failures_total.load(Ordering::Relaxed),
             ),
             c(
                 "candidates_found_total",
+                "Positions that reached profitability evaluation or a submitted transaction.",
                 self.candidates_found_total.load(Ordering::Relaxed),
             ),
             c(
                 "liquidations_attempted_total",
+                "Liquidation transactions submitted (or simulated in dry-run).",
                 self.liquidations_attempted_total.load(Ordering::Relaxed),
             ),
             c(
                 "liquidations_succeeded_total",
+                "Liquidations that landed successfully.",
                 self.liquidations_succeeded_total.load(Ordering::Relaxed),
             ),
             c(
                 "liquidations_failed_total",
+                "Liquidations that failed after a transaction was submitted.",
                 self.liquidations_failed_total.load(Ordering::Relaxed),
             ),
             g(
                 "last_successful_scan_timestamp_seconds",
+                "Unix time of the last cycle with at least one clean market scan; 0 = never.",
                 self.last_successful_scan_unix.load(Ordering::Relaxed),
             ),
+            reserved,
         ]
         .concat()
     }
+}
+
+/// Escapes a label value per the Prometheus text format: backslash, double
+/// quote, and newline are the three characters the format requires escaping.
+fn escape_label_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 #[cfg(test)]
@@ -154,6 +212,67 @@ mod tests {
             assert!(out.contains(name), "missing {name}");
         }
         assert!(out.contains("templar_liquidator_scans_total 3"));
+    }
+
+    #[test]
+    fn every_series_has_help_and_type_lines() {
+        let m = Metrics::default();
+        m.set_reserved_raw("usdc.near", 5);
+        let out = m.render();
+        for name in [
+            "templar_liquidator_scans_total",
+            "templar_liquidator_market_scan_failures_total",
+            "templar_liquidator_candidates_found_total",
+            "templar_liquidator_liquidations_attempted_total",
+            "templar_liquidator_liquidations_succeeded_total",
+            "templar_liquidator_liquidations_failed_total",
+            "templar_liquidator_last_successful_scan_timestamp_seconds",
+            "templar_liquidator_inventory_reserved_raw",
+        ] {
+            assert!(
+                out.contains(&format!("# HELP {name} ")),
+                "no HELP for {name}"
+            );
+            assert!(
+                out.contains(&format!("# TYPE {name} ")),
+                "no TYPE for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_gauge_renders_one_labelled_line_per_asset() {
+        let m = Metrics::default();
+        m.set_reserved_raw("usdc.near", 1_500_000);
+        m.set_reserved_raw("wbtc.near", 42);
+        let out = m.render();
+        assert!(
+            out.contains(r#"templar_liquidator_inventory_reserved_raw{asset="usdc.near"} 1500000"#)
+        );
+        assert!(out.contains(r#"templar_liquidator_inventory_reserved_raw{asset="wbtc.near"} 42"#));
+        // Settling back to zero keeps the series (a gauge going 5 -> 0 is
+        // signal; a vanished series is a scrape gap).
+        m.set_reserved_raw("usdc.near", 0);
+        let out = m.render();
+        assert!(out.contains(r#"templar_liquidator_inventory_reserved_raw{asset="usdc.near"} 0"#));
+    }
+
+    /// NEAR account ids cannot contain quotes or backslashes, but the
+    /// renderer must not rely on that — escaping is the renderer's job.
+    #[test]
+    fn label_values_are_escaped_per_prometheus_text_format() {
+        let m = Metrics::default();
+        m.set_reserved_raw("we\\ird\"asset\nname", 7);
+        let out = m.render();
+        assert!(out.contains("{asset=\"we\\\\ird\\\"asset\\nname\"} 7"));
+    }
+
+    /// With no reservations ever seen, the family still emits HELP/TYPE so
+    /// scrapers learn the series exists (an empty family, not an absent one).
+    #[test]
+    fn reserved_family_header_is_present_without_data() {
+        let out = Metrics::default().render();
+        assert!(out.contains("# TYPE templar_liquidator_inventory_reserved_raw gauge"));
     }
 
     #[test]

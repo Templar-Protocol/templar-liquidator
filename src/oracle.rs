@@ -1305,6 +1305,39 @@ impl OracleFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The transformer read is a real RPC round-trip; when it fails, the
+    /// round must fail loudly (`PriceFetchError`) — an empty `Ok` would
+    /// read as "no prices" and hide that the read broke. Exercised against
+    /// a live client pointed at a scripted local RPC endpoint.
+    #[tokio::test]
+    async fn transformer_read_failure_propagates_as_price_fetch_error() {
+        let (url, _requests) = crate::rpc::test_support::scripted_server(vec![
+            (
+                500,
+                r#"{"jsonrpc":"2.0","id":"x","error":{"name":"INTERNAL_ERROR","cause":{"name":"INTERNAL_ERROR"},"code":-32000,"message":"scripted failure","data":"scripted failure"}}"#.to_string(),
+            );
+            16
+        ])
+        .await;
+        let fetcher = crate::rpc::test_support::oracle_fetcher_for(url.as_str());
+
+        let result = fetcher
+            .get_oracle_prices_with_transformers(
+                "lst-oracle.test.near".parse().unwrap(),
+                &[PriceIdentifier([0xAA; 32])],
+                60,
+                "pyth.test.near".parse().unwrap(),
+            )
+            .await;
+
+        let err = result.expect_err("a failed transformer read must not become an empty Ok");
+        assert!(
+            matches!(err, crate::LiquidatorError::PriceFetchError(_)),
+            "wrong error class: {err:?}"
+        );
+    }
+
     use templar_proxy_oracle_near_common::{
         input::ProxyPriceTransformer, price_transformer::Call, request::OracleRequest,
     };

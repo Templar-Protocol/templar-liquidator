@@ -146,6 +146,135 @@ pub struct Standard {
     pub version: String,
 }
 
+/// Test-only RPC plumbing shared across modules: a scripted localhost HTTP
+/// server (serves each queued `(status, body)` to one connection, then stops
+/// listening) and constructors for real gateway clients pointed at it. This
+/// is the seam that lets error-propagation branches be exercised through the
+/// actual client stack instead of going untested — no mock client type
+/// exists, deliberately: the closer the test path is to production wiring,
+/// the more a passing test means.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use templar_gateway_client::{Client, SigningClient};
+    use templar_gateway_core::GatewayContextBuilder;
+    use templar_gateway_oracle_updates_dispatch::GatewayContextBuilderOracleExt as _;
+
+    /// Serves the queued responses on a fresh localhost port; returns the
+    /// base URL and a log of received request bodies. Connections beyond
+    /// the scripted count are refused (the listener is dropped), which
+    /// reads as a transport error to the client — deliberate, so a test
+    /// under-provisioning responses fails loudly rather than hanging.
+    pub(crate) async fn scripted_server(
+        responses: Vec<(u16, String)>,
+    ) -> (url::Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = requests.clone();
+        tokio::spawn(async move {
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let header_end = loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break None;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break Some(pos + 4);
+                    }
+                };
+                let Some(header_end) = header_end else { return };
+                let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+                let content_length: usize = headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                while buf.len() < header_end + content_length {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                log.lock().unwrap().push(
+                    String::from_utf8_lossy(&buf[header_end..header_end + content_length])
+                        .to_string(),
+                );
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (format!("http://{addr}").parse().unwrap(), requests)
+    }
+
+    fn test_network(rpc_url: &str) -> near_api::NetworkConfig {
+        near_api::NetworkConfig::from_rpc_url("testnet", rpc_url.parse().unwrap())
+    }
+
+    fn test_secret_key() -> near_api::SecretKey {
+        near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "liquidator-test")
+            .to_string()
+            .parse()
+            .unwrap()
+    }
+
+    /// A real [`SigningClient`] pointed at `rpc_url` (typically a
+    /// [`scripted_server`]) with a deterministic test signer.
+    pub(crate) fn signing_client_for(rpc_url: &str) -> SigningClient {
+        let account: near_sdk::AccountId = "test.near".parse().unwrap();
+        SigningClient::connect(test_network(rpc_url), account, test_secret_key()).unwrap()
+    }
+
+    /// A real [`crate::OracleFetcher`] whose every RPC read goes to
+    /// `rpc_url` — the same construction path as production
+    /// (`Client::builder` → `build_parts` → both clients from one driver),
+    /// so what the test exercises is the shipped wiring.
+    pub(crate) fn oracle_fetcher_for(rpc_url: &str) -> crate::OracleFetcher {
+        let account: near_sdk::AccountId = "test.near".parse().unwrap();
+        let (base_context, driver, signer_account_ids) = Client::builder(test_network(rpc_url))
+            .secret_key(account.clone(), test_secret_key())
+            .unwrap()
+            .build_parts()
+            .unwrap();
+        let client = Client::from_parts(
+            base_context.clone(),
+            driver.clone(),
+            signer_account_ids.clone(),
+        )
+        .into_signing(account.clone())
+        .unwrap();
+        let hermes: url::Url = "https://hermes.invalid".parse().unwrap();
+        let pyth_updates: crate::oracle::PythUpdatesClient = Client::from_parts(
+            GatewayContextBuilder::new(base_context)
+                .with_pyth_source(hermes.clone())
+                .build(),
+            driver,
+            signer_account_ids,
+        )
+        .into_signing(account)
+        .unwrap();
+        crate::OracleFetcher::new(
+            client,
+            pyth_updates,
+            hermes,
+            "https://redstone.invalid".parse().unwrap(),
+            None,
+            None,
+        )
+    }
+}
+
 #[cfg(test)]
 mod rate_limit_tests {
     use super::*;

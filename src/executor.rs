@@ -366,7 +366,6 @@ impl LiquidationExecutor {
                                     usd_estimate,
                                 )
                                 .await
-                                .unwrap_or((false, None))
                             }
                         };
 
@@ -463,10 +462,12 @@ impl LiquidationExecutor {
         Ok(detail.failed_receipts.first().map(ToString::to_string))
     }
 
-    /// Swap collateral immediately after liquidation.
-    ///
-    /// Returns `Ok((succeeded, swap_issue))` where `swap_issue` is populated
-    /// when the swap failed or was unsupported (for notification by the caller).
+    /// Swap collateral immediately after liquidation. Infallible: every
+    /// outcome — including a failed swap — is a `(succeeded, swap_issue)`
+    /// value, with `swap_issue` populated when the swap failed or was
+    /// unsupported (for notification by the caller). Keep it that way: the
+    /// caller treats the return as complete, so an error channel added here
+    /// would need its own handling there, not a silent discard.
     #[allow(clippy::too_many_lines)]
     async fn swap_collateral_to_borrow(
         &self,
@@ -474,16 +475,16 @@ impl LiquidationExecutor {
         borrow_asset: &FungibleAsset<BorrowAsset>,
         collateral_amount: CollateralAssetAmount,
         expected_collateral_value_usd: Option<f64>,
-    ) -> LiquidatorResult<(bool, Option<SwapIssue>)> {
+    ) -> (bool, Option<SwapIssue>) {
         let Some(ref swap_provider) = self.swap_provider else {
             tracing::debug!("No swap provider configured, holding collateral");
-            return Ok((false, None));
+            return (false, None);
         };
 
         // Skip swap if collateral is already the target borrow asset
         if collateral_asset.to_string() == borrow_asset.to_string() {
             tracing::debug!("Collateral is already borrow asset, skipping JIT swap");
-            return Ok((false, None));
+            return (false, None);
         }
 
         // Skip swap if the provider doesn't support this asset pair
@@ -493,7 +494,7 @@ impl LiquidationExecutor {
                 to = %borrow_asset,
                 "Swap provider does not support asset pair, holding collateral"
             );
-            return Ok((
+            return (
                 false,
                 Some(SwapIssue::Unsupported {
                     from: crate::format::short_asset_name(&collateral_asset.to_string()),
@@ -504,7 +505,7 @@ impl LiquidationExecutor {
                         &collateral_asset.to_string(),
                     ),
                 }),
-            ));
+            );
         }
 
         // Skip swap if value is below threshold — will be picked up by batch swap
@@ -517,7 +518,7 @@ impl LiquidationExecutor {
                     threshold = format!("${:.2}", self.min_swap_value_usd),
                     "Skipping JIT swap - below threshold, will batch later"
                 );
-                return Ok((false, None));
+                return (false, None);
             }
         }
 
@@ -566,7 +567,7 @@ impl LiquidationExecutor {
                     amount_raw = %u128::from(collateral_amount),
                     "JIT swap completed - inventory replenished"
                 );
-                Ok((true, None))
+                (true, None)
             }
             Err(e) => {
                 // Named per phase, no wildcards: a new variant on either
@@ -642,7 +643,7 @@ impl LiquidationExecutor {
                         }
                     },
                 };
-                Ok((false, issue))
+                (false, issue)
             }
         }
     }
@@ -656,23 +657,9 @@ mod tests {
     use tokio::sync::RwLock;
 
     fn test_executor(dry_run: bool) -> (LiquidationExecutor, inventory::SharedInventory) {
-        let network = near_api::NetworkConfig::from_rpc_url(
-            "testnet",
-            "https://rpc.testnet.near.org".parse().unwrap(),
-        );
-        let secret_key: near_api::SecretKey =
-            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "liquidator-test")
-                .to_string()
-                .parse()
-                .unwrap();
         // No network I/O happens in these tests: both mismatch guards
         // return before the executor issues any read or transaction.
-        let client = SigningClient::connect(
-            network,
-            AccountId::from_str("test.near").unwrap(),
-            secret_key,
-        )
-        .unwrap();
+        let client = crate::rpc::test_support::signing_client_for("https://rpc.testnet.near.org");
         let account = AccountId::from_str("test.near").unwrap();
         let inventory: inventory::SharedInventory = Arc::new(RwLock::new(
             inventory::InventoryManager::new(client.clone(), account.clone()),

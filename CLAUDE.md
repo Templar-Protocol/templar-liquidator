@@ -86,7 +86,8 @@ One line per file in `src/`:
 - `notifier.rs` — notifications; the notification extension seam: the
   `NotificationChannel` trait (Telegram is the shipped impl) behind a shell
   that owns dedup, the in-flight semaphore, and `drain()`.
-- `metrics.rs` — dependency-free Prometheus text-format counters/gauges,
+- `metrics.rs` — dependency-free Prometheus text-format counters/gauges
+  with `# HELP` lines and labelled families (per-asset reserved gauge),
   process-lifetime, exposed via `http.rs`.
 - `http.rs` — optional `GET /healthz` (readiness, not liveness) and
   `GET /metrics`; only started when `HTTP_PORT` is set, never in
@@ -95,7 +96,9 @@ One line per file in `src/`:
 - `rpc.rs` — error taxonomy for the RPC/gateway boundary (`RpcError`,
   `AppError`) and NEP-330 contract-source-metadata shapes; the low-level
   blockchain plumbing itself lives in the in-process `templar-gateway-client`
-  dependency, not here.
+  dependency, not here. Also hosts the test-only `test_support` module
+  (scripted localhost RPC server + real-client constructors), the seam for
+  exercising error-propagation branches through the actual client stack.
 
 ## Conventions
 

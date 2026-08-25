@@ -1284,35 +1284,37 @@ impl OneClickSwap {
     }
 }
 
-/// Classifies a non-`Success` return from status polling. Only a
-/// venue-confirmed refund proves the funds' disposition and may claim
+/// Classifies a polled swap status: `None` for `Success`, otherwise the
+/// post-deposit error the status honestly supports. Only a venue-confirmed
+/// refund proves the funds' disposition and may claim
 /// [`Definitive`](crate::swap::PostDepositError::Definitive): `FAILED` and
 /// `REFUNDED` are separate 1-Click statuses, so `FAILED` alone does not
 /// establish that a refund was issued, and an incomplete deposit is tokens
 /// sitting at a one-shot deposit address with the venue status still able
-/// to advance. Everything except `Refunded` therefore classifies as
+/// to advance. Everything else therefore classifies as
 /// [`Indeterminate`](crate::swap::PostDepositError::Indeterminate) — the
-/// reconcile-and-alert path.
-fn classify_non_success_status(
+/// reconcile-and-alert path. Owning the `Success` case here keeps the
+/// caller's success test and this classification from ever disagreeing.
+fn classify_swap_status(
     status: SwapStatus,
     deposit_address: &str,
-) -> crate::swap::PostDepositError {
+) -> Option<crate::swap::PostDepositError> {
     match status {
-        SwapStatus::Refunded => crate::swap::PostDepositError::Definitive {
+        SwapStatus::Success => None,
+        SwapStatus::Refunded => Some(crate::swap::PostDepositError::Definitive {
             message: "swap was refunded by the venue; funds returned".to_string(),
             deposit_address: deposit_address.to_string(),
-        },
-        SwapStatus::Success
-        | SwapStatus::Failed
+        }),
+        SwapStatus::Failed
         | SwapStatus::IncompleteDeposit
         | SwapStatus::PendingDeposit
         | SwapStatus::KnownDepositTx
-        | SwapStatus::Processing => crate::swap::PostDepositError::Indeterminate {
+        | SwapStatus::Processing => Some(crate::swap::PostDepositError::Indeterminate {
             message: format!(
                 "swap ended with status {status:?}, which does not establish where the funds are"
             ),
             deposit_address: deposit_address.to_string(),
-        },
+        }),
     }
 }
 
@@ -1401,26 +1403,26 @@ impl SwapProvider for OneClickSwap {
 
         let swap_duration = swap_start.elapsed();
 
-        if status == SwapStatus::Success {
-            tracing::info!(
-                deposit_address = %deposit_address,
-                deposit_tx_hash = %tx_hash,
-                duration_ms = swap_duration.as_millis(),
-                "1-Click swap completed successfully"
-            );
-            Ok(())
-        } else {
-            tracing::error!(
-                deposit_address = %deposit_address,
-                deposit_tx_hash = %tx_hash,
-                status = ?status,
-                duration_ms = swap_duration.as_millis(),
-                "1-Click swap did not succeed"
-            );
-            Err(crate::swap::SwapError::post(
-                classify_non_success_status(status, deposit_address),
-                "1-Click swap",
-            ))
+        match classify_swap_status(status, deposit_address) {
+            None => {
+                tracing::info!(
+                    deposit_address = %deposit_address,
+                    deposit_tx_hash = %tx_hash,
+                    duration_ms = swap_duration.as_millis(),
+                    "1-Click swap completed successfully"
+                );
+                Ok(())
+            }
+            Some(post) => {
+                tracing::error!(
+                    deposit_address = %deposit_address,
+                    deposit_tx_hash = %tx_hash,
+                    status = ?status,
+                    duration_ms = swap_duration.as_millis(),
+                    "1-Click swap did not succeed"
+                );
+                Err(crate::swap::SwapError::post(post, "1-Click swap"))
+            }
         }
     }
 
@@ -1527,10 +1529,12 @@ mod cache_tests {
     /// so must any pending status that leaks through.
     #[test]
     fn terminal_status_classification_is_honest_about_disposition() {
-        let definitive = classify_non_success_status(SwapStatus::Refunded, "dep.near");
+        assert!(classify_swap_status(SwapStatus::Success, "dep.near").is_none());
+
+        let definitive = classify_swap_status(SwapStatus::Refunded, "dep.near");
         assert!(matches!(
             definitive,
-            crate::swap::PostDepositError::Definitive { .. }
+            Some(crate::swap::PostDepositError::Definitive { .. })
         ));
 
         for status in [
@@ -1540,18 +1544,19 @@ mod cache_tests {
             SwapStatus::KnownDepositTx,
             SwapStatus::Processing,
         ] {
-            let label = format!("{status:?}");
-            let classified = classify_non_success_status(status, "dep.near");
+            let classified = classify_swap_status(status, "dep.near");
             assert!(
                 matches!(
                     classified,
-                    crate::swap::PostDepositError::Indeterminate { .. }
+                    Some(crate::swap::PostDepositError::Indeterminate { .. })
                 ),
-                "{label} does not prove the funds' disposition and must be Indeterminate"
+                "{status:?} does not prove the funds' disposition and must be Indeterminate"
             );
         }
-        // The reconciliation handle survives into both classifications.
-        let rendered = classify_non_success_status(SwapStatus::Refunded, "dep.near").to_string();
+        // The reconciliation handle survives into the classification.
+        let rendered = classify_swap_status(SwapStatus::Refunded, "dep.near")
+            .expect("refunded classifies as an error")
+            .to_string();
         assert!(rendered.contains("dep.near"));
     }
 }

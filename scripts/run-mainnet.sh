@@ -66,7 +66,6 @@ IGNORED_COLLATERAL_ASSETS="${IGNORED_COLLATERAL_ASSETS}"
 IGNORED_MARKETS="${IGNORED_MARKETS}"
 
 # Oracle price update configuration
-PYTH_HERMES_URL="${PYTH_HERMES_URL}"
 
 # Build binary
 # scripts/ lives directly under the repo root, so the root is scripts/..
@@ -180,6 +179,9 @@ fi
 CMD_ARGS+=("--collateral-strategy" "$COLLATERAL_STRATEGY")
 # ONECLICK_API_TOKEN goes via the environment, not argv (see the SIGNER_KEY note above).
 [ -n "$ONECLICK_API_TOKEN" ] && export ONECLICK_API_TOKEN
+# Pyth Pro token: secret, goes via the environment, not argv. Without it every
+# Pyth Pro-sourced market is filtered at registration.
+[ -n "$LAZER_API_TOKEN" ] && export LAZER_API_TOKEN
 
 # Add market filtering arguments
 if [ -n "$ALLOWED_COLLATERAL_ASSETS" ]; then
@@ -204,7 +206,8 @@ if [ -n "$IGNORED_MARKETS" ]; then
 fi
 
 # Add oracle price update arguments
-[ -n "$PYTH_HERMES_URL" ] && CMD_ARGS+=("--hermes-url" "$PYTH_HERMES_URL")
+[ -n "$LAZER_API_URL" ] && CMD_ARGS+=("--lazer-api-url" "$LAZER_API_URL")
+[ -n "$LAZER_WS_URL" ] && CMD_ARGS+=("--lazer-ws-url" "$LAZER_WS_URL")
 
 # Add Telegram notification arguments (use = syntax because chat IDs start with -)
 # TELEGRAM_BOT_TOKEN goes via the environment, not argv (see the SIGNER_KEY note above).

@@ -179,7 +179,10 @@ impl std::fmt::Debug for ServiceConfig {
             .field("ignored_markets", &self.ignored_markets)
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
-            .field("lazer_ws_url", &self.lazer_ws_url)
+            .field(
+                "lazer_ws_url",
+                &self.lazer_ws_url.origin().ascii_serialization(),
+            )
             .field("pyth_pro_source", &self.pyth_pro_source.is_some())
             .field("redstone_api_url", &self.redstone_api_url)
             .field("lazer_api", &self.lazer_api)

@@ -318,7 +318,6 @@ pub struct Args {
     pub lazer_api_url: Url,
 
     /// Lazer (Pyth Pro) API access token. When unset, the scan-time Lazer
-    /// composition leg reads the on-chain Lazer adapter instead.
     #[arg(long, env = "LAZER_API_TOKEN")]
     pub lazer_api_token: Option<String>,
 
@@ -440,7 +439,10 @@ impl std::fmt::Debug for Args {
             .field("ignored_markets", &self.ignored_markets)
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
-            .field("lazer_ws_url", &self.lazer_ws_url)
+            .field(
+                "lazer_ws_url",
+                &self.lazer_ws_url.origin().ascii_serialization(),
+            )
             .field("redstone_api_url", &self.redstone_api_url)
             .field(
                 "lazer_api_url",
@@ -702,8 +704,16 @@ impl Args {
         // scan-side API leg. The gateway constructor enforces wss:// and a
         // non-empty token; its error variants are static text (no input
         // echoed), so surfacing it names the knob without the token.
-        let pyth_pro_source = match self.lazer_api_token.as_deref().map(str::trim) {
-            Some(token) if !token.is_empty() => Some(
+        // One normalized token feeds both the scan-side API leg and the
+        // on-chain push source: a whitespace-only value is "unset" for both,
+        // so admission and pricing can never disagree about the token.
+        let pyth_pro_token = self
+            .lazer_api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty());
+        let pyth_pro_source = match pyth_pro_token {
+            Some(token) => Some(
                 templar_gateway_oracle_updates_dispatch::LazerSourceConfig::new(
                     self.lazer_ws_url.clone(),
                     templar_gateway_core::RedactedString::from(token),
@@ -756,8 +766,8 @@ impl Args {
             // where the operator sees it, rather than leaking the credential
             // on the first scan; the message names the scheme only (a URL
             // can carry credentials in its userinfo component).
-            lazer_api: self.lazer_api_token.clone().map(|token| {
-                crate::lazer::LazerApiConfig::new(self.lazer_api_url.clone(), token)
+            lazer_api: pyth_pro_token.map(|token| {
+                crate::lazer::LazerApiConfig::new(self.lazer_api_url.clone(), token.to_string())
                     .unwrap_or_else(|error| panic!("{error}"))
             }),
             min_swap_value_usd: self.min_swap_value_usd,

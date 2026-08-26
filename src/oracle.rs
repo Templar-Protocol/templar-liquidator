@@ -49,10 +49,9 @@ use crate::{
 /// A proxy source request the bot can price at scan time, off-chain only:
 /// RedStone via the public price API ([`crate::redstone`]), Pyth Pro via
 /// the token-gated Pyth Pro API ([`crate::lazer`]). There is no on-chain
-/// fallback — an adapter is a push-fed store whose read
-/// prices the feed only while someone maintains those pushes; a stale leg
-/// falls through to the feed's next configured source, then to the proxy
-/// cache.
+/// fallback: a stale or failed leg falls through to the feed's next
+/// configured source, and a feed no candidate can price stays missing for
+/// the caller's coverage gate to judge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OffchainRequest {
     RedStone(String),
@@ -396,34 +395,30 @@ impl OracleFetcher {
             tracing::debug!(%oracle, "Non-proxy oracle: nothing to push");
             return Ok(false);
         }
-        let targets = self
-            .resolve_pyth_pro_update_targets(oracle, price_ids)
-            .await?;
         let mut any_updated = false;
-        match &self.pyth_pro_updates {
-            Some(client) => {
-                for (adapter, feed_ids) in &targets {
-                    match self.update_pyth_pro_prices(client, adapter, feed_ids).await {
-                        Ok(true) => any_updated = true,
-                        Ok(false) => {}
-                        Err(e) => tracing::warn!(
-                            adapter = %adapter,
-                            error = %e,
-                            "Failed to push Pyth Pro prices on-chain; proceeding with existing on-chain state"
-                        ),
+        // Without a push client there is nothing to resolve: registration
+        // admits no Pyth Pro–sourced market without a token, so the per-id
+        // proxy reads would only be paid to learn there are no targets.
+        if let Some(client) = &self.pyth_pro_updates {
+            // Best-effort like the pushes themselves: a transient proxy-config
+            // read failure must not skip the re-aggregation below.
+            match self
+                .resolve_pyth_pro_update_targets(oracle, price_ids)
+                .await
+            {
+                Ok(targets) => {
+                    for (adapter, feed_ids) in &targets {
+                        if self.update_pyth_pro_prices(client, adapter, feed_ids).await {
+                            any_updated = true;
+                        }
                     }
                 }
+                Err(e) => tracing::warn!(
+                    %oracle,
+                    error = %e,
+                    "Failed to resolve Pyth Pro push targets; re-aggregating the proxy from existing adapter state"
+                ),
             }
-            None if !targets.is_empty() => {
-                static WARNED: std::sync::Once = std::sync::Once::new();
-                WARNED.call_once(|| {
-                    tracing::warn!(
-                        "Pyth Pro–sourced feeds need an on-chain push but LAZER_API_TOKEN is unset; relying on an external pusher (logged once)"
-                    );
-                });
-                tracing::debug!(%oracle, "Skipping Pyth Pro push: no token configured");
-            }
-            None => {}
         }
         any_updated |= self.update_proxy_prices(oracle, price_ids).await?;
         Ok(any_updated)
@@ -464,25 +459,36 @@ impl OracleFetcher {
 
     /// One `oracle.updateLazer` per feed (the gateway op is single-feed):
     /// the gateway fetches the payload from its websocket subscription and
-    /// writes it to the adapter's `update_price_feeds`.
+    /// writes it to the adapter's `update_price_feeds`. Best-effort per
+    /// feed — a market's two feeds usually share one adapter, and a failed
+    /// submit for one must not skip the other. Returns whether any landed.
     #[tracing::instrument(skip(self, client), level = "info")]
     async fn update_pyth_pro_prices(
         &self,
         client: &PythProUpdatesClient,
         adapter: &AccountId,
         feed_ids: &[u32],
-    ) -> LiquidatorResult<bool> {
+    ) -> bool {
         let mut any = false;
         for &feed_id in feed_ids {
-            let result = client
+            let result = match client
                 .execute(oracle_updates::UpdateLazer {
                     oracle_id: adapter.clone(),
                     feed_id,
                 })
                 .await
-                .map_err(|e| {
-                    LiquidatorError::OracleUpdateError(format!("Pyth Pro update failed: {e}"))
-                })?;
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!(
+                        adapter = %adapter,
+                        feed_id,
+                        error = %e,
+                        "Pyth Pro update submit failed; continuing with the adapter's remaining feeds"
+                    );
+                    continue;
+                }
+            };
             if result.operation.status == OperationStatus::Succeeded {
                 tracing::info!(
                     adapter = %adapter,
@@ -501,7 +507,7 @@ impl OracleFetcher {
                 );
             }
         }
-        Ok(any)
+        any
     }
 
     /// Fetches current oracle prices for a proxy oracle by off-chain

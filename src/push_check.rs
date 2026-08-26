@@ -105,7 +105,9 @@ pub struct MarketPushReport {
     pub verdict: PushVerdict,
 }
 
-/// The whole run. `passed()` is the exit-code contract.
+/// The whole run. `passed()` is the live-success condition: the exit code
+/// is 0 for a pass, and also for a dry run that completed its refresh —
+/// which reports without ever passing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushCheckReport {
     pub dry_run: bool,
@@ -126,6 +128,12 @@ impl PushCheckReport {
                 .markets
                 .iter()
                 .all(|market| market.pushed && market.verdict == PushVerdict::Fresh)
+    }
+
+    /// Markets this process pushed to successfully (always 0 in dry-run).
+    #[must_use]
+    pub fn pushed_count(&self) -> usize {
+        self.markets.iter().filter(|market| market.pushed).count()
     }
 
     #[must_use]
@@ -217,6 +225,9 @@ mod tests {
             !unpushed.passed(),
             "a fresh read without our own push proves nothing"
         );
+        assert_eq!(unpushed.pushed_count(), 0);
+        assert_eq!(unpushed.fresh_count(), 1, "the two causes stay separable");
+        assert_eq!(live.pushed_count(), 1);
         let dry = PushCheckReport {
             dry_run: true,
             markets: vec![market(PushVerdict::Fresh)],

@@ -53,8 +53,9 @@ One line per file in `src/`:
   returning.
 - `push_check.rs` — `RUN_MODE=push-check`, the pure parts: per-feed
   freshness observations, the verdict against the market's own
-  `price_maximum_age_s`, and the report whose `passed()` is the exit-code
-  contract (a dry run reports but never passes). The runner is
+  `price_maximum_age_s`, and the report whose `passed()` is the
+  live-success condition (a dry run reports, exits 0 after a successful
+  refresh, and never passes). The runner is
   `service.rs`'s `run_push_check()`; its one on-chain price read
   (`OracleFetcher::onchain_publish_times`) is a diagnostic, not scan pricing.
 - `scanner.rs` — fetches borrow positions per market and checks liquidation

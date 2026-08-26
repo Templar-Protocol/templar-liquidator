@@ -70,9 +70,10 @@ async fn main() -> std::process::ExitCode {
             Ok(report) if report.passed() || report.dry_run => std::process::ExitCode::SUCCESS,
             Ok(report) => {
                 tracing::error!(
+                    pushed = report.pushed_count(),
                     fresh = report.fresh_count(),
                     checked = report.markets.len(),
-                    "push-check did not pass: at least one market still reads stale after the push"
+                    "push-check did not pass: at least one market was not pushed by this process, or still reads stale after the push"
                 );
                 std::process::ExitCode::FAILURE
             }

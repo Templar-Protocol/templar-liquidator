@@ -751,8 +751,12 @@ impl LiquidatorService {
             ];
             let max_age_secs = oracle_cfg.price_maximum_age_s;
 
-            let before = match self.freshness(&oracle, &price_ids).await {
-                Ok(feeds) => feeds,
+            // Each read carries the time it was taken: ages rendered against
+            // a later clock would silently include the push duration.
+            let before_read = self.freshness(&oracle, &price_ids).await;
+            let before_now = unix_now_secs();
+            let before = match &before_read {
+                Ok(feeds) => feeds.clone(),
                 Err(error) => {
                     tracing::warn!(market = %market, oracle = %oracle, %error, "push-check: freshness read before the push failed");
                     Vec::new()
@@ -773,10 +777,17 @@ impl LiquidatorService {
                     }
                 }
             };
-            let now_secs = unix_now_secs();
-            let (after, verdict) = match self.freshness(&oracle, &price_ids).await {
+            // A dry run pushes nothing, so re-reading would only repeat the
+            // first read; judge that one instead.
+            let (after_read, after_now) = if dry_run {
+                (before_read, before_now)
+            } else {
+                let read = self.freshness(&oracle, &price_ids).await;
+                (read, unix_now_secs())
+            };
+            let (after, verdict) = match after_read {
                 Ok(feeds) => {
-                    let verdict = judge(now_secs, max_age_secs, &feeds);
+                    let verdict = judge(after_now, max_age_secs, &feeds);
                     (feeds, verdict)
                 }
                 Err(error) => (
@@ -786,8 +797,8 @@ impl LiquidatorService {
                     },
                 ),
             };
-            let before_s = render_ages(now_secs, &before);
-            let after_s = render_ages(now_secs, &after);
+            let before_s = render_ages(before_now, &before);
+            let after_s = render_ages(after_now, &after);
             if verdict == PushVerdict::Fresh {
                 tracing::info!(market = %market, oracle = %oracle, max_age_s = max_age_secs, dry_run, pushed, before = %before_s, after = %after_s, verdict = %verdict, "push-check: market");
             } else {

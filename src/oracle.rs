@@ -545,10 +545,12 @@ impl OracleFetcher {
     /// failing the market's scan every round and degrading `/healthz`. A
     /// transient proxy-config read failure filters the market for one
     /// refresh cycle (it is re-probed next refresh); a probe error on the
-    /// proxy interface itself is propagated. A non-proxy oracle is Pyth
-    /// Core–backed (direct or LST) and can never be refreshed again on NEAR;
-    /// its reason names that and the fix, since the market returns by itself
-    /// at the refresh after it is re-pointed to a proxy oracle.
+    /// proxy interface itself is propagated. An oracle without the proxy
+    /// interface is filtered outright — only proxy oracles can be priced and
+    /// pushed — and its reason names the usual cause on NEAR (a Pyth Core–
+    /// backed oracle, direct or LST, which can never be refreshed again since
+    /// the 2026-08-26 16:00 UTC cutover) and the fix, since the market
+    /// returns by itself at the refresh after it is re-pointed to a proxy.
     pub async fn offchain_priceable(
         &self,
         oracle: &AccountId,
@@ -556,7 +558,7 @@ impl OracleFetcher {
     ) -> LiquidatorResult<Option<&'static str>> {
         if !self.is_proxy_oracle(oracle).await? {
             return Ok(Some(
-                "Pyth Core–backed oracle (not a proxy): Pyth Core no longer supports NEAR since 2026-08-26, so its on-chain prices can never be refreshed; the market needs re-pointing to a proxy oracle",
+                "oracle has no proxy interface (`list_proxies`): only proxy oracles can be priced off-chain and pushed by the bot; on NEAR this is usually a Pyth Core–backed oracle, which can never be refreshed again since Pyth Core dropped NEAR (2026-08-26 16:00 UTC) — re-point the market to a proxy oracle",
             ));
         }
         let plans = self.resolve_offchain_plans(oracle, price_ids).await;
@@ -850,10 +852,11 @@ mod tests {
         );
     }
 
-    /// A non-proxy oracle is a Pyth Core–backed one (direct or LST). It is
-    /// filtered with a reason that says why it can never be priced — Pyth
-    /// Core no longer supports NEAR — and what fixes it (re-pointing the
-    /// market to a proxy oracle), so the log reads as an action, not a state.
+    /// An oracle without the proxy interface is filtered with a reason that
+    /// states the requirement, the usual cause on NEAR (a Pyth Core–backed
+    /// oracle, which can never be refreshed again since the cutover), and the
+    /// fix (re-pointing the market to a proxy oracle), so the log reads as an
+    /// action, not a state.
     #[tokio::test]
     async fn non_proxy_oracle_is_filtered_with_the_near_cutover_reason() {
         let not_found = r#"{"jsonrpc":"2.0","id":"x","error":{"name":"HANDLER_ERROR","cause":{"name":"CONTRACT_EXECUTION_ERROR","info":{"vm_error":"FunctionCallError(MethodResolveError(MethodNotFound))","block_height":1,"block_hash":"11111111111111111111111111111111"}},"code":-32000,"message":"Server error","data":"wasm execution failed with error: FunctionCallError(MethodResolveError(MethodNotFound))"}}"#;

@@ -62,11 +62,13 @@ One line per file in `src/`:
   swap.
 - `inventory.rs` — `InventoryManager`: tracks available balances across all
   markets and assets so liquidations only proceed when inventory covers them.
-- `oracle.rs` — price fetching: Pyth via Hermes, LST feeds via
-  transformers, proxy feeds composed off-chain from their source configs in
-  order — Hermes, RedStone API, the token-gated Lazer API (adapter view read
-  without a token) — with the on-chain cache as fallback. Execution-time
-  pricing still goes through the on-chain push (`update_onchain_prices`).
+- `oracle.rs` — scan-side pricing, off-chain only: proxy feeds composed
+  from their source configs in order — RedStone API, the token-gated Pyth
+  Pro API — with no on-chain price read (stale, or a paid push per scan);
+  markets without an off-chain source are filtered at registration
+  (`offchain_priceable`). Execution-time: pushes Pyth Pro payloads to the
+  adapters and re-aggregates the proxy (`update_onchain_prices`). Pyth Core
+  (Hermes) is not integrated.
 - `redstone.rs` — RedStone public price API client (`api.redstone.finance`),
   used only for scan-side proxy price composition.
 - `lazer.rs` — Lazer (Pyth Pro) price API client (Bearer-token, used only
@@ -161,10 +163,11 @@ Bump every `rev =` together in one change, never one alone.
   actual on-chain market you're reading.
 - yoctoNEAR (10⁻²⁴ NEAR — the unit for deposits and balances) is **not** the
   same unit as NEAR gas. Don't mix them in a calculation or a config knob.
-- Oracle prices fail closed when stale: the on-chain read this bot depends on
-  rejects prices older than its configured threshold rather than returning a
-  stale value silently. A scan can legitimately come back empty/degraded
-  because of this, not because of a bug.
+- Oracle prices fail closed when stale, off-chain: every composed scan
+  price is bounded by the market's freshness window bot-side (there is no
+  on-chain price read at scan time), and execution re-prices on-chain
+  fail-closed. A scan can legitimately come back empty/degraded because a
+  price API is down or stale, not because of a bug.
 - The dev container is memory-constrained by whatever Docker Desktop is given
   (commonly ~8 GB), and `nproc` reports the host's full core count — so cargo
   fans out far more parallel jobs than there is RAM for. Both `cargo test

@@ -33,6 +33,12 @@ fn parse_optional_i64(s: &str) -> Option<i64> {
     )
 }
 
+/// Pyth Pro stream channel the on-chain push subscribes to — the widely
+/// carried rate, matching the scan-side API leg's batching channel.
+const PYTH_PRO_PUSH_CHANNEL: &str = "fixed_rate@200ms";
+/// How stale a cached Pyth Pro payload may be before the push refetches.
+const PYTH_PRO_MAX_PAYLOAD_AGE_MS: u64 = 5_000;
+
 /// Execution mode for the service.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum RunMode {
@@ -277,10 +283,16 @@ pub struct Args {
     #[arg(long, env = "MAX_LOOP_ITERATIONS", default_value = "10")]
     pub max_loop_iterations: std::num::NonZeroU32,
 
-    /// Pyth Hermes API URL for fetching price data. Defaults to Pyth's endpoint for
-    /// `--network`.
-    #[arg(long, env = "PYTH_HERMES_URL")]
-    pub hermes_url: Option<Url>,
+    /// Pyth Pro websocket stream the on-chain price push subscribes to.
+    /// Must be `wss://` — the same bearer token as `LAZER_API_TOKEN` rides on
+    /// it. One endpoint only; the gateway source reconnects but does not
+    /// fail over between hosts.
+    #[arg(
+        long,
+        env = "LAZER_WS_URL",
+        default_value = "wss://pyth-lazer-0.dourolabs.app/v1/stream"
+    )]
+    pub lazer_ws_url: Url,
 
     /// RedStone public price API, used to compose proxy-oracle prices
     /// off-chain at scan time. Scan-side only — execution still prices
@@ -305,8 +317,10 @@ pub struct Args {
     )]
     pub lazer_api_url: Url,
 
-    /// Lazer (Pyth Pro) API access token. When unset, the scan-time Lazer
-    /// composition leg reads the on-chain Lazer adapter instead.
+    /// Pyth Pro (Lazer) API access token. Enables both the scan-side Pyth
+    /// Pro API leg and the on-chain Pyth Pro push. When unset, Pyth
+    /// Pro–sourced feeds have no off-chain candidate and a market that
+    /// depends on one is filtered at registration.
     #[arg(long, env = "LAZER_API_TOKEN")]
     pub lazer_api_token: Option<String>,
 
@@ -428,7 +442,10 @@ impl std::fmt::Debug for Args {
             .field("ignored_markets", &self.ignored_markets)
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
-            .field("hermes_url", &self.hermes_url)
+            .field(
+                "lazer_ws_url",
+                &self.lazer_ws_url.origin().ascii_serialization(),
+            )
             .field("redstone_api_url", &self.redstone_api_url)
             .field(
                 "lazer_api_url",
@@ -686,6 +703,39 @@ impl Args {
 
         let signer_key = ValidatedSignerKey::try_from(self.signer_key.as_str())?;
 
+        // The Pyth Pro on-chain push source shares LAZER_API_TOKEN with the
+        // scan-side API leg. The gateway constructor enforces wss:// and a
+        // non-empty token; its error variants are static text (no input
+        // echoed), so surfacing it names the knob without the token.
+        // One normalized token feeds both the scan-side API leg and the
+        // on-chain push source: a whitespace-only value is "unset" for both,
+        // so admission and pricing can never disagree about the token.
+        let pyth_pro_token = self
+            .lazer_api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty());
+        let pyth_pro_source = match pyth_pro_token {
+            Some(token) => Some(
+                templar_gateway_oracle_updates_dispatch::LazerSourceConfig::new(
+                    self.lazer_ws_url.clone(),
+                    templar_gateway_core::RedactedString::from(token),
+                    templar_gateway_oracle_updates_dispatch::LazerSubscriptionConfig {
+                        channel: PYTH_PRO_PUSH_CHANNEL.to_string(),
+                        max_payload_age: std::time::Duration::from_millis(
+                            PYTH_PRO_MAX_PAYLOAD_AGE_MS,
+                        ),
+                    },
+                )
+                .map_err(|error| {
+                    format!(
+                        "LAZER_WS_URL / LAZER_API_TOKEN cannot configure the Pyth Pro on-chain push source: {error}"
+                    )
+                })?,
+            ),
+            _ => None,
+        };
+
         Ok(ServiceConfig {
             registries: self.registries.clone(),
             signer_key,
@@ -711,20 +761,19 @@ impl Args {
             ignored_markets,
             loop_liquidation: self.loop_liquidation,
             max_loop_iterations: self.max_loop_iterations,
-            hermes_url: self
-                .hermes_url
-                .clone()
-                .unwrap_or_else(|| self.network.hermes_url()),
+            lazer_ws_url: self.lazer_ws_url.clone(),
+            pyth_pro_source,
             redstone_api_url: self.redstone_api_url.clone(),
             // The config type's constructor enforces HTTPS — a bearer token
             // over plain http travels in cleartext. Refused at startup,
             // where the operator sees it, rather than leaking the credential
             // on the first scan; the message names the scheme only (a URL
             // can carry credentials in its userinfo component).
-            lazer_api: self.lazer_api_token.clone().map(|token| {
-                crate::lazer::LazerApiConfig::new(self.lazer_api_url.clone(), token)
-                    .unwrap_or_else(|error| panic!("{error}"))
-            }),
+            lazer_api: pyth_pro_token
+                .map(|token| {
+                    crate::lazer::LazerApiConfig::new(self.lazer_api_url.clone(), token.to_string())
+                })
+                .transpose()?,
             min_swap_value_usd: self.min_swap_value_usd,
             batch_swap_on_cycle_start: self.batch_swap_on_cycle_start,
             swap_retry_config: SwapRetryConfig {
@@ -801,7 +850,9 @@ mod tests {
             ignored_markets: vec![],
             loop_liquidation: false,
             max_loop_iterations: std::num::NonZeroU32::new(10).unwrap(),
-            hermes_url: None,
+            lazer_ws_url: "wss://pyth-lazer-0.dourolabs.app/v1/stream"
+                .parse()
+                .expect("valid ws url"),
             redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
             lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
             lazer_api_token: None,
@@ -886,33 +937,6 @@ mod tests {
         assert_eq!(
             args.build_config().expect("valid test config").run_mode,
             RunMode::Once
-        );
-    }
-
-    /// A VAA is only accepted by the Pyth receiver whose guardian set signed it.
-    #[test]
-    fn hermes_url_defaults_to_the_selected_networks_endpoint() {
-        for network in [Network::Mainnet, Network::Testnet] {
-            let mut args = create_test_args();
-            args.network = network;
-            args.hermes_url = None;
-
-            assert_eq!(
-                args.build_config().expect("valid test config").hermes_url,
-                network.hermes_url()
-            );
-        }
-    }
-
-    #[test]
-    fn an_explicit_hermes_url_overrides_the_network_default() {
-        let override_url: Url = "https://hermes.example/".parse().expect("a valid endpoint");
-        let mut args = create_test_args();
-        args.hermes_url = Some(override_url.clone());
-
-        assert_eq!(
-            args.build_config().expect("valid test config").hermes_url,
-            override_url
         );
     }
 
@@ -1450,6 +1474,54 @@ mod tests {
         }
     }
 
+    /// Hermes is gone: the knob is rejected like the other removed knobs, so
+    /// a stale deployment fails loudly instead of silently ignoring a URL.
+    #[test]
+    fn pyth_hermes_url_is_a_removed_knob() {
+        let err = try_parse_with(&["--hermes-url", "https://hermes.example"])
+            .expect_err("removed flag must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    /// The Pyth Pro on-chain push source exists iff a token is configured;
+    /// the websocket URL defaults to the public stream and must be wss://.
+    /// The token must never surface in a startup error or a Debug render.
+    #[test]
+    fn pyth_pro_source_follows_the_token_and_ws_url() {
+        let args = parse_with(&[]);
+        let config = args.build_config().expect("valid test config");
+        assert!(config.pyth_pro_source.is_none(), "no token, no push source");
+        assert_eq!(
+            config.lazer_ws_url.as_str(),
+            "wss://pyth-lazer-0.dourolabs.app/v1/stream"
+        );
+
+        let args = parse_with(&["--lazer-api-token", "pro-token"]);
+        let config = args.build_config().expect("valid test config");
+        assert!(
+            config.pyth_pro_source.is_some(),
+            "token present, push source built"
+        );
+        assert!(
+            !format!("{config:?}").contains("pro-token"),
+            "Debug must never reveal the token"
+        );
+
+        let err = parse_with(&[
+            "--lazer-api-token",
+            "pro-token",
+            "--lazer-ws-url",
+            "ws://plain.example/v1/stream",
+        ])
+        .build_config()
+        .expect_err("a bearer over plain ws must be refused");
+        assert!(
+            err.contains("LAZER_WS_URL"),
+            "message names the knob: {err}"
+        );
+        assert!(!err.contains("pro-token"), "message never echoes the token");
+    }
+
     #[test]
     fn once_flag_forces_once_mode() {
         let mut args = create_test_args();
@@ -1493,12 +1565,18 @@ mod tests {
     /// endpoint it travels in cleartext. Refused at startup, where the
     /// operator sees it, rather than leaking on the first scan.
     #[test]
-    #[should_panic(expected = "LAZER_API_URL must be https")]
     fn lazer_token_over_http_is_refused_at_startup() {
         let mut args = create_test_args();
         args.lazer_api_token = Some("lazer-token-value".to_string());
         args.lazer_api_url = "http://pyth-lazer.example.com".parse().unwrap();
-        let _ = args.build_config();
+        let err = args
+            .build_config()
+            .expect_err("a bearer token over plain http must be refused");
+        assert!(err.contains("LAZER_API_URL must be https"), "got: {err}");
+        assert!(
+            !err.contains("lazer-token-value"),
+            "message must withhold the token"
+        );
     }
 
     #[test]

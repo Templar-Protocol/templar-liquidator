@@ -41,7 +41,7 @@ flowchart TD
     Executor -.formats logs via.-> Format
 ```
 
-External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market, token contracts) go through the in-process `templar-gateway-client` dependency that every module above ultimately calls into; Pyth Hermes is a plain HTTPS call made from `oracle.rs`, and the RedStone public price API (`api.redstone.finance`) a plain HTTPS call made from `redstone.rs`; the Lazer (Pyth Pro) price API a Bearer-token HTTPS call made from `lazer.rs` (only when `LAZER_API_TOKEN` is configured); 1-Click is an HTTPS API plus NEAR token transfers, from `swap/`.
+External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market, token contracts) go through the in-process `templar-gateway-client` dependency that every module above ultimately calls into; the RedStone public price API (`api.redstone.finance`) is a plain HTTPS call made from `redstone.rs`; the Pyth Pro price API a Bearer-token HTTPS call made from `lazer.rs` (only when `LAZER_API_TOKEN` is configured), and the Pyth Pro websocket stream a Bearer-token connection the gateway's payload source holds for the on-chain push; 1-Click is an HTTPS API plus NEAR token transfers, from `swap/`.
 
 ## Module responsibilities
 
@@ -63,7 +63,7 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`inventory.rs`** — `InventoryManager`: tracks available (`balance − reserved`) balances per asset across all configured markets, behind an `Arc<RwLock<_>>` for concurrent access. Liquidations only proceed when inventory actually covers the sizing decision.
 
-**`oracle.rs`** — `OracleFetcher`: fetches prices across every oracle type Templar markets use — Pyth (via Hermes HTTP, not the on-chain contract directly), LST oracles with price transformers, and proxy-oracle feeds, which are composed off-chain at scan time from each feed's configured sources in order, taking the first leg that yields a fresh price (Hermes for Pyth sources, the RedStone public API via `redstone.rs` for RedStone sources, the token-gated Lazer/Pyth Pro API — or, without a token, a free view read of the adapter contract — for Lazer sources, transformer inputs via free view calls), falling back to the proxy's on-chain price cache when every leg fails or reads stale. It can also push fresh prices on-chain immediately before a liquidation transaction, since the market contract reads its own on-chain oracle state at execution time — scan-side composition never replaces that.
+**`oracle.rs`** — `OracleFetcher`: scan-side prices are off-chain only. Proxy-oracle feeds are composed from each feed's configured sources in order, taking the first leg that yields a fresh price (the RedStone public API via `redstone.rs`, the token-gated Pyth Pro API via `lazer.rs`, transformer inputs via free view calls); there is no on-chain price read at scan time — an on-chain price is either stale or costs a paid push every scan — so a market whose feeds have no off-chain source is filtered at registration (`offchain_priceable`) rather than failed per scan. Pyth Core (Hermes) is not integrated. At execution time it pushes fresh Pyth Pro payloads to each Pyth Pro–sourced adapter (`oracle.updateLazer`) and re-aggregates the proxy immediately before the liquidation transaction, since the market contract reads its own on-chain oracle state — RedStone adapters are relayer-pushed.
 
 **`redstone.rs`** — RedStone public price API client (`api.redstone.finance`), keyed by symbol, with staleness and future-skew guards. Scan-side only.
 

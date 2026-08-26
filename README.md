@@ -111,7 +111,7 @@ Each liquidation round moves through these stages in order — every stage is ow
 6. **Collateral handling** — hold the received collateral, or swap it back to the borrow asset via [1-Click](src/swap/oneclick.rs) ([`src/executor.rs`](src/executor.rs), [`src/swap/`](src/swap/)).
 7. **Notification** — report the round's outcome, or any failure along the way, to Telegram ([`src/notifier.rs`](src/notifier.rs)).
 
-Prices for steps 2–4 come from [`src/oracle.rs`](src/oracle.rs) (Pyth Hermes, RedStone, and proxy/LST feeds); available balances for steps 3 and 5 come from [`src/inventory.rs`](src/inventory.rs).
+Prices for steps 2–4 come from [`src/oracle.rs`](src/oracle.rs) (proxy feeds composed off-chain from the Pyth Pro and RedStone APIs); available balances for steps 3 and 5 come from [`src/inventory.rs`](src/inventory.rs).
 
 ```mermaid
 flowchart LR
@@ -120,7 +120,7 @@ flowchart LR
 
     subgraph Bot["templar-liquidator"]
         Service["service.rs<br/>registry refresh + round scheduling"] --> Scanner["scanner.rs<br/>position scan"]
-        Oracle["oracle.rs<br/>Pyth + RedStone"] --> Scanner
+        Oracle["oracle.rs<br/>Pyth Pro + RedStone"] --> Scanner
         Oracle --> Strategy
         Scanner --> Strategy["liquidation_strategy.rs<br/>sizing"]
         Inventory["inventory.rs<br/>balances"] --> Strategy

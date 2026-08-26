@@ -75,10 +75,10 @@ All comma-delimited (`value_delimiter = ','` in clap — repeat the flag or comm
 
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
-| `PYTH_HERMES_URL` | `--hermes-url` | network default (`https://hermes.pyth.network` mainnet / `https://hermes-beta.pyth.network` testnet) | Pyth Hermes endpoint for fetching latest price data. |
+| `LAZER_WS_URL` | `--lazer-ws-url` | `wss://pyth-lazer-0.dourolabs.app/v1/stream` | Pyth Pro websocket stream the on-chain price push subscribes to (same bearer token as `LAZER_API_TOKEN`). Must be `wss://` when a token is set — refused at startup otherwise. One endpoint; no multi-host failover. |
 | `REDSTONE_API_URL` | `--redstone-api-url` | `https://api.redstone.finance` | RedStone public price API, used to compose proxy-oracle prices off-chain at scan time (no gas, no keeper dependency). Scan-side only — execution still prices through the on-chain oracle. |
-| `LAZER_API_URL` | `--lazer-api-url` | `https://pyth-lazer.dourolabs.app` | Lazer (Pyth Pro) price API for scan-side proxy price composition. Only used when `LAZER_API_TOKEN` is set. Must be `https` when the token is set — a bearer token over plain http travels in cleartext, so the bot refuses to start. |
-| `LAZER_API_TOKEN` | `--lazer-api-token` | unset | Lazer access token (Lazer has no anonymous tier). When unset, the scan-time Lazer leg reads the on-chain Lazer adapter instead. |
+| `LAZER_API_URL` | `--lazer-api-url` | `https://pyth-lazer.dourolabs.app` | Pyth Pro price API for scan-side proxy price composition — the only Pyth Pro scan leg (no on-chain adapter read). Only used when `LAZER_API_TOKEN` is set; without a token, Pyth Pro–sourced markets are filtered at registration. Must be `https` when the token is set — a bearer token over plain http travels in cleartext, so the bot refuses to start. |
+| `LAZER_API_TOKEN` | `--lazer-api-token` | unset | Pyth Pro access token (no anonymous tier). Enables both the scan-side Pyth Pro API leg and the on-chain Pyth Pro push. When unset, Pyth Pro–sourced markets are filtered at registration (scan prices are off-chain only — there is no adapter read to fall back to). |
 
 ## Notifications (Telegram)
 

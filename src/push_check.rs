@@ -113,9 +113,11 @@ pub struct PushCheckReport {
 }
 
 impl PushCheckReport {
-    /// A pass means the push path was exercised and every checked market
-    /// then read fresh. A dry run pushes nothing, so it reports but never
-    /// passes; an empty run proves nothing either.
+    /// A pass means *this process* pushed successfully for every checked
+    /// market and each then read fresh — a fresh read after a failed push
+    /// could be someone else's work and proves nothing about our path. A
+    /// dry run pushes nothing, so it reports but never passes; an empty run
+    /// proves nothing either.
     #[must_use]
     pub fn passed(&self) -> bool {
         !self.dry_run
@@ -123,7 +125,7 @@ impl PushCheckReport {
             && self
                 .markets
                 .iter()
-                .all(|market| market.verdict == PushVerdict::Fresh)
+                .all(|market| market.pushed && market.verdict == PushVerdict::Fresh)
     }
 
     #[must_use]
@@ -175,8 +177,9 @@ mod tests {
         assert!(reason.contains("no cached price"), "{reason}");
     }
 
-    /// The report is a pass only when every checked market is fresh; a
-    /// dry run never counts as a pass because nothing was pushed.
+    /// The report is a pass only when every checked market was pushed by
+    /// this process and read fresh; a dry run never counts as a pass
+    /// because nothing was pushed.
     #[test]
     fn report_passes_only_when_live_and_all_fresh() {
         let market = |verdict| MarketPushReport {
@@ -203,6 +206,17 @@ mod tests {
             ],
         };
         assert!(!mixed.passed());
+        let unpushed = PushCheckReport {
+            dry_run: false,
+            markets: vec![MarketPushReport {
+                pushed: false,
+                ..market(PushVerdict::Fresh)
+            }],
+        };
+        assert!(
+            !unpushed.passed(),
+            "a fresh read without our own push proves nothing"
+        );
         let dry = PushCheckReport {
             dry_run: true,
             markets: vec![market(PushVerdict::Fresh)],

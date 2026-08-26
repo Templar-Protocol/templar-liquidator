@@ -51,7 +51,10 @@ pub enum RunMode {
     /// Diagnostic: one registry refresh, then for every admitted market push
     /// prices on-chain (live mode only) and report whether its oracle reads
     /// fresh — proves the push path without a liquidation. Exit 0 only when
-    /// every market read fresh after a live push.
+    /// this process's push succeeded and every market then read fresh
+    /// (live), or after a successful non-empty refresh in dry-run, which
+    /// only reads and reports; a failed or empty registry refresh exits 1
+    /// in both.
     PushCheck,
 }
 

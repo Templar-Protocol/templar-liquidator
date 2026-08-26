@@ -30,7 +30,7 @@ The bot refuses to start without these three:
 
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
-| `RUN_MODE` | `--run-mode` | `loop` | `loop` (continuous), `once` (single registry refresh + liquidation round, then exit — for cron-style schedulers), or `push-check` (diagnostic: one registry refresh, then for every admitted market push prices on-chain — live mode only — and report whether its oracle reads fresh within its own `price_maximum_age_s`; exit 0 only when every market read fresh after a live push, or in dry-run, which only reads and reports). `push-check` with `DRY_RUN=false` requires `LAZER_API_TOKEN`. |
+| `RUN_MODE` | `--run-mode` | `loop` | `loop` (continuous), `once` (single registry refresh + liquidation round, then exit — for cron-style schedulers), or `push-check` (diagnostic: one registry refresh, then for every admitted market push prices on-chain — live mode only — and report whether its oracle reads fresh within its own `price_maximum_age_s`; exit 0 only when this process's push succeeded and every market then read fresh — live — or after a successful non-empty refresh in dry-run, which only reads and reports; a failed or empty registry refresh exits 1 in both). `push-check` with `DRY_RUN=false` requires `LAZER_API_TOKEN`. |
 | — | `--once` | `false` | Shorthand for `--run-mode once`. No env var equivalent; forces once mode and takes precedence over `--run-mode` if both are given. |
 | `LIQUIDATION_SCAN_INTERVAL` | `--liquidation-scan-interval` | `600` | Seconds between liquidation scan rounds (loop mode). |
 | `REGISTRY_REFRESH_INTERVAL` | `--registry-refresh-interval` | `3600` | Seconds between registry re-discovery (loop mode). |

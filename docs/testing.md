@@ -211,11 +211,12 @@ uses, reads again, and judges the market against its own
 `price_maximum_age_s` — the bound the market contract applies.
 
 ```bash
-# 1. Read-only first: what would be pushed, and how stale the oracles are now.
+# 1. Read-only first: the cached prices and how stale each feed is now (nothing is pushed).
 RUN_MODE=push-check ALLOWED_MARKETS=ibtc-ixlmusdc.v1.tmplr.near ./target/release/liquidator
 
 # 2. Live: pushes (adapter update_price_feeds — fee 0 — plus one proxy
-#    update_prices per market), then re-reads. Exit 0 iff every market is fresh.
+#    update_prices per market), then re-reads. Exit 0 iff the push succeeded
+#    and every market then reads fresh.
 RUN_MODE=push-check DRY_RUN=false ALLOWED_MARKETS=ibtc-ixlmusdc.v1.tmplr.near ./target/release/liquidator
 ```
 

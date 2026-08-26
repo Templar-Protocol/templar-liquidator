@@ -234,7 +234,7 @@ pub struct OracleFetcher {
     client: SigningClient,
     /// Pushes Pyth Pro payloads on-chain before a live liquidation. `None`
     /// when no `LAZER_API_TOKEN` is configured — Pyth Pro–sourced adapters
-    /// then rely on an external pusher (warned once per process).
+    /// then rely on an external pusher (stated once at startup).
     pyth_pro_updates: Option<PythProUpdatesClient>,
     /// Cache of detected proxy oracles (oracles that use cross-contract calls).
     /// Shared across all `OracleFetcher` instances so detection during registry
@@ -396,9 +396,10 @@ impl OracleFetcher {
             return Ok(false);
         }
         let mut any_updated = false;
-        // Without a push client there is nothing to resolve: registration
-        // admits no Pyth Pro–sourced market without a token, so the per-id
-        // proxy reads would only be paid to learn there are no targets.
+        // Without a push client there is nothing to push with, so the per-id
+        // proxy reads that resolve targets are skipped outright. (A
+        // mixed-source feed is admitted tokenless and does carry a Pyth Pro
+        // adapter — it simply cannot be pushed; the startup log says so.)
         if let Some(client) = &self.pyth_pro_updates {
             // Best-effort like the pushes themselves: a transient proxy-config
             // read failure must not skip the re-aggregation below.

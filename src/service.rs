@@ -299,7 +299,7 @@ impl LiquidatorService {
                 "Pyth Pro on-chain price push enabled"
             );
         } else {
-            tracing::info!(
+            tracing::warn!(
                 "Pyth Pro on-chain price push disabled (LAZER_API_TOKEN unset); relying on an external pusher"
             );
         }

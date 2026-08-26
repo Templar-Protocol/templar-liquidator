@@ -317,7 +317,10 @@ pub struct Args {
     )]
     pub lazer_api_url: Url,
 
-    /// Lazer (Pyth Pro) API access token. When unset, the scan-time Lazer
+    /// Pyth Pro (Lazer) API access token. Enables both the scan-side Pyth
+    /// Pro API leg and the on-chain Pyth Pro push. When unset, Pyth
+    /// Pro–sourced feeds have no off-chain candidate and a market that
+    /// depends on one is filtered at registration.
     #[arg(long, env = "LAZER_API_TOKEN")]
     pub lazer_api_token: Option<String>,
 
@@ -766,10 +769,11 @@ impl Args {
             // where the operator sees it, rather than leaking the credential
             // on the first scan; the message names the scheme only (a URL
             // can carry credentials in its userinfo component).
-            lazer_api: pyth_pro_token.map(|token| {
-                crate::lazer::LazerApiConfig::new(self.lazer_api_url.clone(), token.to_string())
-                    .unwrap_or_else(|error| panic!("{error}"))
-            }),
+            lazer_api: pyth_pro_token
+                .map(|token| {
+                    crate::lazer::LazerApiConfig::new(self.lazer_api_url.clone(), token.to_string())
+                })
+                .transpose()?,
             min_swap_value_usd: self.min_swap_value_usd,
             batch_swap_on_cycle_start: self.batch_swap_on_cycle_start,
             swap_retry_config: SwapRetryConfig {
@@ -1561,12 +1565,18 @@ mod tests {
     /// endpoint it travels in cleartext. Refused at startup, where the
     /// operator sees it, rather than leaking on the first scan.
     #[test]
-    #[should_panic(expected = "LAZER_API_URL must be https")]
     fn lazer_token_over_http_is_refused_at_startup() {
         let mut args = create_test_args();
         args.lazer_api_token = Some("lazer-token-value".to_string());
         args.lazer_api_url = "http://pyth-lazer.example.com".parse().unwrap();
-        let _ = args.build_config();
+        let err = args
+            .build_config()
+            .expect_err("a bearer token over plain http must be refused");
+        assert!(err.contains("LAZER_API_URL must be https"), "got: {err}");
+        assert!(
+            !err.contains("lazer-token-value"),
+            "message must withhold the token"
+        );
     }
 
     #[test]

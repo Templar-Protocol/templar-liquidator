@@ -545,14 +545,19 @@ impl OracleFetcher {
     /// failing the market's scan every round and degrading `/healthz`. A
     /// transient proxy-config read failure filters the market for one
     /// refresh cycle (it is re-probed next refresh); a probe error on the
-    /// proxy interface itself is propagated.
+    /// proxy interface itself is propagated. A non-proxy oracle is Pyth
+    /// Core–backed (direct or LST) and can never be refreshed again on NEAR;
+    /// its reason names that and the fix, since the market returns by itself
+    /// at the refresh after it is re-pointed to a proxy oracle.
     pub async fn offchain_priceable(
         &self,
         oracle: &AccountId,
         price_ids: &[PriceIdentifier],
     ) -> LiquidatorResult<Option<&'static str>> {
         if !self.is_proxy_oracle(oracle).await? {
-            return Ok(Some("oracle is not a proxy oracle"));
+            return Ok(Some(
+                "Pyth Core–backed oracle (not a proxy): Pyth Core no longer supports NEAR since 2026-08-26, so its on-chain prices can never be refreshed; the market needs re-pointing to a proxy oracle",
+            ));
         }
         let plans = self.resolve_offchain_plans(oracle, price_ids).await;
         Ok(offchain_admission(price_ids, &plans))
@@ -843,6 +848,35 @@ mod tests {
             matches!(err, crate::LiquidatorError::PriceFetchError(_)),
             "wrong error class: {err:?}"
         );
+    }
+
+    /// A non-proxy oracle is a Pyth Core–backed one (direct or LST). It is
+    /// filtered with a reason that says why it can never be priced — Pyth
+    /// Core no longer supports NEAR — and what fixes it (re-pointing the
+    /// market to a proxy oracle), so the log reads as an action, not a state.
+    #[tokio::test]
+    async fn non_proxy_oracle_is_filtered_with_the_near_cutover_reason() {
+        let not_found = r#"{"jsonrpc":"2.0","id":"x","error":{"name":"HANDLER_ERROR","cause":{"name":"CONTRACT_EXECUTION_ERROR","info":{"vm_error":"FunctionCallError(MethodResolveError(MethodNotFound))","block_height":1,"block_hash":"11111111111111111111111111111111"}},"code":-32000,"message":"Server error","data":"wasm execution failed with error: FunctionCallError(MethodResolveError(MethodNotFound))"}}"#;
+        let (url, requests) =
+            crate::rpc::test_support::scripted_server(vec![(200, not_found.to_string()); 2]).await;
+        let fetcher = crate::rpc::test_support::oracle_fetcher_for(url.as_str());
+
+        let reason = fetcher
+            .offchain_priceable(
+                &"pyth-oracle.near".parse().unwrap(),
+                &[PriceIdentifier([0xAA; 32])],
+            )
+            .await
+            .unwrap()
+            .expect("a non-proxy oracle is filtered");
+
+        assert!(
+            reason.contains("Pyth Core")
+                && reason.contains("NEAR")
+                && reason.contains("proxy oracle"),
+            "reason must name the cause and the fix: {reason}"
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1, "one probe, no retries");
     }
 
     use templar_proxy_oracle_near_common::{

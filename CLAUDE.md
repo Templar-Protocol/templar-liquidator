@@ -68,7 +68,8 @@ One line per file in `src/`:
   markets without an off-chain source are filtered at registration
   (`offchain_priceable`). Execution-time: pushes Pyth Pro payloads to the
   adapters and re-aggregates the proxy (`update_onchain_prices`). Pyth Core
-  (Hermes) is not integrated.
+  is not integrated: it no longer supports NEAR (2026-08-26), so
+  direct-Pyth/LST markets are filtered until re-pointed to a proxy oracle.
 - `redstone.rs` — RedStone public price API client (`api.redstone.finance`),
   used only for scan-side proxy price composition.
 - `lazer.rs` — Lazer (Pyth Pro) price API client (Bearer-token, used only

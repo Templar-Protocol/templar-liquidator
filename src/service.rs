@@ -29,8 +29,7 @@ use templar_common::{
 
 use crate::{
     inventory::InventoryManager, liquidation_strategy::LiquidationStrategy, metrics::Metrics,
-    oracle::PythUpdatesClient, swap::SwapProvider, CollateralStrategy, Liquidator, LiquidatorError,
-    RoundSummary,
+    swap::SwapProvider, CollateralStrategy, Liquidator, LiquidatorError, RoundSummary,
 };
 
 /// Page size for listing registry deployments.
@@ -109,8 +108,12 @@ pub struct ServiceConfig {
     pub loop_liquidation: bool,
     /// Maximum iterations for loop liquidation (safety limit)
     pub max_loop_iterations: std::num::NonZeroU32,
-    /// Pyth Hermes API URL for fetching price data
-    pub hermes_url: url::Url,
+    /// Pyth Pro websocket stream for the on-chain price push (`LAZER_WS_URL`).
+    pub lazer_ws_url: url::Url,
+    /// Pyth Pro on-chain push source, `Some` iff `LAZER_API_TOKEN` is set. The
+    /// gateway builds a reconnecting websocket subscriber from it; without it
+    /// Pyth Pro–sourced feeds rely on an external pusher at execution time.
+    pub pyth_pro_source: Option<templar_gateway_oracle_updates_dispatch::LazerSourceConfig>,
     /// RedStone public price API for scan-side proxy price composition
     pub redstone_api_url: url::Url,
     /// Lazer (Pyth Pro) price API endpoint + token, HTTPS-validated at
@@ -176,7 +179,8 @@ impl std::fmt::Debug for ServiceConfig {
             .field("ignored_markets", &self.ignored_markets)
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
-            .field("hermes_url", &self.hermes_url)
+            .field("lazer_ws_url", &self.lazer_ws_url)
+            .field("pyth_pro_source", &self.pyth_pro_source.is_some())
             .field("redstone_api_url", &self.redstone_api_url)
             .field("lazer_api", &self.lazer_api)
             .field("min_swap_value_usd", &self.min_swap_value_usd)
@@ -197,7 +201,7 @@ pub struct LiquidatorService {
     config: ServiceConfig,
     client: SigningClient,
     /// Shares the methods client's operation driver; see [`LiquidatorService::new`].
-    pyth_updates: PythUpdatesClient,
+    pyth_pro_updates: Option<crate::oracle::PythProUpdatesClient>,
     inventory: Arc<RwLock<InventoryManager>>,
     markets: HashMap<AccountId, Liquidator>,
     /// Swap provider passed to liquidators for immediate post-liquidation swaps
@@ -269,15 +273,34 @@ impl LiquidatorService {
         )
         .into_signing(config.signer_account.clone())
         .expect("failed to bind gateway signer");
-        let pyth_updates: PythUpdatesClient = Client::from_parts(
-            GatewayContextBuilder::new(base_context)
-                .with_pyth_source(config.hermes_url.clone())
-                .build(),
-            driver,
-            signer_account_ids,
-        )
-        .into_signing(config.signer_account.clone())
-        .expect("failed to bind gateway signer");
+        // The Pyth Pro push client shares the driver with the methods client.
+        // Building its context spawns the gateway's reconnecting websocket
+        // subscriber, which lives for the process; without a token there is
+        // no client and Pyth Pro–sourced adapters rely on an external pusher.
+        let pyth_pro_updates: Option<crate::oracle::PythProUpdatesClient> =
+            config.pyth_pro_source.clone().map(|source| {
+                Client::from_parts(
+                    GatewayContextBuilder::new(base_context.clone())
+                        .with_lazer_source(source)
+                        .build(),
+                    driver.clone(),
+                    signer_account_ids.clone(),
+                )
+                .into_signing(config.signer_account.clone())
+                .expect("failed to bind gateway signer")
+            });
+        if pyth_pro_updates.is_some() {
+            tracing::info!(ws_url = %config.lazer_ws_url, "Pyth Pro on-chain price push enabled");
+        } else {
+            tracing::info!(
+                "Pyth Pro on-chain price push disabled (LAZER_API_TOKEN unset); relying on an external pusher"
+            );
+        }
+        if config.lazer_api.is_none() {
+            tracing::warn!(
+                "LAZER_API_TOKEN unset: Pyth Pro–sourced markets cannot be priced off-chain and will be filtered at registration"
+            );
+        }
 
         let metrics = Arc::new(Metrics::default());
         let inventory = Arc::new(RwLock::new({
@@ -292,8 +315,7 @@ impl LiquidatorService {
         // Create oracle fetcher for batch swap price checks
         let oracle_fetcher = crate::OracleFetcher::new(
             client.clone(),
-            pyth_updates.clone(),
-            config.hermes_url.clone(),
+            pyth_pro_updates.clone(),
             config.redstone_api_url.clone(),
             config.lazer_api.clone(),
             None,
@@ -312,7 +334,7 @@ impl LiquidatorService {
         Self {
             config,
             client,
-            pyth_updates,
+            pyth_pro_updates,
             inventory,
             markets: HashMap::new(),
             oneclick_provider,
@@ -865,6 +887,40 @@ impl LiquidatorService {
                     .detect_and_register_proxy_oracle(oracle_account)
                     .await;
 
+                // Step 3b: scan prices are off-chain only — admit the market
+                // only if every feed has an off-chain-composable source.
+                // Filtering here is one log line per refresh; letting it
+                // through would fail every scan and degrade /healthz.
+                let price_ids = [
+                    config.price_oracle_configuration.borrow_asset_price_id,
+                    config.price_oracle_configuration.collateral_asset_price_id,
+                ];
+                match self
+                    .oracle_fetcher
+                    .offchain_priceable(oracle_account, &price_ids)
+                    .await
+                {
+                    Ok(None) => {}
+                    Ok(Some(reason)) => {
+                        tracing::info!(
+                            market = %market,
+                            oracle = %oracle_account,
+                            reason,
+                            "Market filtered out"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            market = %market,
+                            oracle = %oracle_account,
+                            error = %e,
+                            "Failed to probe the market's oracle, skipping until next refresh"
+                        );
+                        continue;
+                    }
+                }
+
                 // Step 4: Apply market filtering rules
                 let (should_process, filter_reason) = self.should_process_market(&config);
 
@@ -896,7 +952,7 @@ impl LiquidatorService {
 
                 let handles = crate::SharedHandles {
                     client: self.client.clone(),
-                    pyth_updates: self.pyth_updates.clone(),
+                    pyth_pro_updates: self.pyth_pro_updates.clone(),
                     inventory: self.inventory.clone(),
                     notifier: self.config.notifier.clone(),
                     proxy_oracle_cache: Some(self.oracle_fetcher.proxy_oracle_cache()),
@@ -916,7 +972,6 @@ impl LiquidatorService {
                         collateral_strategy: self.config.collateral_strategy.clone(),
                     },
                     crate::OracleApis {
-                        hermes_url: self.config.hermes_url.clone(),
                         redstone_api_url: self.config.redstone_api_url.clone(),
                         lazer_api: self.config.lazer_api.clone(),
                     },

@@ -156,8 +156,6 @@ pub struct Standard {
 #[cfg(test)]
 pub(crate) mod test_support {
     use templar_gateway_client::{Client, SigningClient};
-    use templar_gateway_core::GatewayContextBuilder;
-    use templar_gateway_oracle_updates_dispatch::GatewayContextBuilderOracleExt as _;
 
     /// Serves the queued responses on a fresh localhost port; returns the
     /// base URL and a log of received request bodies. Connections beyond
@@ -241,35 +239,31 @@ pub(crate) mod test_support {
     /// (`Client::builder` → `build_parts` → both clients from one driver),
     /// so what the test exercises is the shipped wiring.
     pub(crate) fn oracle_fetcher_for(rpc_url: &str) -> crate::OracleFetcher {
+        oracle_fetcher_with(rpc_url, None)
+    }
+
+    /// Like [`oracle_fetcher_for`], with a Pyth Pro API config so tests can
+    /// exercise the token-present classification. The Pyth Pro *push*
+    /// client is never built here: its websocket source needs a live token
+    /// and endpoint, so the seam covers reads and classification only.
+    pub(crate) fn oracle_fetcher_with(
+        rpc_url: &str,
+        lazer_api: Option<crate::lazer::LazerApiConfig>,
+    ) -> crate::OracleFetcher {
         let account: near_sdk::AccountId = "test.near".parse().unwrap();
         let (base_context, driver, signer_account_ids) = Client::builder(test_network(rpc_url))
             .secret_key(account.clone(), test_secret_key())
             .unwrap()
             .build_parts()
             .unwrap();
-        let client = Client::from_parts(
-            base_context.clone(),
-            driver.clone(),
-            signer_account_ids.clone(),
-        )
-        .into_signing(account.clone())
-        .unwrap();
-        let hermes: url::Url = "https://hermes.invalid".parse().unwrap();
-        let pyth_updates: crate::oracle::PythUpdatesClient = Client::from_parts(
-            GatewayContextBuilder::new(base_context)
-                .with_pyth_source(hermes.clone())
-                .build(),
-            driver,
-            signer_account_ids,
-        )
-        .into_signing(account)
-        .unwrap();
+        let client = Client::from_parts(base_context, driver, signer_account_ids)
+            .into_signing(account)
+            .unwrap();
         crate::OracleFetcher::new(
             client,
-            pyth_updates,
-            hermes,
-            "https://redstone.invalid".parse().unwrap(),
             None,
+            "https://redstone.invalid".parse().unwrap(),
+            lazer_api,
             None,
         )
     }

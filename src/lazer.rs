@@ -2,7 +2,7 @@
 //!
 //! Fetches the latest EMA prices for Lazer feed ids from the Lazer price
 //! service (`POST /v1/latest_price`, Bearer-token authenticated — unlike
-//! Hermes and the RedStone public API, Lazer is a subscription service).
+//! the RedStone public API, Pyth Pro is a subscription service).
 //! Used only to compose proxy-oracle prices for scan-time position
 //! evaluation; execution-time pricing still goes through the on-chain oracle
 //! push in [`crate::oracle::OracleFetcher::update_onchain_prices`], so
@@ -10,8 +10,8 @@
 //! funds move.
 //!
 //! EMA (not spot) is requested deliberately: it is the projection the
-//! on-chain proxy's `Lazer` source consumes, and what the Hermes leg feeds —
-//! every scan-side pricing path speaks the same value.
+//! on-chain proxy's `Lazer` source consumes — every scan-side pricing path
+//! speaks the same value.
 
 use std::collections::HashMap;
 

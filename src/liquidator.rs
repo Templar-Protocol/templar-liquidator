@@ -763,7 +763,6 @@ pub struct SwapConfig {
 /// The off-chain price APIs scan-side composition fetches from.
 #[derive(Clone)]
 pub struct OracleApis {
-    pub hermes_url: url::Url,
     pub redstone_api_url: url::Url,
     pub lazer_api: Option<crate::lazer::LazerApiConfig>,
 }
@@ -780,7 +779,7 @@ pub struct LoopPolicy {
 /// what it keeps (all are cheap, shared-ownership clones).
 pub struct SharedHandles {
     pub client: SigningClient,
-    pub pyth_updates: oracle::PythUpdatesClient,
+    pub pyth_pro_updates: Option<oracle::PythProUpdatesClient>,
     pub inventory: inventory::SharedInventory,
     pub notifier: crate::notifier::SharedNotifier,
     pub proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
@@ -807,8 +806,7 @@ impl Liquidator {
         let scanner = scanner::MarketScanner::new(handles.client.clone(), market.clone());
         let oracle_fetcher = oracle::OracleFetcher::new(
             handles.client.clone(),
-            handles.pyth_updates.clone(),
-            oracle_apis.hermes_url,
+            handles.pyth_pro_updates.clone(),
             oracle_apis.redstone_api_url,
             oracle_apis.lazer_api,
             handles.proxy_oracle_cache.clone(),
@@ -1702,7 +1700,7 @@ impl Liquidator {
             .price_oracle_configuration
             .price_maximum_age_s;
 
-        // Fetch oracle prices via HTTP APIs (Hermes for Pyth, gateway for RedStone)
+        // Fetch oracle prices off-chain (Pyth Pro and RedStone APIs)
         let oracle_response = self
             .oracle_fetcher
             .get_oracle_prices(oracle_account.clone(), &price_ids, price_max_age)

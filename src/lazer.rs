@@ -34,37 +34,52 @@ struct SymbolEntry {
     state: String,
 }
 
-/// Fetches the symbol bridge from the public endpoint (no bearer rides on
-/// it). Only `stable` feeds with a well-formed 32-byte `hermes_id` enter the
-/// map; a malformed id is skipped with a warning rather than failing the map,
-/// and a transport or parse failure fails the whole fetch so the caller keeps
-/// the previous map.
+/// Fetches the symbol bridge from the public endpoint. The client is built
+/// per fetch and follows no redirects: the map decides which Pyth Pro feed
+/// prices a Pyth Core id, so an `https → http` downgrade (which reqwest
+/// would otherwise follow) must surface as a failed fetch, not a cleartext
+/// map; a client build failure fails the fetch the same way. Entries are
+/// parsed one by one so a single malformed entry is skipped (with a
+/// warning), not the whole response. Only `stable` feeds with a well-formed
+/// 32-byte `hermes_id` (an optional `0x` prefix is accepted) enter the map.
+/// A transport or body failure, and a response yielding no usable feed,
+/// fail the fetch so the caller keeps the previous map.
 pub(crate) async fn fetch_pyth_core_to_pro_map(
-    http: &reqwest::Client,
     symbols_url: &Url,
 ) -> Result<PythCoreToProMap, String> {
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("symbols client could not be built: {}", error.without_url()))?;
     let response = http
         .get(symbols_url.clone())
-        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
         .map_err(|error| format!("symbols request failed: {}", error.without_url()))?;
     if !response.status().is_success() {
         return Err(format!("symbols endpoint returned {}", response.status()));
     }
-    let entries: Vec<SymbolEntry> = response
+    let entries: Vec<near_sdk::serde_json::Value> = response
         .json()
         .await
         .map_err(|error| format!("symbols body did not parse: {}", error.without_url()))?;
     let mut map = PythCoreToProMap::new();
-    for entry in entries {
+    for (index, value) in entries.into_iter().enumerate() {
+        let entry: SymbolEntry = match near_sdk::serde_json::from_value(value) {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(index, %error, "Pyth Pro symbol entry did not parse; skipping it in the bridge");
+                continue;
+            }
+        };
         if entry.state != "stable" {
             continue;
         }
         let Some(hex_id) = entry.hermes_id else {
             continue;
         };
-        match hex::decode(&hex_id) {
+        match hex::decode(hex_id.strip_prefix("0x").unwrap_or(&hex_id)) {
             Ok(bytes) if bytes.len() == 32 => {
                 let mut id = [0u8; 32];
                 id.copy_from_slice(&bytes);
@@ -72,9 +87,13 @@ pub(crate) async fn fetch_pyth_core_to_pro_map(
             }
             _ => tracing::warn!(
                 feed_id = entry.pyth_lazer_id,
+                hermes_id = %hex_id,
                 "Pyth Pro symbol carries a malformed Pyth Core id; skipping it in the bridge"
             ),
         }
+    }
+    if map.is_empty() {
+        return Err("symbols endpoint listed no usable stable feed with a Pyth Core id; keeping the previous map".to_string());
     }
     Ok(map)
 }
@@ -762,7 +781,8 @@ mod tests {
 
     /// The symbol map is the Pyth Core → Pyth Pro bridge: only stable feeds
     /// with a `hermes_id` (the Pyth Core price id) enter it; a null id or a
-    /// non-stable feed is skipped, and a malformed id never poisons the map.
+    /// non-stable feed is skipped, a malformed id or an entry that does not
+    /// parse never poisons the map, and a `0x` prefix is accepted.
     #[tokio::test]
     async fn symbol_map_keeps_only_stable_feeds_with_a_core_id() {
         let body = r#"[
@@ -771,17 +791,28 @@ mod tests {
           {"pyth_lazer_id":2,"symbol":"Crypto.ETH/USD","state":"stable","hermes_id":null},
           {"pyth_lazer_id":3,"symbol":"Crypto.ZZZ/USD","state":"coming_soon",
            "hermes_id":"ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"},
-          {"pyth_lazer_id":4,"symbol":"Crypto.BAD/USD","state":"stable","hermes_id":"nothex"}
+          {"pyth_lazer_id":4,"symbol":"Crypto.BAD/USD","state":"stable","hermes_id":"nothex"},
+          {"pyth_lazer_id":"not-a-number","symbol":"Crypto.ODD/USD","state":"stable",
+           "hermes_id":"ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"},
+          {"pyth_lazer_id":5,"symbol":"Crypto.ETH/USD","state":"stable",
+           "hermes_id":"0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"}
         ]"#;
         let (url, requests) = scripted_server(vec![(200, body.to_string())]).await;
-        let map = fetch_pyth_core_to_pro_map(&reqwest::Client::new(), &url)
+        let map = fetch_pyth_core_to_pro_map(&url)
             .await
             .expect("symbol map fetches");
         assert_eq!(
             map.len(),
-            1,
-            "only the stable feed with a valid core id maps"
+            2,
+            "only the stable feeds with a valid core id map"
         );
+        let eth = PriceIdentifier(
+            hex::decode("ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(map.get(&eth), Some(&5), "0x prefix accepted");
         let btc = PriceIdentifier(
             hex::decode("e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43")
                 .unwrap()
@@ -790,6 +821,30 @@ mod tests {
         );
         assert_eq!(map.get(&btc), Some(&1));
         assert_eq!(requests.lock().unwrap().len(), 1, "one GET, no retries");
+    }
+
+    /// A redirect is a failed fetch, not a followed one: the map decides
+    /// what gets priced, and following an `https → http` hop would fetch it
+    /// in cleartext despite the startup scheme check.
+    #[tokio::test]
+    async fn symbol_map_fetch_refuses_redirects() {
+        let (url, requests) = scripted_server(vec![(302, String::new()); 2]).await;
+        let err = fetch_pyth_core_to_pro_map(&url)
+            .await
+            .expect_err("a redirect must not be followed");
+        assert!(err.contains("302"), "names the status: {err}");
+        assert_eq!(requests.lock().unwrap().len(), 1, "no follow-up request");
+    }
+
+    /// A successful response with no usable feed is a failed fetch, so the
+    /// caller keeps a populated bridge instead of replacing it with nothing.
+    #[tokio::test]
+    async fn symbol_map_with_no_usable_feed_is_a_failed_fetch() {
+        let (url, _requests) = scripted_server(vec![(200, "[]".to_string())]).await;
+        let err = fetch_pyth_core_to_pro_map(&url)
+            .await
+            .expect_err("an empty map must not replace a populated one");
+        assert!(err.contains("no usable"), "{err}");
     }
 
     fn live_feed_body(feed_id: u32) -> String {

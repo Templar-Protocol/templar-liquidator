@@ -61,7 +61,13 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OffchainRequest {
     RedStone(String),
-    Lazer { oracle_id: AccountId, feed_id: u32 },
+    Lazer {
+        oracle_id: AccountId,
+        feed_id: u32,
+        /// Reached over the Pyth Core → Pyth Pro bridge: the source is a
+        /// Pyth Core request, whose on-chain price the bot cannot push.
+        bridged: bool,
+    },
 }
 
 /// The batched backend results one composition round prices its candidates
@@ -147,6 +153,7 @@ fn classify_offchain_request(
         OracleRequest::Lazer(req) if ctx.pyth_pro_api_configured => Some(OffchainRequest::Lazer {
             oracle_id: req.oracle_id.clone(),
             feed_id: req.feed_id,
+            bridged: false,
         }),
         OracleRequest::Pyth(req) if ctx.pyth_pro_api_configured => ctx
             .core_to_pro
@@ -154,6 +161,7 @@ fn classify_offchain_request(
             .map(|&feed_id| OffchainRequest::Lazer {
                 oracle_id: req.oracle_id.clone(),
                 feed_id,
+                bridged: true,
             }),
         OracleRequest::Pyth(_) | OracleRequest::Lazer(_) => None,
     }
@@ -243,7 +251,9 @@ fn collect_offchain_wants(
             OffchainRequest::RedStone(symbol) => {
                 redstone_symbol_set.insert(symbol.clone());
             }
-            OffchainRequest::Lazer { oracle_id, feed_id } => {
+            OffchainRequest::Lazer {
+                oracle_id, feed_id, ..
+            } => {
                 lazer_wanted
                     .entry(oracle_id.clone())
                     .or_default()
@@ -337,6 +347,34 @@ pub enum OracleKind {
     Lst,
 }
 
+/// A market's admission verdict: its oracle kind, and how many of its feeds
+/// are priced over the Pyth Core → Pyth Pro bridge — feeds whose on-chain
+/// Pyth Core price the bot cannot push (Pyth Core updates are Wormhole
+/// VAAs), so a liquidation relies on an external pusher for them. Every feed
+/// of a `DirectPyth`/`Lst` oracle is bridged; a proxy feed is bridged when
+/// it is sourced from Pyth Core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Admitted {
+    pub kind: OracleKind,
+    pub bridged_feeds: usize,
+}
+
+/// Counts the feeds whose plan has a candidate reached over the bridge.
+pub(crate) fn bridged_feeds(plans: &[(PriceIdentifier, Vec<OffchainPriceSource>)]) -> usize {
+    plans
+        .iter()
+        .filter(|(_, candidates)| {
+            candidates.iter().any(|candidate| {
+                let request = match candidate {
+                    OffchainPriceSource::Direct(request)
+                    | OffchainPriceSource::Transformed { request, .. } => request,
+                };
+                matches!(request, OffchainRequest::Lazer { bridged: true, .. })
+            })
+        })
+        .count()
+}
+
 /// Oracle price fetcher.
 ///
 /// Composes proxy-oracle prices off-chain at scan time and pushes Pyth Pro
@@ -357,10 +395,9 @@ pub struct OracleFetcher {
     lst_oracle_cache: std::sync::Arc<tokio::sync::RwLock<HashMap<AccountId, Option<AccountId>>>>,
     /// The Pyth Core → Pyth Pro symbol bridge, shared like the proxy cache.
     symbol_map: SharedSymbolMap,
-    /// Where the bridge is fetched from (public, no bearer).
+    /// Where the bridge is fetched from (public, no bearer; fetched with a
+    /// no-redirect client built per refresh).
     lazer_symbols_url: Url,
-    /// Plain client for the public symbols endpoint.
-    symbols_http: reqwest::Client,
     /// RedStone public price API, for composing proxy prices off-chain at
     /// scan time.
     redstone_api: crate::redstone::RedStoneApiClient,
@@ -398,7 +435,6 @@ impl OracleFetcher {
             lst_oracle_cache: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             symbol_map: symbol_map.unwrap_or_default(),
             lazer_symbols_url,
-            symbols_http: reqwest::Client::new(),
             proxy_oracle_cache: proxy_oracle_cache.unwrap_or_default(),
             redstone_api: crate::redstone::RedStoneApiClient::new(redstone_api_url),
             lazer_api: lazer_api.and_then(|config| {
@@ -423,17 +459,16 @@ impl OracleFetcher {
 
     /// Refreshes the Pyth Core → Pyth Pro symbol bridge from the public
     /// symbols endpoint. Skipped (returns `Ok(0)`) without a Pyth Pro API
-    /// leg — nothing could consume it. On failure the previous map is kept
-    /// and the error surfaces to the caller, which logs it; markets whose
-    /// pricing depends on the bridge are then filtered until the next
-    /// refresh succeeds (fail closed).
+    /// leg — nothing could consume it. On failure — transport, body, a
+    /// redirect, or a response with no usable feed — the previous map is
+    /// kept and the error surfaces to the caller, which logs it; bridge-priced
+    /// markets are filtered only while the map is empty (fail closed until a
+    /// first refresh succeeds), never because a later refresh failed.
     pub async fn refresh_pyth_core_to_pro_map(&self) -> Result<usize, String> {
         if self.lazer_api.is_none() {
             return Ok(0);
         }
-        let map =
-            crate::lazer::fetch_pyth_core_to_pro_map(&self.symbols_http, &self.lazer_symbols_url)
-                .await?;
+        let map = crate::lazer::fetch_pyth_core_to_pro_map(&self.lazer_symbols_url).await?;
         let len = map.len();
         *self.symbol_map.write().await = map;
         Ok(len)
@@ -786,22 +821,30 @@ impl OracleFetcher {
     }
 
     /// Registration-time admission: scan prices are off-chain only, so a
-    /// market is admitted only when its oracle is a proxy and every feed has
-    /// at least one off-chain-composable source (RedStone; Pyth Pro when the
-    /// API leg is configured). Filtering here — one log per refresh — beats
-    /// failing the market's scan every round and degrading `/healthz`. A
-    /// transient proxy-config read failure filters the market for one
-    /// refresh cycle (it is re-probed next refresh); a probe error on the
-    /// proxy interface itself is propagated.
+    /// market is admitted only when every feed has at least one off-chain
+    /// candidate. A proxy oracle admits through `offchain_admission` over
+    /// its feeds' configured sources (RedStone; Pyth Pro and bridged Pyth
+    /// Core when the API leg is configured) as [`OracleKind::Proxy`]; a
+    /// direct-Pyth or LST oracle admits through `pyth_core_admission` over
+    /// the symbol bridge as `DirectPyth`/`Lst`. The verdict counts the feeds
+    /// priced over the bridge — the ones whose on-chain price the bot cannot
+    /// push. Filtering here — one log per refresh — beats failing the
+    /// market's scan every round and degrading `/healthz`. A transient
+    /// proxy-config read failure filters the market for one refresh cycle
+    /// (re-probed next refresh); a probe or transformer read error is
+    /// propagated.
     pub async fn offchain_priceable(
         &self,
         oracle: &AccountId,
         price_ids: &[PriceIdentifier],
-    ) -> LiquidatorResult<Result<OracleKind, String>> {
+    ) -> LiquidatorResult<Result<Admitted, String>> {
         if self.is_proxy_oracle(oracle).await? {
             let plans = self.resolve_offchain_plans(oracle, price_ids).await;
             return Ok(match offchain_admission(price_ids, &plans) {
-                None => Ok(OracleKind::Proxy),
+                None => Ok(Admitted {
+                    kind: OracleKind::Proxy,
+                    bridged_feeds: bridged_feeds(&plans),
+                }),
                 Some(reason) => Err(reason.to_string()),
             });
         }
@@ -815,7 +858,11 @@ impl OracleFetcher {
         let map = self.symbol_map.read().await;
         Ok(
             match pyth_core_admission(&underlying_ids, self.lazer_api.is_some(), &map) {
-                None => Ok(kind),
+                // Every feed of a Pyth Core oracle is priced over the bridge.
+                None => Ok(Admitted {
+                    kind,
+                    bridged_feeds: price_ids.len(),
+                }),
                 Some(reason) => Err(reason),
             },
         )
@@ -922,9 +969,9 @@ impl OracleFetcher {
             // Freshness enforced per leg by each API client at parse time,
             // plus once more at consumption in the caller.
             OffchainRequest::RedStone(symbol) => backends.redstone.get(symbol).cloned(),
-            OffchainRequest::Lazer { oracle_id, feed_id } => {
-                backends.lazer.get(&(oracle_id.clone(), *feed_id)).cloned()
-            }
+            OffchainRequest::Lazer {
+                oracle_id, feed_id, ..
+            } => backends.lazer.get(&(oracle_id.clone(), *feed_id)).cloned(),
         };
         let Some(underlying) = underlying else {
             tracing::debug!(%oracle, ?price_id, ?request, "Candidate source has no usable price, trying next");
@@ -1112,6 +1159,47 @@ mod tests {
         );
     }
 
+    /// The verdict counts only feeds with a bridged candidate — the ones the
+    /// bot cannot push for: a native Pyth Pro or RedStone candidate does not
+    /// count, a bridged one does whether direct or under a transformer.
+    #[test]
+    fn bridged_feeds_counts_only_feeds_with_a_bridged_candidate() {
+        let oracle: AccountId = "pyth-oracle.near".parse().unwrap();
+        let lazer = |bridged| OffchainRequest::Lazer {
+            oracle_id: oracle.clone(),
+            feed_id: 1,
+            bridged,
+        };
+        let transformer = ProxyPriceTransformer::lst(
+            OracleRequest::pyth(oracle.clone(), PriceIdentifier([3; 32])),
+            24,
+            Call::new_simple(&oracle, "get_st_near_price"),
+        );
+        let plans = vec![
+            (
+                PriceIdentifier([1; 32]),
+                vec![OffchainPriceSource::Direct(lazer(false))],
+            ),
+            (
+                PriceIdentifier([2; 32]),
+                vec![
+                    OffchainPriceSource::Direct(OffchainRequest::RedStone("BTC".to_string())),
+                    OffchainPriceSource::Direct(lazer(true)),
+                ],
+            ),
+            (
+                PriceIdentifier([3; 32]),
+                vec![OffchainPriceSource::Transformed {
+                    request: lazer(true),
+                    call: transformer.call,
+                    action: transformer.action,
+                }],
+            ),
+        ];
+        assert_eq!(bridged_feeds(&plans), 2);
+        assert_eq!(bridged_feeds(&plans[..1]), 0);
+    }
+
     /// A non-proxy oracle is admitted over the symbol bridge. Both probes
     /// (proxy `list_proxies`, LST `oracle_id`) answer method-not-found —
     /// a direct Pyth Core oracle — and with the API leg configured the
@@ -1163,7 +1251,13 @@ mod tests {
 
         fetcher.symbol_map().write().await.insert(id, 1);
         let verdict = fetcher.offchain_priceable(&oracle, &[id]).await.unwrap();
-        assert_eq!(verdict, Ok(OracleKind::DirectPyth));
+        assert_eq!(
+            verdict,
+            Ok(Admitted {
+                kind: OracleKind::DirectPyth,
+                bridged_feeds: 1,
+            })
+        );
         assert_eq!(
             requests.lock().unwrap().len(),
             probes,
@@ -1248,6 +1342,7 @@ mod tests {
                 OffchainPriceSource::Direct(OffchainRequest::Lazer {
                     oracle_id: "pyth-lazer.near".parse().unwrap(),
                     feed_id: 7,
+                    bridged: false
                 }),
                 OffchainPriceSource::Direct(OffchainRequest::RedStone("LTC".to_string())),
             ]
@@ -1271,7 +1366,11 @@ mod tests {
         ));
         assert!(matches!(
             classify_offchain_request(&lazer_request(), &ctx_on()),
-            Some(OffchainRequest::Lazer { feed_id: 7, .. })
+            Some(OffchainRequest::Lazer {
+                feed_id: 7,
+                bridged: false,
+                ..
+            })
         ));
         // A proxy whose only source is Pyth Core composes nothing.
         assert!(plan_offchain_sources([&pyth_source()].into_iter(), &ctx_on()).is_empty());
@@ -1290,7 +1389,11 @@ mod tests {
         };
         assert!(matches!(
             classify_offchain_request(&pyth_request(), &with_bridge),
-            Some(OffchainRequest::Lazer { feed_id: 1, .. })
+            Some(OffchainRequest::Lazer {
+                feed_id: 1,
+                bridged: true,
+                ..
+            })
         ));
         let empty: crate::lazer::PythCoreToProMap = HashMap::new();
         let no_bridge = OffchainCtx {
@@ -1353,7 +1456,8 @@ mod tests {
                 near,
                 vec![OffchainPriceSource::Direct(OffchainRequest::Lazer {
                     oracle_id: pyth_oracle.clone(),
-                    feed_id: 27
+                    feed_id: 27,
+                    bridged: true
                 })]
             )
         );
@@ -1468,7 +1572,8 @@ mod tests {
                     request,
                     OffchainRequest::Lazer {
                         oracle_id: "pyth-lazer.near".parse().unwrap(),
-                        feed_id: 9
+                        feed_id: 9,
+                        bridged: false
                     }
                 );
             }
@@ -1549,6 +1654,7 @@ mod tests {
                     OffchainRequest::Lazer {
                         oracle_id: "pyth-lazer.near".parse().unwrap(),
                         feed_id: 9,
+                        bridged: false
                     }
                 );
             }

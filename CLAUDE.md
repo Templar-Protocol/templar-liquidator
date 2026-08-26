@@ -67,7 +67,7 @@ One line per file in `src/`:
   Pro API — and direct-Pyth/LST feeds priced from the Pyth Pro API over the
   Pyth Core → Pyth Pro symbol bridge; no on-chain price read (stale, or a
   paid push per scan). Markets without an off-chain source are filtered at
-  registration (`offchain_priceable` → `OracleKind`). Execution-time:
+  registration (`offchain_priceable` → `Admitted`). Execution-time:
   pushes Pyth Pro payloads to the adapters and re-aggregates the proxy
   (`update_onchain_prices`); a Pyth Core oracle cannot be pushed by the
   bot (Wormhole VAAs) and relies on an external pusher.

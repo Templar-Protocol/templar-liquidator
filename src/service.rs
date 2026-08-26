@@ -795,7 +795,7 @@ impl LiquidatorService {
                 }
                 Err(error) => tracing::warn!(
                     %error,
-                    "Failed to refresh the Pyth Core → Pyth Pro symbol bridge; keeping the previous map (bridge-priced markets are filtered until a refresh succeeds)"
+                    "Failed to refresh the Pyth Core → Pyth Pro symbol bridge; keeping the previous map (bridge-priced markets are filtered only while the map is empty, i.e. until a first refresh succeeds)"
                 ),
             }
 
@@ -931,17 +931,22 @@ impl LiquidatorService {
                     .offchain_priceable(oracle_account, &price_ids)
                     .await
                 {
-                    Ok(Ok(crate::oracle::OracleKind::Proxy)) => {}
-                    Ok(Ok(kind)) => {
-                        // Priced off-chain over the symbol bridge; the bot
-                        // cannot push to a Pyth Core oracle (Wormhole VAAs),
-                        // so execution depends on an external pusher.
-                        tracing::info!(
-                            market = %market,
-                            oracle = %oracle_account,
-                            oracle_kind = ?kind,
-                            "Market priced over the Pyth Core → Pyth Pro bridge; execution relies on the on-chain Pyth Core price being kept fresh externally"
-                        );
+                    Ok(Ok(admitted)) => {
+                        // Feeds priced over the symbol bridge — every feed of
+                        // a direct-Pyth/LST oracle, or a proxy feed sourced
+                        // from Pyth Core — have an on-chain Pyth Core price
+                        // the bot cannot push (Wormhole VAAs): execution on
+                        // them depends on an external pusher.
+                        if admitted.bridged_feeds > 0 {
+                            tracing::info!(
+                                market = %market,
+                                oracle = %oracle_account,
+                                oracle_kind = ?admitted.kind,
+                                bridged_feeds = admitted.bridged_feeds,
+                                feeds = price_ids.len(),
+                                "Market has feeds priced over the Pyth Core → Pyth Pro bridge; the bot cannot push their on-chain Pyth Core price, so execution relies on it being kept fresh externally"
+                            );
+                        }
                     }
                     Ok(Err(reason)) => {
                         tracing::info!(

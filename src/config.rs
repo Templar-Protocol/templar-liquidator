@@ -1324,10 +1324,6 @@ mod tests {
         );
     }
 
-    /// The env-var form of a list knob must accept commas like its three
-    /// sibling list knobs do; without the delimiter, `a.near,b.near` parses
-    /// as ONE invalid account id and the only way to express two registries
-    /// is the repeatable CLI flag.
     /// The Pyth Core → Pyth Pro symbol bridge is fetched from a public
     /// endpoint; it defaults to Pyth's and must stay https (no token rides
     /// on it, but the map decides what gets priced, so it is not fetched
@@ -1345,6 +1341,10 @@ mod tests {
         assert!(err.contains("LAZER_SYMBOLS_URL"), "names the knob: {err}");
     }
 
+    /// The env-var form of a list knob must accept commas like its three
+    /// sibling list knobs do; without the delimiter, `a.near,b.near` parses
+    /// as ONE invalid account id and the only way to express two registries
+    /// is the repeatable CLI flag.
     #[test]
     fn registries_accept_a_comma_separated_list() {
         let key = test_signer_key();

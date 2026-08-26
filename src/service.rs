@@ -707,6 +707,136 @@ impl LiquidatorService {
         result
     }
 
+    /// `RUN_MODE=push-check`: one registry refresh, then every admitted
+    /// market is checked in turn — its oracle's cached price ages are read,
+    /// prices are pushed through the same `update_onchain_prices` a
+    /// liquidation uses (live mode only; dry-run only reads), the ages are
+    /// read again, and the market is judged against its own
+    /// `price_maximum_age_s`. Drains notifications before returning, like
+    /// `run_once`, for the same reason.
+    ///
+    /// # Errors
+    ///
+    /// A failed registry refresh, or a refresh that admits no market
+    /// ([`LiquidatorError::NoMarkets`]) — there is nothing to check.
+    pub async fn run_push_check(
+        mut self,
+    ) -> Result<crate::push_check::PushCheckReport, LiquidatorError> {
+        let result = match self.refresh_registry().await {
+            Ok(()) if self.markets.is_empty() => Err(LiquidatorError::NoMarkets),
+            Ok(()) => Ok(self.push_check_cycle().await),
+            Err(e) => Err(e),
+        };
+        self.config.notifier.drain(Duration::from_secs(10)).await;
+        result
+    }
+
+    async fn push_check_cycle(&self) -> crate::push_check::PushCheckReport {
+        use crate::push_check::{
+            judge, render_ages, MarketPushReport, PushCheckReport, PushVerdict,
+        };
+
+        let dry_run = self.config.dry_run;
+        let mut market_ids: Vec<&AccountId> = self.markets.keys().collect();
+        market_ids.sort();
+        let mut reports = Vec::with_capacity(market_ids.len());
+        for market in market_ids {
+            let oracle_cfg = &self.markets[market]
+                .market_configuration()
+                .price_oracle_configuration;
+            let oracle = oracle_cfg.account_id.clone();
+            let price_ids = [
+                oracle_cfg.borrow_asset_price_id,
+                oracle_cfg.collateral_asset_price_id,
+            ];
+            let max_age_secs = oracle_cfg.price_maximum_age_s;
+
+            let before = match self.freshness(&oracle, &price_ids).await {
+                Ok(feeds) => feeds,
+                Err(error) => {
+                    tracing::warn!(market = %market, oracle = %oracle, %error, "push-check: freshness read before the push failed");
+                    Vec::new()
+                }
+            };
+            let pushed = if dry_run {
+                false
+            } else {
+                match self
+                    .oracle_fetcher
+                    .update_onchain_prices(&oracle, &price_ids)
+                    .await
+                {
+                    Ok(pushed) => pushed,
+                    Err(error) => {
+                        tracing::warn!(market = %market, oracle = %oracle, %error, "push-check: push failed");
+                        false
+                    }
+                }
+            };
+            let now_secs = unix_now_secs();
+            let (after, verdict) = match self.freshness(&oracle, &price_ids).await {
+                Ok(feeds) => {
+                    let verdict = judge(now_secs, max_age_secs, &feeds);
+                    (feeds, verdict)
+                }
+                Err(error) => (
+                    Vec::new(),
+                    PushVerdict::Stale {
+                        reason: format!("freshness read failed: {error}"),
+                    },
+                ),
+            };
+            let before_s = render_ages(now_secs, &before);
+            let after_s = render_ages(now_secs, &after);
+            if verdict == PushVerdict::Fresh {
+                tracing::info!(market = %market, oracle = %oracle, max_age_s = max_age_secs, dry_run, pushed, before = %before_s, after = %after_s, verdict = %verdict, "push-check: market");
+            } else {
+                tracing::warn!(market = %market, oracle = %oracle, max_age_s = max_age_secs, dry_run, pushed, before = %before_s, after = %after_s, verdict = %verdict, "push-check: market");
+            }
+            reports.push(MarketPushReport {
+                market: market.clone(),
+                oracle,
+                max_age_secs,
+                pushed,
+                before,
+                after,
+                verdict,
+            });
+        }
+        let report = PushCheckReport {
+            dry_run,
+            markets: reports,
+        };
+        tracing::info!(
+            checked = report.markets.len(),
+            fresh = report.fresh_count(),
+            stale = report.markets.len() - report.fresh_count(),
+            dry_run,
+            passed = report.passed(),
+            "push-check completed"
+        );
+        report
+    }
+
+    /// The feeds' cached publish times in `price_ids` order.
+    async fn freshness(
+        &self,
+        oracle: &AccountId,
+        price_ids: &[templar_common::oracle::pyth::PriceIdentifier],
+    ) -> Result<Vec<crate::push_check::FeedFreshness>, LiquidatorError> {
+        let times = self
+            .oracle_fetcher
+            .onchain_publish_times(oracle, price_ids)
+            .await?;
+        Ok(price_ids
+            .iter()
+            .map(|&price_id| crate::push_check::FeedFreshness {
+                price_id,
+                publish_time_secs: times.get(&price_id).copied().flatten(),
+            })
+            .collect())
+    }
+
     /// Check if a market should be processed based on asset filtering rules.
     ///
     /// Returns (`should_process`, `reason_if_filtered`).
@@ -1638,6 +1768,14 @@ mod usdc_tests {
         assert!(!is_usdc_asset(&asset("nep141:usdcoin-scam.near")));
         assert!(!is_usdc_asset(&asset("nep141:usdc.scam.near")));
     }
+}
+
+/// Seconds since the Unix epoch, saturating — only for ages in logs and
+/// the push-check verdict, never for on-chain arithmetic.
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

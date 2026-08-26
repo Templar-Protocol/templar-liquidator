@@ -95,6 +95,7 @@ pub mod metrics;
 pub mod notifier;
 pub mod oracle;
 pub mod profitability;
+pub mod push_check;
 pub mod redstone;
 pub mod rpc;
 pub mod scanner;

@@ -51,6 +51,12 @@ One line per file in `src/`:
   notifications, exit 0), `run_once()` performs exactly one registry refresh
   and one liquidation round, then drains pending notifications before
   returning.
+- `push_check.rs` — `RUN_MODE=push-check`, the pure parts: per-feed
+  freshness observations, the verdict against the market's own
+  `price_maximum_age_s`, and the report whose `passed()` is the exit-code
+  contract (a dry run reports but never passes). The runner is
+  `service.rs`'s `run_push_check()`; its one on-chain price read
+  (`OracleFetcher::onchain_publish_times`) is a diagnostic, not scan pricing.
 - `scanner.rs` — fetches borrow positions per market and checks liquidation
   status, with pagination for large markets.
 - `liquidation_strategy.rs` — `LiquidationStrategy` trait and the built-in
@@ -94,7 +100,7 @@ One line per file in `src/`:
   process-lifetime, exposed via `http.rs`.
 - `http.rs` — optional `GET /healthz` (readiness, not liveness) and
   `GET /metrics`; only started when `HTTP_PORT` is set, never in
-  `--run-mode once`.
+  `--run-mode once` or `push-check`.
 - `format.rs` — human-readable asset ticker formatting for logs.
 - `rpc.rs` — error taxonomy for the RPC/gateway boundary (`RpcError`,
   `AppError`) and NEP-330 contract-source-metadata shapes; the low-level

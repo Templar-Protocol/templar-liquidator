@@ -200,3 +200,29 @@ Reasoned from source, not executed:
 
 If you run this procedure locally and it diverges from what's written here,
 trust the code over this doc and update it.
+
+## Validating the on-chain push path (`RUN_MODE=push-check`)
+
+The sandbox test prices through a mock oracle and never exercises the Pyth
+Pro push. `push-check` does, on a real network, without a liquidation: one
+registry refresh, then for every admitted market it reads the proxy's cached
+price ages, pushes through the same `update_onchain_prices` a liquidation
+uses, reads again, and judges the market against its own
+`price_maximum_age_s` — the bound the market contract applies.
+
+```bash
+# 1. Read-only first: what would be pushed, and how stale the oracles are now.
+RUN_MODE=push-check ALLOWED_MARKETS=ibtc-ixlmusdc.v1.tmplr.near ./target/release/liquidator
+
+# 2. Live: pushes (adapter update_price_feeds — fee 0 — plus one proxy
+#    update_prices per market), then re-reads. Exit 0 iff every market is fresh.
+RUN_MODE=push-check DRY_RUN=false ALLOWED_MARKETS=ibtc-ixlmusdc.v1.tmplr.near ./target/release/liquidator
+```
+
+Each market logs one line with `before` / `after` ages per feed, `pushed`,
+and the `verdict`; the run ends with a `push-check completed` summary. Live
+mode needs the signer key and `LAZER_API_TOKEN` (refused at startup
+otherwise). Use `ALLOWED_MARKETS` to bound what gets pushed; without it
+every admitted market is checked. The two freshness reads are the crate's
+only on-chain price reads and exist for this mode alone — scan pricing stays
+off-chain.

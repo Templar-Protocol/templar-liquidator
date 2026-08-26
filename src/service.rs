@@ -116,6 +116,9 @@ pub struct ServiceConfig {
     pub pyth_pro_source: Option<templar_gateway_oracle_updates_dispatch::LazerSourceConfig>,
     /// RedStone public price API for scan-side proxy price composition
     pub redstone_api_url: url::Url,
+    /// RedStone push leg (`REDSTONE_PUSH`, `REDSTONE_GATEWAY_URL`,
+    /// `REDSTONE_DATA_SERVICE_ID`); `None` when disabled.
+    pub redstone_push: Option<crate::redstone_push::RedStonePushConfig>,
     /// Lazer (Pyth Pro) price API endpoint + token, HTTPS-validated at
     /// construction; the API leg is disabled when `None`
     pub lazer_api: Option<crate::lazer::LazerApiConfig>,
@@ -185,6 +188,13 @@ impl std::fmt::Debug for ServiceConfig {
             )
             .field("pyth_pro_source", &self.pyth_pro_source.is_some())
             .field("redstone_api_url", &self.redstone_api_url)
+            .field(
+                "redstone_push",
+                &self
+                    .redstone_push
+                    .as_ref()
+                    .map(|push| push.gateway_url.origin().ascii_serialization()),
+            )
             .field("lazer_api", &self.lazer_api)
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
@@ -323,8 +333,11 @@ impl LiquidatorService {
         let oracle_fetcher = crate::OracleFetcher::new(
             client.clone(),
             pyth_pro_updates.clone(),
-            config.redstone_api_url.clone(),
-            config.lazer_api.clone(),
+            crate::OracleApis {
+                redstone_api_url: config.redstone_api_url.clone(),
+                lazer_api: config.lazer_api.clone(),
+                redstone_push: config.redstone_push.clone(),
+            },
             None,
         );
 
@@ -981,6 +994,7 @@ impl LiquidatorService {
                     crate::OracleApis {
                         redstone_api_url: self.config.redstone_api_url.clone(),
                         lazer_api: self.config.lazer_api.clone(),
+                        redstone_push: self.config.redstone_push.clone(),
                     },
                     crate::LoopPolicy {
                         enabled: self.config.loop_liquidation,

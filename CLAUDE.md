@@ -67,11 +67,18 @@ One line per file in `src/`:
   Pro API — with no on-chain price read (stale, or a paid push per scan);
   markets without an off-chain source are filtered at registration
   (`offchain_priceable`). Execution-time: pushes Pyth Pro payloads to the
-  adapters and re-aggregates the proxy (`update_onchain_prices`). Pyth Core
+  adapters, RedStone packages for feeds without a Pyth Pro source, and
+  re-aggregates the proxy (`update_onchain_prices`). Pyth Core
   is not integrated: it no longer supports NEAR (2026-08-26), so
   direct-Pyth/LST markets are filtered until re-pointed to a proxy oracle.
 - `redstone.rs` — RedStone public price API client (`api.redstone.finance`),
   used only for scan-side proxy price composition.
+- `redstone_push.rs` — the RedStone push leg (pure parts + gateway client):
+  signed data packages from RedStone's gateway, serialized in the protocol
+  layout, each signature recovered locally against the adapter's on-chain
+  signer set/threshold/window, assembled into a `write_prices` payload only
+  when the contract will accept it. Targets (feeds without a Pyth Pro
+  source) and the write are in `oracle.rs`.
 - `lazer.rs` — Lazer (Pyth Pro) price API client (Bearer-token, used only
   when `LAZER_API_TOKEN` is set), for scan-side pricing of Lazer-sourced
   proxy feeds.

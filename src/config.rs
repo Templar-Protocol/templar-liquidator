@@ -304,6 +304,37 @@ pub struct Args {
     )]
     pub redstone_api_url: Url,
 
+    /// RedStone data-package gateway the RedStone push leg fetches signed
+    /// packages from (public, no key). Must be `https`.
+    #[arg(
+        long,
+        env = "REDSTONE_GATEWAY_URL",
+        default_value = "https://oracle-gateway-1.a.redstone.finance"
+    )]
+    pub redstone_gateway_url: Url,
+
+    /// RedStone data-service id whose signer set the adapters are configured
+    /// with; packages from any other service are rejected on-chain.
+    #[arg(
+        long,
+        env = "REDSTONE_DATA_SERVICE_ID",
+        default_value = "redstone-primary-prod"
+    )]
+    pub redstone_data_service_id: String,
+
+    /// Push RedStone-signed packages to the RedStone adapter before a
+    /// liquidation, for feeds without a Pyth Pro source — nothing else keeps
+    /// those adapters fresh. Same optional-value form as `--dry-run`.
+    #[arg(
+        long,
+        env = "REDSTONE_PUSH",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_value_t = true,
+        default_missing_value = "true"
+    )]
+    pub redstone_push: bool,
+
     /// Lazer (Pyth Pro) price API, used to compose Lazer-sourced
     /// proxy-oracle prices off-chain at scan time. Only used when
     /// `LAZER_API_TOKEN` is set — Lazer has no anonymous tier — and must be
@@ -447,6 +478,9 @@ impl std::fmt::Debug for Args {
                 &self.lazer_ws_url.origin().ascii_serialization(),
             )
             .field("redstone_api_url", &self.redstone_api_url)
+            .field("redstone_gateway_url", &self.redstone_gateway_url)
+            .field("redstone_data_service_id", &self.redstone_data_service_id)
+            .field("redstone_push", &self.redstone_push)
             .field(
                 "lazer_api_url",
                 &self.lazer_api_url.origin().ascii_serialization(),
@@ -703,6 +737,21 @@ impl Args {
 
         let signer_key = ValidatedSignerKey::try_from(self.signer_key.as_str())?;
 
+        let redstone_push = if self.redstone_push {
+            if self.redstone_gateway_url.scheme() != "https" {
+                return Err(format!(
+                    "REDSTONE_GATEWAY_URL must be https (got scheme '{}'): the packages are signed, but the gateway decides which feed set the bot submits",
+                    self.redstone_gateway_url.scheme()
+                ));
+            }
+            Some(crate::redstone_push::RedStonePushConfig {
+                gateway_url: self.redstone_gateway_url.clone(),
+                data_service_id: self.redstone_data_service_id.clone(),
+            })
+        } else {
+            None
+        };
+
         // The Pyth Pro on-chain push source shares LAZER_API_TOKEN with the
         // scan-side API leg. The gateway constructor enforces wss:// and a
         // non-empty token; its error variants are static text (no input
@@ -764,6 +813,7 @@ impl Args {
             lazer_ws_url: self.lazer_ws_url.clone(),
             pyth_pro_source,
             redstone_api_url: self.redstone_api_url.clone(),
+            redstone_push,
             // The config type's constructor enforces HTTPS — a bearer token
             // over plain http travels in cleartext. Refused at startup,
             // where the operator sees it, rather than leaking the credential
@@ -854,6 +904,11 @@ mod tests {
                 .parse()
                 .expect("valid ws url"),
             redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
+            redstone_gateway_url: "https://oracle-gateway-1.a.redstone.finance"
+                .parse()
+                .unwrap(),
+            redstone_data_service_id: "redstone-primary-prod".to_string(),
+            redstone_push: true,
             lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
             lazer_api_token: None,
             min_swap_value_usd: 10.0,
@@ -929,6 +984,34 @@ mod tests {
     fn run_mode_defaults_to_loop() {
         assert_eq!(declared_default("run_mode"), ["loop"]);
         assert_eq!(declared_default("once"), ["false"]);
+    }
+
+    /// The RedStone push leg is on by default against RedStone's public
+    /// gateway, can be switched off, and refuses a cleartext gateway: the
+    /// packages are signed, but the URL still decides which server's view
+    /// of the feed set the bot submits.
+    #[test]
+    fn redstone_push_defaults_on_can_be_disabled_and_requires_https() {
+        let config = parse_with(&[]).build_config().expect("valid test config");
+        let push = config.redstone_push.expect("on by default");
+        assert_eq!(
+            push.gateway_url.as_str(),
+            "https://oracle-gateway-1.a.redstone.finance/"
+        );
+        assert_eq!(push.data_service_id, "redstone-primary-prod");
+
+        let off = parse_with(&["--redstone-push=false"])
+            .build_config()
+            .unwrap();
+        assert!(off.redstone_push.is_none());
+
+        let err = parse_with(&["--redstone-gateway-url", "http://gw.example"])
+            .build_config()
+            .expect_err("plain http must be refused");
+        assert!(
+            err.contains("REDSTONE_GATEWAY_URL"),
+            "names the knob: {err}"
+        );
     }
 
     #[test]
@@ -1456,22 +1539,19 @@ mod tests {
         );
     }
 
-    /// Both knobs were documented no-ops (nothing consumed either value), so
-    /// they are gone rather than silently accepted — a removed flag must fail
-    /// startup loudly, not swallow an operator's intent.
+    /// A documented no-op knob (nothing consumed the value) is gone rather
+    /// than silently accepted — a removed flag must fail startup loudly, not
+    /// swallow an operator's intent. (`--redstone-gateway-url` left the same
+    /// way and returned with a real function: the RedStone push leg.)
     #[test]
     fn removed_knobs_are_rejected_at_parse_time() {
-        for args in [
-            &["--transaction-timeout", "60"][..],
-            &["--redstone-gateway-url", "https://example.com"][..],
-        ] {
-            let err = try_parse_with(args).expect_err("removed flag must be rejected");
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::UnknownArgument,
-                "{args:?}"
-            );
-        }
+        let args = ["--transaction-timeout", "60"];
+        let err = try_parse_with(&args).expect_err("removed flag must be rejected");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
 
     /// Hermes is gone: the knob is rejected like the other removed knobs, so

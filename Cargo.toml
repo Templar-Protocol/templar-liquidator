@@ -25,6 +25,10 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.6.0", features = ["derive", "env"] }
 futures = "0.3.31"
 hex = { version = "0.4.3", features = ["serde"] }
+# secp256k1 recovery + keccak: the RedStone push leg recovers each gateway
+# package's signer locally before spending gas on a payload. Both already
+# sit in the dependency tree via the NEAR stack.
+k256 = "0.13"
 near-account-id = "2.6"
 near-api = "0.8.6"
 near-crypto = "0.37.3"
@@ -54,6 +58,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "system-proxy",
 ] }
 serde = { version = "1.0", features = ["derive"] }
+sha3 = "0.10"
 thiserror = "2.0.18"
 tokio = { version = "1.51.0", features = ["full"] }
 tracing = "0.1.44"

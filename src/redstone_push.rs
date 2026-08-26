@@ -9,9 +9,10 @@
 //! priceable on-chain. The bot fetches signed packages from RedStone's
 //! public gateway, serializes them in the RedStone protocol layout, recovers
 //! every signature locally against the adapter's own signer set and
-//! timestamp window (both read from the contract), and submits only a
-//! payload the contract will accept — no gas is spent discovering a
-//! rejection.
+//! timestamp window (both read from the contract), submits only a payload
+//! the contract will accept, and skips feeds it pushed within the adapter's
+//! minimum interval — gas is not spent discovering a rejection the bot
+//! could foresee.
 //!
 //! This module holds the pure parts (parsing, serialization, signer
 //! recovery, payload assembly) and the gateway client; target resolution
@@ -36,8 +37,11 @@ pub struct RedStonePushConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedPackage {
     pub feed_id: String,
-    /// The value exactly as the gateway printed it; scaled at serialization
-    /// so no float rounding can drift a byte from what the node signed.
+    /// The value as decimal text: a JSON string verbatim, or a JSON number
+    /// as `serde_json` re-prints it (shortest round-trip form, exact for
+    /// RedStone's 8-decimal values). Scaled at serialization with integer
+    /// arithmetic, so no float rounding can drift a byte from what the node
+    /// signed.
     pub value_text: String,
     pub timestamp_ms: u64,
     pub signature: [u8; 65],
@@ -51,6 +55,8 @@ pub struct AdapterRules {
     pub signers: Vec<[u8; 20]>,
     pub max_delay_ms: u64,
     pub max_ahead_ms: u64,
+    /// An untrusted writer's minimum spacing between writes of one feed.
+    pub min_interval_ms: u64,
 }
 
 impl From<&templar_common::oracle::redstone::Config> for AdapterRules {
@@ -60,6 +66,7 @@ impl From<&templar_common::oracle::redstone::Config> for AdapterRules {
             signers: config.signers.clone(),
             max_delay_ms: config.max_timestamp_delay_ms,
             max_ahead_ms: config.max_timestamp_ahead_ms,
+            min_interval_ms: config.min_interval_between_updates_ms,
         }
     }
 }
@@ -105,7 +112,7 @@ pub(crate) fn scale_value(text: &str) -> Option<u128> {
         digits.checked_mul(10u128.checked_pow(u32::try_from(shift).ok()?)?)
     } else {
         let divisor = 10u128.checked_pow(u32::try_from(-shift).ok()?)?;
-        Some((digits + divisor / 2) / divisor)
+        Some(digits.checked_add(divisor / 2)? / divisor)
     }
 }
 
@@ -213,8 +220,10 @@ pub(crate) fn recover_signer(package: &SignedPackage) -> Option<[u8; 20]> {
 /// Assembles the payload for `feed_ids`, in that order, from packages that
 /// pass the adapter's rules: within its timestamp window, signature
 /// recovering to the claimed signer, that signer in the adapter's set, one
-/// package per signer. A feed with fewer usable signers than the threshold
-/// fails the whole build, naming the feed and the shortfall.
+/// package per signer — and exactly the threshold's worth of them, since
+/// every extra package is signature-verification work and bytes on-chain
+/// for nothing. A feed with fewer usable signers than the threshold fails
+/// the whole build, naming the feed and the shortfall.
 pub(crate) fn build_payload(
     packages: &HashMap<String, Vec<SignedPackage>>,
     feed_ids: &[String],
@@ -245,6 +254,9 @@ pub(crate) fn build_payload(
                 continue;
             }
             accepted.push(package);
+            if accepted.len() >= rules.signer_threshold {
+                break;
+            }
         }
         if accepted.len() < rules.signer_threshold {
             return Err(format!(
@@ -268,6 +280,40 @@ pub(crate) fn build_payload(
     out.extend_from_slice(&[0, 0, 0]);
     out.extend_from_slice(&REDSTONE_MARKER);
     Ok(out)
+}
+
+/// The feeds of one adapter that are due for a write: those with no
+/// recorded push, or one older than the adapter's minimum interval. The
+/// contract rejects a too-soon write per feed and the transaction still
+/// costs gas, so the bot keeps its own memo instead of finding out on-chain.
+pub(crate) fn due_feeds<F: Clone + Eq + std::hash::Hash>(
+    last_push: &HashMap<(near_sdk::AccountId, F), std::time::Instant>,
+    adapter: &near_sdk::AccountId,
+    feeds: &[F],
+    min_interval: std::time::Duration,
+    now: std::time::Instant,
+) -> Vec<F> {
+    feeds
+        .iter()
+        .filter(|feed| {
+            last_push
+                .get(&(adapter.clone(), (*feed).clone()))
+                .is_none_or(|last| now.saturating_duration_since(*last) >= min_interval)
+        })
+        .cloned()
+        .collect()
+}
+
+/// The data-packages URL for a gateway config. Built by concatenation, not
+/// `Url::join`, so a gateway configured with a path prefix keeps it.
+pub(crate) fn packages_url(config: &RedStonePushConfig) -> Result<Url, String> {
+    format!(
+        "{}/data-packages/latest/{}",
+        config.gateway_url.as_str().trim_end_matches('/'),
+        config.data_service_id
+    )
+    .parse()
+    .map_err(|error| format!("bad RedStone gateway URL: {error}"))
 }
 
 /// Fetches signed packages from the RedStone gateway. Follows no redirects:
@@ -323,14 +369,7 @@ impl RedStonePushClient {
     /// Transport failure, a non-success status (a redirect included), or a
     /// body that is not the expected object.
     pub async fn fetch_packages(&self) -> Result<HashMap<String, Vec<SignedPackage>>, String> {
-        let url = self
-            .config
-            .gateway_url
-            .join(&format!(
-                "data-packages/latest/{}",
-                self.config.data_service_id
-            ))
-            .map_err(|error| format!("bad RedStone gateway URL: {error}"))?;
+        let url = packages_url(&self.config)?;
         let response =
             self.http.get(url).send().await.map_err(|error| {
                 format!("RedStone gateway request failed: {}", error.without_url())
@@ -367,6 +406,7 @@ mod tests {
                 .collect(),
             max_delay_ms: 180_000,
             max_ahead_ms: 180_000,
+            min_interval_ms: 40_000,
         }
     }
     const FIXTURE_SIGNERS: [&str; 5] = [
@@ -413,6 +453,10 @@ mod tests {
         assert_eq!(scale_value("0.000000001").unwrap(), 0);
         assert_eq!(scale_value("1e-7").unwrap(), 10);
         assert!(scale_value("abc").is_none());
+        // 2^128 - 1 with 39 decimals: the rounding add must not overflow
+        // (release builds abort on overflow) — a hostile value is dropped.
+        assert!(scale_value("0.340282366920938463463374607431768211455").is_none());
+        assert!(scale_value("340282366920938463463374607431768211455").is_none());
     }
 
     /// The payload follows the RedStone protocol layout: per package the
@@ -438,6 +482,59 @@ mod tests {
         assert_eq!(&payload[payload.len() - 12..payload.len() - 9], &[0, 0, 0]);
         assert_eq!(&payload[payload.len() - 14..payload.len() - 12], &[0, 6]);
         assert_eq!(&payload[..4], b"USDC");
+
+        // Exactly the threshold's worth of packages per feed, no more.
+        let mut two = rules();
+        two.signer_threshold = 2;
+        let trimmed = build_payload(&packages, &["USDC".into()], &two, FIXTURE_TS_MS).unwrap();
+        assert_eq!(trimmed.len(), 2 * PACKAGE + 2 + 3 + 9);
+        assert_eq!(&trimmed[trimmed.len() - 14..trimmed.len() - 12], &[0, 2]);
+    }
+
+    /// A feed pushed within the adapter's minimum interval is not due; one
+    /// never pushed, or pushed long enough ago, is.
+    #[test]
+    fn due_feeds_honour_the_minimum_interval() {
+        use std::time::{Duration, Instant};
+        let adapter: near_sdk::AccountId = "redstone.test.near".parse().unwrap();
+        let now = Instant::now();
+        let mut last = HashMap::new();
+        last.insert(
+            (adapter.clone(), "USDC".to_string()),
+            now.checked_sub(Duration::from_secs(10)).unwrap(),
+        );
+        last.insert(
+            (adapter.clone(), "BTC".to_string()),
+            now.checked_sub(Duration::from_secs(41)).unwrap(),
+        );
+        let feeds = ["USDC".to_string(), "BTC".to_string(), "CETES".to_string()];
+        assert_eq!(
+            due_feeds(&last, &adapter, &feeds, Duration::from_secs(40), now),
+            vec!["BTC".to_string(), "CETES".to_string()]
+        );
+    }
+
+    /// A gateway configured with a path prefix keeps it — `Url::join` would
+    /// have dropped it and turned the leg into a 404 per liquidation.
+    #[test]
+    fn packages_url_keeps_a_path_prefix() {
+        let url = packages_url(&RedStonePushConfig {
+            gateway_url: "https://mirror.example/redstone".parse().unwrap(),
+            data_service_id: "redstone-primary-prod".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://mirror.example/redstone/data-packages/latest/redstone-primary-prod"
+        );
+        let default = packages_url(&RedStonePushConfig {
+            gateway_url: "https://oracle-gateway-1.a.redstone.finance"
+                .parse()
+                .unwrap(),
+            data_service_id: "redstone-primary-prod".to_string(),
+        })
+        .unwrap();
+        assert_eq!(default.as_str(), "https://oracle-gateway-1.a.redstone.finance/data-packages/latest/redstone-primary-prod");
     }
 
     /// A feed with fewer distinct in-set signers than the adapter's

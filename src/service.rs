@@ -339,6 +339,7 @@ impl LiquidatorService {
                 redstone_push: config.redstone_push.clone(),
             },
             None,
+            None,
         );
 
         // Log swap configuration
@@ -976,6 +977,7 @@ impl LiquidatorService {
                     inventory: self.inventory.clone(),
                     notifier: self.config.notifier.clone(),
                     proxy_oracle_cache: Some(self.oracle_fetcher.proxy_oracle_cache()),
+                    redstone_push_memo: Some(self.oracle_fetcher.redstone_push_memo()),
                 };
                 let liquidator = Liquidator::new(
                     &handles,

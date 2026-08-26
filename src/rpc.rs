@@ -268,6 +268,7 @@ pub(crate) mod test_support {
                 redstone_push: None,
             },
             None,
+            None,
         )
     }
 }

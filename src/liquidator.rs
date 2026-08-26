@@ -786,6 +786,7 @@ pub struct SharedHandles {
     pub inventory: inventory::SharedInventory,
     pub notifier: crate::notifier::SharedNotifier,
     pub proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
+    pub redstone_push_memo: Option<oracle::RedStonePushMemo>,
 }
 
 impl Liquidator {
@@ -812,6 +813,7 @@ impl Liquidator {
             handles.pyth_pro_updates.clone(),
             oracle_apis,
             handles.proxy_oracle_cache.clone(),
+            handles.redstone_push_memo.clone(),
         );
         let executor = executor::LiquidationExecutor::new(
             handles.client.clone(),

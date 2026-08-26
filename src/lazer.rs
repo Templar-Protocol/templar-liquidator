@@ -15,8 +15,69 @@
 
 use std::collections::HashMap;
 
-use templar_common::oracle::pyth;
+use templar_common::oracle::pyth::{self, PriceIdentifier};
 use url::Url;
+
+/// Pyth Core price id → Pyth Pro feed id: the bridge that prices a Pyth
+/// Core–configured feed (a direct-Pyth or LST market, or a Pyth Core source
+/// inside a proxy) from the Pyth Pro API. Built from Pyth Pro's public
+/// symbols endpoint, where each feed carries its Pyth Core id as `hermes_id`.
+pub(crate) type PythCoreToProMap = HashMap<PriceIdentifier, u32>;
+
+/// One entry of the public symbols endpoint — only the bridge fields.
+#[derive(serde::Deserialize)]
+struct SymbolEntry {
+    pyth_lazer_id: u32,
+    #[serde(default)]
+    hermes_id: Option<String>,
+    #[serde(default)]
+    state: String,
+}
+
+/// Fetches the symbol bridge from the public endpoint (no bearer rides on
+/// it). Only `stable` feeds with a well-formed 32-byte `hermes_id` enter the
+/// map; a malformed id is skipped with a warning rather than failing the map,
+/// and a transport or parse failure fails the whole fetch so the caller keeps
+/// the previous map.
+pub(crate) async fn fetch_pyth_core_to_pro_map(
+    http: &reqwest::Client,
+    symbols_url: &Url,
+) -> Result<PythCoreToProMap, String> {
+    let response = http
+        .get(symbols_url.clone())
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|error| format!("symbols request failed: {}", error.without_url()))?;
+    if !response.status().is_success() {
+        return Err(format!("symbols endpoint returned {}", response.status()));
+    }
+    let entries: Vec<SymbolEntry> = response
+        .json()
+        .await
+        .map_err(|error| format!("symbols body did not parse: {}", error.without_url()))?;
+    let mut map = PythCoreToProMap::new();
+    for entry in entries {
+        if entry.state != "stable" {
+            continue;
+        }
+        let Some(hex_id) = entry.hermes_id else {
+            continue;
+        };
+        match hex::decode(&hex_id) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&bytes);
+                map.insert(PriceIdentifier(id), entry.pyth_lazer_id);
+            }
+            _ => tracing::warn!(
+                feed_id = entry.pyth_lazer_id,
+                "Pyth Pro symbol carries a malformed Pyth Core id; skipping it in the bridge"
+            ),
+        }
+    }
+    Ok(map)
+}
 
 /// One feed's entry in the `latest_price` parsed payload. Mantissas arrive
 /// as decimal strings; `exponent` scales them (`mantissa * 10^exponent`).
@@ -697,6 +758,38 @@ mod tests {
             base_url,
             token: "test-token".to_string(),
         }
+    }
+
+    /// The symbol map is the Pyth Core → Pyth Pro bridge: only stable feeds
+    /// with a `hermes_id` (the Pyth Core price id) enter it; a null id or a
+    /// non-stable feed is skipped, and a malformed id never poisons the map.
+    #[tokio::test]
+    async fn symbol_map_keeps_only_stable_feeds_with_a_core_id() {
+        let body = r#"[
+          {"pyth_lazer_id":1,"symbol":"Crypto.BTC/USD","state":"stable",
+           "hermes_id":"e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"},
+          {"pyth_lazer_id":2,"symbol":"Crypto.ETH/USD","state":"stable","hermes_id":null},
+          {"pyth_lazer_id":3,"symbol":"Crypto.ZZZ/USD","state":"coming_soon",
+           "hermes_id":"ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"},
+          {"pyth_lazer_id":4,"symbol":"Crypto.BAD/USD","state":"stable","hermes_id":"nothex"}
+        ]"#;
+        let (url, requests) = scripted_server(vec![(200, body.to_string())]).await;
+        let map = fetch_pyth_core_to_pro_map(&reqwest::Client::new(), &url)
+            .await
+            .expect("symbol map fetches");
+        assert_eq!(
+            map.len(),
+            1,
+            "only the stable feed with a valid core id maps"
+        );
+        let btc = PriceIdentifier(
+            hex::decode("e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(map.get(&btc), Some(&1));
+        assert_eq!(requests.lock().unwrap().len(), 1, "one GET, no retries");
     }
 
     fn live_feed_body(feed_id: u32) -> String {

@@ -765,6 +765,8 @@ pub struct SwapConfig {
 pub struct OracleApis {
     pub redstone_api_url: url::Url,
     pub lazer_api: Option<crate::lazer::LazerApiConfig>,
+    /// Pyth Pro public symbols endpoint — the Pyth Core → Pyth Pro bridge.
+    pub lazer_symbols_url: url::Url,
 }
 
 /// Loop-liquidation policy: whether to repeat against the same position, and
@@ -783,6 +785,7 @@ pub struct SharedHandles {
     pub inventory: inventory::SharedInventory,
     pub notifier: crate::notifier::SharedNotifier,
     pub proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
+    pub symbol_map: Option<oracle::SharedSymbolMap>,
 }
 
 impl Liquidator {
@@ -807,9 +810,9 @@ impl Liquidator {
         let oracle_fetcher = oracle::OracleFetcher::new(
             handles.client.clone(),
             handles.pyth_pro_updates.clone(),
-            oracle_apis.redstone_api_url,
-            oracle_apis.lazer_api,
+            oracle_apis,
             handles.proxy_oracle_cache.clone(),
+            handles.symbol_map.clone(),
         );
         let executor = executor::LiquidationExecutor::new(
             handles.client.clone(),

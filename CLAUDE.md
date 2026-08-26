@@ -64,16 +64,19 @@ One line per file in `src/`:
   markets and assets so liquidations only proceed when inventory covers them.
 - `oracle.rs` — scan-side pricing, off-chain only: proxy feeds composed
   from their source configs in order — RedStone API, the token-gated Pyth
-  Pro API — with no on-chain price read (stale, or a paid push per scan);
-  markets without an off-chain source are filtered at registration
-  (`offchain_priceable`). Execution-time: pushes Pyth Pro payloads to the
-  adapters and re-aggregates the proxy (`update_onchain_prices`). Pyth Core
-  (Hermes) is not integrated.
+  Pro API — and direct-Pyth/LST feeds priced from the Pyth Pro API over the
+  Pyth Core → Pyth Pro symbol bridge; no on-chain price read (stale, or a
+  paid push per scan). Markets without an off-chain source are filtered at
+  registration (`offchain_priceable` → `OracleKind`). Execution-time:
+  pushes Pyth Pro payloads to the adapters and re-aggregates the proxy
+  (`update_onchain_prices`); a Pyth Core oracle cannot be pushed by the
+  bot (Wormhole VAAs) and relies on an external pusher.
 - `redstone.rs` — RedStone public price API client (`api.redstone.finance`),
   used only for scan-side proxy price composition.
 - `lazer.rs` — Lazer (Pyth Pro) price API client (Bearer-token, used only
-  when `LAZER_API_TOKEN` is set), for scan-side pricing of Lazer-sourced
-  proxy feeds.
+  when `LAZER_API_TOKEN` is set), for scan-side pricing of Pyth Pro–sourced
+  feeds; also fetches the public symbols endpoint that builds the Pyth
+  Core → Pyth Pro bridge (`PythCoreToProMap`).
 - `swap/mod.rs` — `SwapProvider` trait, the swap-provider extension seam.
 - `swap/provider.rs` — `SwapProviderImpl`, a concrete enum wrapping the
   shipped provider for dynamic dispatch (the trait itself has generic

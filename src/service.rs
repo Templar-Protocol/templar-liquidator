@@ -110,6 +110,8 @@ pub struct ServiceConfig {
     pub max_loop_iterations: std::num::NonZeroU32,
     /// Pyth Pro websocket stream for the on-chain price push (`LAZER_WS_URL`).
     pub lazer_ws_url: url::Url,
+    /// Pyth Pro public symbols endpoint — the Pyth Core → Pyth Pro bridge.
+    pub lazer_symbols_url: url::Url,
     /// Pyth Pro on-chain push source, `Some` iff `LAZER_API_TOKEN` is set. The
     /// gateway builds a reconnecting websocket subscriber from it; without it
     /// Pyth Pro–sourced feeds rely on an external pusher at execution time.
@@ -184,6 +186,10 @@ impl std::fmt::Debug for ServiceConfig {
                 &self.lazer_ws_url.origin().ascii_serialization(),
             )
             .field("pyth_pro_source", &self.pyth_pro_source.is_some())
+            .field(
+                "lazer_symbols_url",
+                &self.lazer_symbols_url.origin().ascii_serialization(),
+            )
             .field("redstone_api_url", &self.redstone_api_url)
             .field("lazer_api", &self.lazer_api)
             .field("min_swap_value_usd", &self.min_swap_value_usd)
@@ -323,8 +329,12 @@ impl LiquidatorService {
         let oracle_fetcher = crate::OracleFetcher::new(
             client.clone(),
             pyth_pro_updates.clone(),
-            config.redstone_api_url.clone(),
-            config.lazer_api.clone(),
+            crate::OracleApis {
+                redstone_api_url: config.redstone_api_url.clone(),
+                lazer_api: config.lazer_api.clone(),
+                lazer_symbols_url: config.lazer_symbols_url.clone(),
+            },
+            None,
             None,
         );
 
@@ -775,6 +785,20 @@ impl LiquidatorService {
                 "Refreshing registry deployments"
             );
 
+            // The Pyth Core → Pyth Pro symbol bridge is what prices
+            // direct-Pyth/LST markets and Pyth Core proxy sources; refresh it
+            // with the registry so a newly listed feed is picked up hourly.
+            match self.oracle_fetcher.refresh_pyth_core_to_pro_map().await {
+                Ok(0) => {}
+                Ok(feeds) => {
+                    tracing::info!(feeds, "Refreshed the Pyth Core → Pyth Pro symbol bridge");
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Failed to refresh the Pyth Core → Pyth Pro symbol bridge; keeping the previous map (bridge-priced markets are filtered until a refresh succeeds)"
+                ),
+            }
+
             let all_markets = list_all_deployments(
                 &self.client,
                 self.config.registries.clone(),
@@ -907,8 +931,19 @@ impl LiquidatorService {
                     .offchain_priceable(oracle_account, &price_ids)
                     .await
                 {
-                    Ok(None) => {}
-                    Ok(Some(reason)) => {
+                    Ok(Ok(crate::oracle::OracleKind::Proxy)) => {}
+                    Ok(Ok(kind)) => {
+                        // Priced off-chain over the symbol bridge; the bot
+                        // cannot push to a Pyth Core oracle (Wormhole VAAs),
+                        // so execution depends on an external pusher.
+                        tracing::info!(
+                            market = %market,
+                            oracle = %oracle_account,
+                            oracle_kind = ?kind,
+                            "Market priced over the Pyth Core → Pyth Pro bridge; execution relies on the on-chain Pyth Core price being kept fresh externally"
+                        );
+                    }
+                    Ok(Err(reason)) => {
                         tracing::info!(
                             market = %market,
                             oracle = %oracle_account,
@@ -963,6 +998,7 @@ impl LiquidatorService {
                     inventory: self.inventory.clone(),
                     notifier: self.config.notifier.clone(),
                     proxy_oracle_cache: Some(self.oracle_fetcher.proxy_oracle_cache()),
+                    symbol_map: Some(self.oracle_fetcher.symbol_map()),
                 };
                 let liquidator = Liquidator::new(
                     &handles,
@@ -981,6 +1017,7 @@ impl LiquidatorService {
                     crate::OracleApis {
                         redstone_api_url: self.config.redstone_api_url.clone(),
                         lazer_api: self.config.lazer_api.clone(),
+                        lazer_symbols_url: self.config.lazer_symbols_url.clone(),
                     },
                     crate::LoopPolicy {
                         enabled: self.config.loop_liquidation,

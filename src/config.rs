@@ -317,6 +317,17 @@ pub struct Args {
     )]
     pub lazer_api_url: Url,
 
+    /// Pyth Pro public symbols endpoint — the Pyth Core → Pyth Pro bridge
+    /// (each feed carries its Pyth Core id as `hermes_id`), which prices
+    /// direct-Pyth and LST markets and Pyth Core proxy sources from the
+    /// Pyth Pro API. Public (no token); must be `https`.
+    #[arg(
+        long,
+        env = "LAZER_SYMBOLS_URL",
+        default_value = "https://pyth.dourolabs.app/v1/symbols"
+    )]
+    pub lazer_symbols_url: Url,
+
     /// Pyth Pro (Lazer) API access token. Enables both the scan-side Pyth
     /// Pro API leg and the on-chain Pyth Pro push. When unset, Pyth
     /// Pro–sourced feeds have no off-chain candidate and a market that
@@ -452,6 +463,10 @@ impl std::fmt::Debug for Args {
                 &self.lazer_api_url.origin().ascii_serialization(),
             )
             .field("lazer_api_token", &shown(self.lazer_api_token.as_ref()))
+            .field(
+                "lazer_symbols_url",
+                &self.lazer_symbols_url.origin().ascii_serialization(),
+            )
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
             .field("swap_retry_attempts", &self.swap_retry_attempts)
@@ -703,6 +718,13 @@ impl Args {
 
         let signer_key = ValidatedSignerKey::try_from(self.signer_key.as_str())?;
 
+        if self.lazer_symbols_url.scheme() != "https" {
+            return Err(format!(
+                "LAZER_SYMBOLS_URL must be https (got scheme '{}'): the symbol bridge decides what gets priced and is not fetched over cleartext",
+                self.lazer_symbols_url.scheme()
+            ));
+        }
+
         // The Pyth Pro on-chain push source shares LAZER_API_TOKEN with the
         // scan-side API leg. The gateway constructor enforces wss:// and a
         // non-empty token; its error variants are static text (no input
@@ -762,6 +784,7 @@ impl Args {
             loop_liquidation: self.loop_liquidation,
             max_loop_iterations: self.max_loop_iterations,
             lazer_ws_url: self.lazer_ws_url.clone(),
+            lazer_symbols_url: self.lazer_symbols_url.clone(),
             pyth_pro_source,
             redstone_api_url: self.redstone_api_url.clone(),
             // The config type's constructor enforces HTTPS — a bearer token
@@ -853,6 +876,9 @@ mod tests {
             lazer_ws_url: "wss://pyth-lazer-0.dourolabs.app/v1/stream"
                 .parse()
                 .expect("valid ws url"),
+            lazer_symbols_url: "https://pyth.dourolabs.app/v1/symbols"
+                .parse()
+                .expect("valid symbols url"),
             redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
             lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
             lazer_api_token: None,
@@ -1302,6 +1328,23 @@ mod tests {
     /// sibling list knobs do; without the delimiter, `a.near,b.near` parses
     /// as ONE invalid account id and the only way to express two registries
     /// is the repeatable CLI flag.
+    /// The Pyth Core → Pyth Pro symbol bridge is fetched from a public
+    /// endpoint; it defaults to Pyth's and must stay https (no token rides
+    /// on it, but the map decides what gets priced, so it is not fetched
+    /// over cleartext).
+    #[test]
+    fn lazer_symbols_url_defaults_to_the_public_endpoint_and_must_be_https() {
+        let config = parse_with(&[]).build_config().expect("valid test config");
+        assert_eq!(
+            config.lazer_symbols_url.as_str(),
+            "https://pyth.dourolabs.app/v1/symbols"
+        );
+        let err = parse_with(&["--lazer-symbols-url", "http://symbols.example/v1/symbols"])
+            .build_config()
+            .expect_err("plain http must be refused");
+        assert!(err.contains("LAZER_SYMBOLS_URL"), "names the knob: {err}");
+    }
+
     #[test]
     fn registries_accept_a_comma_separated_list() {
         let key = test_signer_key();

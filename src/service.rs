@@ -290,7 +290,11 @@ impl LiquidatorService {
                 .expect("failed to bind gateway signer")
             });
         if pyth_pro_updates.is_some() {
-            tracing::info!(ws_url = %config.lazer_ws_url, "Pyth Pro on-chain price push enabled");
+            // Host only: a URL can carry credentials in its userinfo component.
+            tracing::info!(
+                ws_host = config.lazer_ws_url.host_str().unwrap_or("<unset>"),
+                "Pyth Pro on-chain price push enabled"
+            );
         } else {
             tracing::info!(
                 "Pyth Pro on-chain price push disabled (LAZER_API_TOKEN unset); relying on an external pusher"

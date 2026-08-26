@@ -163,10 +163,11 @@ Bump every `rev =` together in one change, never one alone.
   actual on-chain market you're reading.
 - yoctoNEAR (10⁻²⁴ NEAR — the unit for deposits and balances) is **not** the
   same unit as NEAR gas. Don't mix them in a calculation or a config knob.
-- Oracle prices fail closed when stale: the on-chain read this bot depends on
-  rejects prices older than its configured threshold rather than returning a
-  stale value silently. A scan can legitimately come back empty/degraded
-  because of this, not because of a bug.
+- Oracle prices fail closed when stale, off-chain: every composed scan
+  price is bounded by the market's freshness window bot-side (there is no
+  on-chain price read at scan time), and execution re-prices on-chain
+  fail-closed. A scan can legitimately come back empty/degraded because a
+  price API is down or stale, not because of a bug.
 - The dev container is memory-constrained by whatever Docker Desktop is given
   (commonly ~8 GB), and `nproc` reports the host's full core count — so cargo
   fans out far more parallel jobs than there is RAM for. Both `cargo test

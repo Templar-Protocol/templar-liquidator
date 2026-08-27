@@ -930,13 +930,24 @@ impl LiquidatorService {
                 "Refreshing registry deployments"
             );
 
-            let all_markets = list_all_deployments(
+            let listed = list_all_deployments(
                 &self.client,
                 self.config.registries.clone(),
                 self.config.concurrency,
             )
             .await
             .map_err(|e| LiquidatorError::ListDeploymentsError(e.into()))?;
+            // Registries may overlap; a market is one market however many
+            // list it, so the admission loop, the summary and the gauges see
+            // each account id once.
+            let listed_count = listed.len();
+            let all_markets = dedupe_deployments(listed);
+            if all_markets.len() < listed_count {
+                tracing::debug!(
+                    duplicates = listed_count - all_markets.len(),
+                    "Dropped duplicate deployments listed by more than one registry"
+                );
+            }
 
             tracing::info!(
                 market_count = all_markets.len(),
@@ -950,6 +961,10 @@ impl LiquidatorService {
                 templar_common::market::MarketConfiguration,
                 crate::scanner::MarketVersion,
             )> = Vec::new();
+            // Why each deployment was not admitted, for the per-refresh
+            // summary and the `markets_filtered{reason=…}` gauge. Labels
+            // are this fixed set; the free-text cause stays in the log line.
+            let mut filtered = crate::metrics::FilterTally::default();
             for market in &all_markets {
                 // Step 0: admission by allow/deny lists, before any RPC calls
                 if let Some(reason) = market_rejection_reason(
@@ -962,6 +977,7 @@ impl LiquidatorService {
                         reason,
                         "Market filtered out"
                     );
+                    filtered.record(crate::metrics::FilterReason::Ignored);
                     continue;
                 }
 
@@ -988,12 +1004,14 @@ impl LiquidatorService {
                                 deployment = %market,
                                 "Skipping non-market deployment (no get_configuration method)"
                             );
+                            filtered.record(crate::metrics::FilterReason::NotAMarket);
                         } else {
                             tracing::warn!(
                                 market = %market,
                                 error = %e,
                                 "Failed to fetch market configuration, skipping"
                             );
+                            filtered.record(crate::metrics::FilterReason::ConfigReadError);
                         }
                         continue;
                     }
@@ -1015,12 +1033,14 @@ impl LiquidatorService {
                                 market = %market,
                                 "Contract missing NEP-330 metadata, skipping"
                             );
+                            filtered.record(crate::metrics::FilterReason::Version);
                         } else {
                             tracing::warn!(
                                 market = %market,
                                 error = %e,
                                 "Failed to read contract version, skipping until next refresh"
                             );
+                            filtered.record(crate::metrics::FilterReason::VersionReadError);
                         }
                         continue;
                     }
@@ -1031,6 +1051,7 @@ impl LiquidatorService {
                         version = %version_string,
                         "Invalid semver format, skipping"
                     );
+                    filtered.record(crate::metrics::FilterReason::Version);
                     continue;
                 };
                 if version < crate::scanner::MarketVersion::MIN_SUPPORTED {
@@ -1040,6 +1061,7 @@ impl LiquidatorService {
                         min_required = %crate::scanner::MarketVersion::MIN_SUPPORTED,
                         "Skipping market - unsupported version"
                     );
+                    filtered.record(crate::metrics::FilterReason::Version);
                     continue;
                 }
 
@@ -1070,6 +1092,7 @@ impl LiquidatorService {
                             reason,
                             "Market filtered out"
                         );
+                        filtered.record(crate::metrics::FilterReason::Oracle);
                         continue;
                     }
                     Err(e) => {
@@ -1079,6 +1102,7 @@ impl LiquidatorService {
                             error = %e,
                             "Failed to probe the market's oracle, skipping until next refresh"
                         );
+                        filtered.record(crate::metrics::FilterReason::OracleProbeError);
                         continue;
                     }
                 }
@@ -1095,6 +1119,7 @@ impl LiquidatorService {
                         reason = filter_reason.unwrap_or_default(),
                         "Market filtered out"
                     );
+                    filtered.record(crate::metrics::FilterReason::AssetFilter);
                 }
             }
 
@@ -1148,6 +1173,17 @@ impl LiquidatorService {
 
                 supported_markets.insert(market, liquidator);
             }
+
+            // One line per refresh with the outcome and its breakdown; the same
+            // numbers feed the `markets_registered` / `markets_filtered` gauges.
+            self.metrics
+                .set_registry_counts(supported_markets.len() as u64, &filtered);
+            tracing::info!(
+                registered = supported_markets.len(),
+                filtered = filtered.total(),
+                by_reason = ?filtered.by_label(),
+                "Registry refresh summary"
+            );
 
             self.markets = supported_markets;
 
@@ -1658,6 +1694,17 @@ impl LiquidatorService {
     }
 }
 
+/// Deployments unique by account id, first occurrence kept in listing
+/// order — the boundary at which "one market" is made an invariant, so
+/// nothing downstream has to reason about overlapping registries.
+fn dedupe_deployments(listed: Vec<AccountId>) -> Vec<AccountId> {
+    let mut seen = std::collections::HashSet::with_capacity(listed.len());
+    listed
+        .into_iter()
+        .filter(|market| seen.insert(market.clone()))
+        .collect()
+}
+
 /// Why one registry market is rejected by the operator's allow/deny
 /// lists — `Some(reason)` rejects, `None` admits. An empty
 /// allowlist admits everything (the pre-knob behavior); a non-empty one is
@@ -1807,6 +1854,21 @@ fn unix_now_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    /// Overlapping registries list one market twice; it is admitted, counted
+    /// and given a liquidator once, in first-listed order.
+    #[test]
+    fn dedupe_deployments_keeps_first_occurrence() {
+        let m = |s: &str| -> AccountId { s.parse().unwrap() };
+        let out = dedupe_deployments(vec![
+            m("a.near"),
+            m("b.near"),
+            m("a.near"),
+            m("c.near"),
+            m("b.near"),
+        ]);
+        assert_eq!(out, vec![m("a.near"), m("b.near"), m("c.near")]);
+    }
+
     /// The allowlist defines the universe when set (empty = all markets, the
     /// pre-knob behavior), and IGNORED_MARKETS still subtracts within it —
     /// a market on both lists is ignored.

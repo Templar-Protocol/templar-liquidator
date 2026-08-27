@@ -30,7 +30,7 @@ The bot refuses to start without these three:
 
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
-| `RUN_MODE` | `--run-mode` | `loop` | `loop` (continuous) or `once` (single registry refresh + liquidation round, then exit — for cron/Cloud Run Jobs). |
+| `RUN_MODE` | `--run-mode` | `loop` | `loop` (continuous), `once` (single registry refresh + liquidation round, then exit — for cron-style schedulers), or `push-check` (diagnostic: one registry refresh, then for every admitted market push prices on-chain — live mode only — and report whether its oracle reads fresh within its own `price_maximum_age_s`; exit 0 only when this process's push succeeded and every market then read fresh — live — or after a successful non-empty refresh in dry-run, which only reads and reports; a failed or empty registry refresh exits 1 in both). `push-check` with `DRY_RUN=false` requires `LAZER_API_TOKEN`. |
 | — | `--once` | `false` | Shorthand for `--run-mode once`. No env var equivalent; forces once mode and takes precedence over `--run-mode` if both are given. |
 | `LIQUIDATION_SCAN_INTERVAL` | `--liquidation-scan-interval` | `600` | Seconds between liquidation scan rounds (loop mode). |
 | `REGISTRY_REFRESH_INTERVAL` | `--registry-refresh-interval` | `3600` | Seconds between registry re-discovery (loop mode). |
@@ -96,7 +96,7 @@ All comma-delimited (`value_delimiter = ','` in clap — repeat the flag or comm
 
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
-| `HTTP_PORT` | `--http-port` | unset (disabled) | Enables `GET /healthz` + `GET /metrics`. Never started in `RUN_MODE=once`. Both endpoints are unauthenticated. |
+| `HTTP_PORT` | `--http-port` | unset (disabled) | Enables `GET /healthz` + `GET /metrics`. Never started in `RUN_MODE=once` or `push-check`. Both endpoints are unauthenticated. |
 | `HTTP_BIND_ADDR` | `--http-bind-addr` | `127.0.0.1` | Interface the HTTP listener binds. Loopback by default so the unauthenticated endpoints above aren't reachable off the host; the shipped Compose files also publish the container port to `127.0.0.1` on the host for the same reason. Scraping from another machine is an explicit opt-in — see [README's Metrics and health](../README.md#metrics-and-health). |
 | `RUST_LOG` | — | `info,templar_liquidator=debug` | Standard `tracing`/`env_logger`-style filter. Not a `clap` arg — read directly by `tracing_subscriber::EnvFilter`. |
 | `LOG_FORMAT` | — | `text` | Set to `json` for one JSON object per log line (for aggregators like Loki or CloudWatch). Not a `clap` arg — read directly at startup. |

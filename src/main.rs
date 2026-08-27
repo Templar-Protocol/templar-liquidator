@@ -64,5 +64,23 @@ async fn main() -> std::process::ExitCode {
                 std::process::ExitCode::FAILURE
             }
         },
+        // Exit 0 only for a live pass; a dry run is informational and exits
+        // 0 too, since it verifies nothing and fails nothing.
+        RunMode::PushCheck => match service.run_push_check().await {
+            Ok(report) if report.passed() || report.dry_run => std::process::ExitCode::SUCCESS,
+            Ok(report) => {
+                tracing::error!(
+                    pushed = report.pushed_count(),
+                    fresh = report.fresh_count(),
+                    checked = report.markets.len(),
+                    "push-check did not pass: at least one market was not pushed by this process, or still reads stale after the push"
+                );
+                std::process::ExitCode::FAILURE
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "push-check failed");
+                std::process::ExitCode::FAILURE
+            }
+        },
     }
 }

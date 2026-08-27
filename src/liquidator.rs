@@ -62,6 +62,12 @@
 //!   refresh and one liquidation round, then exits. Intended for cron-style
 //!   schedulers (Cloud Run Jobs, Kubernetes CronJobs) rather than a long-lived
 //!   process.
+//! - `--run-mode push-check` — one registry refresh, then per admitted market
+//!   reads the proxy's cached price ages, pushes on-chain (live mode only),
+//!   re-reads, and judges against the market's `price_maximum_age_s`. A
+//!   diagnostic for the push path: live, it exits 0 only when this process's
+//!   push succeeded and every market then read fresh; dry-run only reads and
+//!   reports, and exits 0 after a successful refresh.
 //!
 //! # Dry-run is the default
 //!
@@ -95,6 +101,7 @@ pub mod metrics;
 pub mod notifier;
 pub mod oracle;
 pub mod profitability;
+pub mod push_check;
 pub mod redstone;
 pub mod rpc;
 pub mod scanner;

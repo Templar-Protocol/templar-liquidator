@@ -1164,22 +1164,14 @@ impl LiquidatorService {
             }
 
             // One line per refresh with the outcome and its breakdown; the same
-
             // numbers feed the `markets_registered` / `markets_filtered` gauges.
-
             self.metrics
                 .set_registry_counts(supported_markets.len() as u64, &filtered);
-
             tracing::info!(
-
                 registered = supported_markets.len(),
-
                 filtered = filtered.total(),
-
                 by_reason = ?filtered.by_reason(),
-
                 "Registry refresh summary"
-
             );
 
             self.markets = supported_markets;

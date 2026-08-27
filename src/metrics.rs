@@ -68,21 +68,21 @@ pub struct Metrics {
 
 /// One registry refresh's count of filtered markets by reason label.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct FilterTally(std::collections::BTreeMap<&'static str, u64>);
+pub(crate) struct FilterTally(std::collections::BTreeMap<&'static str, u64>);
 
 impl FilterTally {
     /// Counts one market filtered for `reason` (a fixed label value).
-    pub fn record(&mut self, reason: &'static str) {
+    pub(crate) fn record(&mut self, reason: &'static str) {
         *self.0.entry(reason).or_insert(0) += 1;
     }
 
     #[must_use]
-    pub fn total(&self) -> u64 {
+    pub(crate) fn total(&self) -> u64 {
         self.0.values().sum()
     }
 
     #[must_use]
-    pub fn by_reason(&self) -> &std::collections::BTreeMap<&'static str, u64> {
+    pub(crate) fn by_reason(&self) -> &std::collections::BTreeMap<&'static str, u64> {
         &self.0
     }
 }
@@ -134,7 +134,7 @@ impl Metrics {
     /// filtered count per reason. Every reason seen before is reset to 0
     /// first, so a reason that stopped occurring reads 0 rather than
     /// disappearing.
-    pub fn set_registry_counts(&self, registered: u64, filtered: &FilterTally) {
+    pub(crate) fn set_registry_counts(&self, registered: u64, filtered: &FilterTally) {
         self.markets_registered.store(registered, Ordering::Relaxed);
         if let Ok(mut map) = self.filtered_by_reason.lock() {
             for count in map.values_mut() {

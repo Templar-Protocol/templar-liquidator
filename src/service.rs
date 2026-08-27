@@ -930,13 +930,24 @@ impl LiquidatorService {
                 "Refreshing registry deployments"
             );
 
-            let all_markets = list_all_deployments(
+            let listed = list_all_deployments(
                 &self.client,
                 self.config.registries.clone(),
                 self.config.concurrency,
             )
             .await
             .map_err(|e| LiquidatorError::ListDeploymentsError(e.into()))?;
+            // Registries may overlap; a market is one market however many
+            // list it, so the admission loop, the summary and the gauges see
+            // each account id once.
+            let listed_count = listed.len();
+            let all_markets = dedupe_deployments(listed);
+            if all_markets.len() < listed_count {
+                tracing::debug!(
+                    duplicates = listed_count - all_markets.len(),
+                    "Dropped duplicate deployments listed by more than one registry"
+                );
+            }
 
             tracing::info!(
                 market_count = all_markets.len(),
@@ -1683,6 +1694,17 @@ impl LiquidatorService {
     }
 }
 
+/// Deployments unique by account id, first occurrence kept in listing
+/// order — the boundary at which "one market" is made an invariant, so
+/// nothing downstream has to reason about overlapping registries.
+fn dedupe_deployments(listed: Vec<AccountId>) -> Vec<AccountId> {
+    let mut seen = std::collections::HashSet::with_capacity(listed.len());
+    listed
+        .into_iter()
+        .filter(|market| seen.insert(market.clone()))
+        .collect()
+}
+
 /// Why one registry market is rejected by the operator's allow/deny
 /// lists — `Some(reason)` rejects, `None` admits. An empty
 /// allowlist admits everything (the pre-knob behavior); a non-empty one is
@@ -1835,6 +1857,21 @@ mod tests {
     /// The allowlist defines the universe when set (empty = all markets, the
     /// pre-knob behavior), and IGNORED_MARKETS still subtracts within it —
     /// a market on both lists is ignored.
+    /// Overlapping registries list one market twice; it is admitted, counted
+    /// and given a liquidator once, in first-listed order.
+    #[test]
+    fn dedupe_deployments_keeps_first_occurrence() {
+        let m = |s: &str| -> AccountId { s.parse().unwrap() };
+        let out = dedupe_deployments(vec![
+            m("a.near"),
+            m("b.near"),
+            m("a.near"),
+            m("c.near"),
+            m("b.near"),
+        ]);
+        assert_eq!(out, vec![m("a.near"), m("b.near"), m("c.near")]);
+    }
+
     #[test]
     fn allowlist_admits_members_and_denylist_subtracts() {
         let m = |s: &str| s.parse::<AccountId>().unwrap();

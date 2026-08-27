@@ -494,6 +494,14 @@ impl OracleFetcher {
         }
     }
 
+    fn release_redstone_reservation(&self, adapter: &AccountId, feeds: &[RedStoneFeedId]) {
+        let mut memo = self
+            .redstone_push_memo
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::redstone_push::release(&mut memo, adapter, feeds);
+    }
+
     /// Builds a payload for `feed_ids` against the adapter's own rules
     /// (`get_config`: signer set, threshold, timestamp window) and submits
     /// `write_prices`. Best-effort: any failure is logged and the feeds stay
@@ -520,12 +528,14 @@ impl OracleFetcher {
         };
         let min_interval = std::time::Duration::from_millis(rules.min_interval_ms);
         let now = std::time::Instant::now();
+        // Reserve under the lock: a concurrent liquidation must not find the
+        // same feeds due; a failed build or write releases them below.
         let due: Vec<RedStoneFeedId> = {
-            let memo = self
+            let mut memo = self
                 .redstone_push_memo
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            crate::redstone_push::due_feeds(&memo, adapter, feed_ids, min_interval, now)
+            crate::redstone_push::reserve_due(&mut memo, adapter, feed_ids, min_interval, now)
         };
         if due.is_empty() {
             tracing::debug!(%adapter, feeds = ?feed_ids, "RedStone feeds pushed within the adapter's minimum interval; skipping");
@@ -541,6 +551,7 @@ impl OracleFetcher {
             Ok(payload) => payload,
             Err(error) => {
                 tracing::warn!(%adapter, %error, "RedStone payload not built; its feeds stay as they are on-chain");
+                self.release_redstone_reservation(adapter, &due);
                 return false;
             }
         };
@@ -554,30 +565,28 @@ impl OracleFetcher {
             .await
         {
             Ok(result) if result.operation.status == OperationStatus::Succeeded => {
-                let mut memo = self
-                    .redstone_push_memo
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                for feed in due {
-                    memo.insert((adapter.clone(), feed), now);
-                }
+                // The reservation taken above stands as the write's timestamp.
                 tracing::info!(%adapter, feeds = ?names, operation_id = %result.operation.id.0, "Pushed RedStone prices");
                 true
             }
             Ok(result) => {
                 tracing::warn!(%adapter, feeds = ?names, status = ?result.operation.status, "RedStone push did not succeed");
+                self.release_redstone_reservation(adapter, &due);
                 false
             }
             Err(error) => {
                 tracing::warn!(%adapter, feeds = ?names, %error, "RedStone push failed");
+                self.release_redstone_reservation(adapter, &due);
                 false
             }
         }
     }
 
     /// Pushes fresh Pyth Pro payloads on-chain for every resolved adapter,
-    /// RedStone packages for the feeds without a Pyth Pro source (when the
-    /// RedStone leg is enabled), then re-aggregates the proxy. Returns
+    /// RedStone packages for the feeds the Pyth Pro push cannot refresh —
+    /// those without a Pyth Pro source, and every feed when no Pyth Pro push
+    /// is available — (when the RedStone leg is enabled), then re-aggregates
+    /// the proxy. Returns
     /// `Ok(true)` if any update was sent. Best-effort per adapter: a failed
     /// push is logged and the liquidation proceeds against existing on-chain
     /// state, which the market contract re-validates fail-closed.

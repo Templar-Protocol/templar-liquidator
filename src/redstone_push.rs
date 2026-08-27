@@ -304,16 +304,52 @@ pub(crate) fn due_feeds<F: Clone + Eq + std::hash::Hash>(
         .collect()
 }
 
-/// The data-packages URL for a gateway config. Built by concatenation, not
-/// `Url::join`, so a gateway configured with a path prefix keeps it.
-pub(crate) fn packages_url(config: &RedStonePushConfig) -> Result<Url, String> {
-    format!(
+/// Reserves the feeds of one adapter that are due for a write (see
+/// [`due_feeds`]) by recording `now` for them under the caller's lock, so a
+/// concurrent caller finds them not due. The caller [`release`]s them if
+/// the write does not happen; a successful write keeps the reservation as
+/// its timestamp.
+pub(crate) fn reserve_due<F: Clone + Eq + std::hash::Hash>(
+    last_push: &mut HashMap<(near_sdk::AccountId, F), std::time::Instant>,
+    adapter: &near_sdk::AccountId,
+    feeds: &[F],
+    min_interval: std::time::Duration,
+    now: std::time::Instant,
+) -> Vec<F> {
+    let due = due_feeds(last_push, adapter, feeds, min_interval, now);
+    for feed in &due {
+        last_push.insert((adapter.clone(), feed.clone()), now);
+    }
+    due
+}
+
+/// Releases a reservation made by [`reserve_due`] after a failed build or
+/// write, so the next caller may retry immediately.
+pub(crate) fn release<F: Clone + Eq + std::hash::Hash>(
+    last_push: &mut HashMap<(near_sdk::AccountId, F), std::time::Instant>,
+    adapter: &near_sdk::AccountId,
+    feeds: &[F],
+) {
+    for feed in feeds {
+        last_push.remove(&(adapter.clone(), feed.clone()));
+    }
+}
+
+/// The data-packages URL for a gateway config: the endpoint is appended to
+/// the configured *path* (a prefix is kept), and any query or fragment is
+/// dropped rather than folded into the path — `build_config` refuses such a
+/// URL at startup anyway, so the endpoint can never slide into a query.
+pub(crate) fn packages_url(config: &RedStonePushConfig) -> Url {
+    let mut url = config.gateway_url.clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    let path = format!(
         "{}/data-packages/latest/{}",
-        config.gateway_url.as_str().trim_end_matches('/'),
+        url.path().trim_end_matches('/'),
         config.data_service_id
-    )
-    .parse()
-    .map_err(|error| format!("bad RedStone gateway URL: {error}"))
+    );
+    url.set_path(&path);
+    url
 }
 
 /// Fetches signed packages from the RedStone gateway. Follows no redirects:
@@ -327,11 +363,11 @@ pub struct RedStonePushClient {
 
 impl std::fmt::Debug for RedStonePushClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The full URL, prefix included: `build_config` refuses a gateway
+        // URL carrying userinfo, a query or a fragment, so it never holds a
+        // credential.
         f.debug_struct("RedStonePushClient")
-            .field(
-                "gateway",
-                &self.config.gateway_url.origin().ascii_serialization(),
-            )
+            .field("gateway", &self.config.gateway_url.as_str())
             .field("data_service_id", &self.config.data_service_id)
             .finish_non_exhaustive()
     }
@@ -369,7 +405,7 @@ impl RedStonePushClient {
     /// Transport failure, a non-success status (a redirect included), or a
     /// body that is not the expected object.
     pub async fn fetch_packages(&self) -> Result<HashMap<String, Vec<SignedPackage>>, String> {
-        let url = packages_url(&self.config)?;
+        let url = packages_url(&self.config);
         let response =
             self.http.get(url).send().await.map_err(|error| {
                 format!("RedStone gateway request failed: {}", error.without_url())
@@ -514,15 +550,47 @@ mod tests {
         );
     }
 
-    /// A gateway configured with a path prefix keeps it — `Url::join` would
-    /// have dropped it and turned the leg into a 404 per liquidation.
+    /// Reserving marks feeds as pushed for a concurrent caller; releasing
+    /// them after a failure makes them due again at once.
+    #[test]
+    fn reservation_blocks_a_concurrent_caller_until_released() {
+        use std::time::{Duration, Instant};
+        let adapter: near_sdk::AccountId = "redstone.test.near".parse().unwrap();
+        let now = Instant::now();
+        let mut memo = HashMap::new();
+        let feeds = ["CETES".to_string(), "USTRY".to_string()];
+        assert_eq!(
+            reserve_due(&mut memo, &adapter, &feeds, Duration::from_secs(40), now),
+            feeds.to_vec()
+        );
+        assert!(
+            reserve_due(&mut memo, &adapter, &feeds, Duration::from_secs(40), now).is_empty(),
+            "a concurrent caller finds the reserved feeds not due"
+        );
+        release(&mut memo, &adapter, &feeds[..1]);
+        assert_eq!(
+            reserve_due(&mut memo, &adapter, &feeds, Duration::from_secs(40), now),
+            vec!["CETES".to_string()],
+            "only the released feed is due again"
+        );
+    }
+
+    /// A gateway configured with a path prefix keeps it, and a query or
+    /// fragment is dropped rather than folded into the path.
     #[test]
     fn packages_url_keeps_a_path_prefix() {
+        let with_query = packages_url(&RedStonePushConfig {
+            gateway_url: "https://mirror.example/gw?key=abc#x".parse().unwrap(),
+            data_service_id: "redstone-primary-prod".to_string(),
+        });
+        assert_eq!(
+            with_query.as_str(),
+            "https://mirror.example/gw/data-packages/latest/redstone-primary-prod"
+        );
         let url = packages_url(&RedStonePushConfig {
             gateway_url: "https://mirror.example/redstone".parse().unwrap(),
             data_service_id: "redstone-primary-prod".to_string(),
-        })
-        .unwrap();
+        });
         assert_eq!(
             url.as_str(),
             "https://mirror.example/redstone/data-packages/latest/redstone-primary-prod"
@@ -532,8 +600,7 @@ mod tests {
                 .parse()
                 .unwrap(),
             data_service_id: "redstone-primary-prod".to_string(),
-        })
-        .unwrap();
+        });
         assert_eq!(default.as_str(), "https://oracle-gateway-1.a.redstone.finance/data-packages/latest/redstone-primary-prod");
     }
 

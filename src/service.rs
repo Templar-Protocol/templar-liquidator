@@ -193,7 +193,7 @@ impl std::fmt::Debug for ServiceConfig {
                 &self
                     .redstone_push
                     .as_ref()
-                    .map(|push| push.gateway_url.origin().ascii_serialization()),
+                    .map(|push| push.gateway_url.as_str()),
             )
             .field("lazer_api", &self.lazer_api)
             .field("min_swap_value_usd", &self.min_swap_value_usd)

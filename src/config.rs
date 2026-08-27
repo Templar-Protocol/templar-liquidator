@@ -331,8 +331,10 @@ pub struct Args {
     pub redstone_data_service_id: String,
 
     /// Push RedStone-signed packages to the RedStone adapter before a
-    /// liquidation, for feeds without a Pyth Pro source — nothing else keeps
-    /// those adapters fresh. Same optional-value form as `--dry-run`.
+    /// liquidation, for the feeds the Pyth Pro push cannot refresh: those
+    /// with no Pyth Pro source, and — without a `LAZER_API_TOKEN` — every
+    /// feed. Nothing else keeps those adapters fresh. Same optional-value
+    /// form as `--dry-run`.
     #[arg(
         long,
         env = "REDSTONE_PUSH",
@@ -752,6 +754,18 @@ impl Args {
                     self.redstone_gateway_url.scheme()
                 ));
             }
+            // The endpoint is appended to the URL's path and the URL is
+            // logged in full, so it must carry nothing but origin and path.
+            if !self.redstone_gateway_url.username().is_empty()
+                || self.redstone_gateway_url.password().is_some()
+                || self.redstone_gateway_url.query().is_some()
+                || self.redstone_gateway_url.fragment().is_some()
+            {
+                return Err(
+                    "REDSTONE_GATEWAY_URL must carry no credentials, query or fragment: only an origin and an optional path prefix"
+                        .to_string(),
+                );
+            }
             Some(crate::redstone_push::RedStonePushConfig {
                 gateway_url: self.redstone_gateway_url.clone(),
                 data_service_id: self.redstone_data_service_id.clone(),
@@ -1035,6 +1049,19 @@ mod tests {
             err.contains("REDSTONE_GATEWAY_URL"),
             "names the knob: {err}"
         );
+        for bad in [
+            "https://gw.example/gw?key=abc",
+            "https://gw.example/gw#frag",
+            "https://user:pw@gw.example/gw",
+        ] {
+            let err = parse_with(&["--redstone-gateway-url", bad])
+                .build_config()
+                .expect_err("a query, fragment or credential must be refused");
+            assert!(err.contains("REDSTONE_GATEWAY_URL"), "{bad}: {err}");
+        }
+        parse_with(&["--redstone-gateway-url", "https://mirror.example/redstone"])
+            .build_config()
+            .expect("a path prefix is allowed");
     }
 
     /// `push-check` is a diagnostic mode: it parses like the others, and in

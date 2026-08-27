@@ -55,6 +55,36 @@ pub struct Metrics {
     /// 24-decimal amounts lose low-order precision at the scraper — fine
     /// for the alerting this exists for ("reservations stuck nonzero").
     reserved_by_asset: std::sync::Mutex<std::collections::BTreeMap<String, u128>>,
+    /// Markets admitted at the last registry refresh (liquidators created).
+    markets_registered: AtomicU64,
+    /// Markets filtered out at the last registry refresh, per reason — the
+    /// labelled family `templar_liquidator_markets_filtered{reason=…}`. The
+    /// reasons are a fixed small set chosen in `service.rs`, so the label
+    /// cardinality is bounded. A reason stays in the map at 0 after it stops
+    /// occurring: "oracle" dropping to 0 when the protocol re-points its
+    /// markets is the signal, and a vanished series would read as a gap.
+    filtered_by_reason: std::sync::Mutex<std::collections::BTreeMap<String, u64>>,
+}
+
+/// One registry refresh's count of filtered markets by reason label.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FilterTally(std::collections::BTreeMap<&'static str, u64>);
+
+impl FilterTally {
+    /// Counts one market filtered for `reason` (a fixed label value).
+    pub fn record(&mut self, reason: &'static str) {
+        *self.0.entry(reason).or_insert(0) += 1;
+    }
+
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.0.values().sum()
+    }
+
+    #[must_use]
+    pub fn by_reason(&self) -> &std::collections::BTreeMap<&'static str, u64> {
+        &self.0
+    }
 }
 
 fn now_unix() -> u64 {
@@ -100,6 +130,22 @@ impl Metrics {
             .store(now_unix(), Ordering::Relaxed);
     }
 
+    /// Sets the registry gauges from one refresh: the admitted count and the
+    /// filtered count per reason. Every reason seen before is reset to 0
+    /// first, so a reason that stopped occurring reads 0 rather than
+    /// disappearing.
+    pub fn set_registry_counts(&self, registered: u64, filtered: &FilterTally) {
+        self.markets_registered.store(registered, Ordering::Relaxed);
+        if let Ok(mut map) = self.filtered_by_reason.lock() {
+            for count in map.values_mut() {
+                *count = 0;
+            }
+            for (reason, count) in filtered.by_reason() {
+                map.insert((*reason).to_string(), *count);
+            }
+        }
+    }
+
     /// Sets the reserved-inventory gauge for one asset (raw token units).
     /// Call with the asset's current total whenever a reservation is issued
     /// or settled; zero keeps the series present rather than removing it.
@@ -139,6 +185,22 @@ impl Metrics {
                         out,
                         "templar_liquidator_inventory_reserved_raw{{asset=\"{}\"}} {amount}",
                         escape_label_value(asset)
+                    );
+                }
+            }
+            out
+        };
+        let filtered = {
+            let mut out = String::from(
+                "# HELP templar_liquidator_markets_filtered Markets filtered out at the last registry refresh, per reason.\n# TYPE templar_liquidator_markets_filtered gauge\n",
+            );
+            if let Ok(map) = self.filtered_by_reason.lock() {
+                use std::fmt::Write as _;
+                for (reason, count) in map.iter() {
+                    let _ = writeln!(
+                        out,
+                        "templar_liquidator_markets_filtered{{reason=\"{}\"}} {count}",
+                        escape_label_value(reason)
                     );
                 }
             }
@@ -186,6 +248,12 @@ impl Metrics {
                 self.last_successful_scan_unix.load(Ordering::Relaxed),
             ),
             reserved,
+            g(
+                "markets_registered",
+                "Markets admitted at the last registry refresh.",
+                self.markets_registered.load(Ordering::Relaxed),
+            ),
+            filtered,
         ]
         .concat()
     }
@@ -286,6 +354,49 @@ mod tests {
     fn reserved_family_header_is_present_without_data() {
         let out = Metrics::default().render();
         assert!(out.contains("# TYPE templar_liquidator_inventory_reserved_raw gauge"));
+    }
+
+    /// The registry gauges are set once per refresh: the admitted-market
+    /// count and one labelled line per filter reason. A reason stays in the
+    /// family at 0 after it stops occurring — the "13 markets filtered for
+    /// their oracle" line dropping to 0 when the protocol re-points them is
+    /// the signal, and a vanished series would look like a scrape gap.
+    #[test]
+    fn registry_gauges_render_registered_and_filtered_by_reason() {
+        let m = Metrics::default();
+        let mut tally = FilterTally::default();
+        tally.record("oracle");
+        tally.record("oracle");
+        tally.record("ignored");
+        assert_eq!(tally.total(), 3);
+        m.set_registry_counts(15, &tally);
+        let out = m.render();
+        assert!(out.contains("# TYPE templar_liquidator_markets_registered gauge"));
+        assert!(out.contains("templar_liquidator_markets_registered 15\n"));
+        assert!(out.contains("# TYPE templar_liquidator_markets_filtered gauge"));
+        assert!(out.contains(r#"templar_liquidator_markets_filtered{reason="oracle"} 2"#));
+        assert!(out.contains(r#"templar_liquidator_markets_filtered{reason="ignored"} 1"#));
+
+        let mut later = FilterTally::default();
+        later.record("ignored");
+        m.set_registry_counts(28, &later);
+        let out = m.render();
+        assert!(out.contains("templar_liquidator_markets_registered 28\n"));
+        assert!(
+            out.contains(r#"templar_liquidator_markets_filtered{reason="oracle"} 0"#),
+            "{out}"
+        );
+        assert!(out.contains(r#"templar_liquidator_markets_filtered{reason="ignored"} 1"#));
+    }
+
+    /// Both families carry their headers before the first refresh, so a
+    /// scrape of a freshly started process sees the series exist.
+    #[test]
+    fn registry_families_have_headers_without_data() {
+        let out = Metrics::default().render();
+        assert!(out.contains("# TYPE templar_liquidator_markets_registered gauge"));
+        assert!(out.contains("templar_liquidator_markets_registered 0\n"));
+        assert!(out.contains("# TYPE templar_liquidator_markets_filtered gauge"));
     }
 
     #[test]

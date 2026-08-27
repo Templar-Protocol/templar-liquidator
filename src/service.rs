@@ -950,6 +950,10 @@ impl LiquidatorService {
                 templar_common::market::MarketConfiguration,
                 crate::scanner::MarketVersion,
             )> = Vec::new();
+            // Why each deployment was not admitted, for the per-refresh
+            // summary and the `markets_filtered{reason=…}` gauge. Labels
+            // are this fixed set; the free-text cause stays in the log line.
+            let mut filtered = crate::metrics::FilterTally::default();
             for market in &all_markets {
                 // Step 0: admission by allow/deny lists, before any RPC calls
                 if let Some(reason) = market_rejection_reason(
@@ -962,6 +966,7 @@ impl LiquidatorService {
                         reason,
                         "Market filtered out"
                     );
+                    filtered.record("ignored");
                     continue;
                 }
 
@@ -988,12 +993,14 @@ impl LiquidatorService {
                                 deployment = %market,
                                 "Skipping non-market deployment (no get_configuration method)"
                             );
+                            filtered.record("not-a-market");
                         } else {
                             tracing::warn!(
                                 market = %market,
                                 error = %e,
                                 "Failed to fetch market configuration, skipping"
                             );
+                            filtered.record("config-read-error");
                         }
                         continue;
                     }
@@ -1015,12 +1022,14 @@ impl LiquidatorService {
                                 market = %market,
                                 "Contract missing NEP-330 metadata, skipping"
                             );
+                            filtered.record("version");
                         } else {
                             tracing::warn!(
                                 market = %market,
                                 error = %e,
                                 "Failed to read contract version, skipping until next refresh"
                             );
+                            filtered.record("version-read-error");
                         }
                         continue;
                     }
@@ -1031,6 +1040,7 @@ impl LiquidatorService {
                         version = %version_string,
                         "Invalid semver format, skipping"
                     );
+                    filtered.record("version");
                     continue;
                 };
                 if version < crate::scanner::MarketVersion::MIN_SUPPORTED {
@@ -1040,6 +1050,7 @@ impl LiquidatorService {
                         min_required = %crate::scanner::MarketVersion::MIN_SUPPORTED,
                         "Skipping market - unsupported version"
                     );
+                    filtered.record("version");
                     continue;
                 }
 
@@ -1070,6 +1081,7 @@ impl LiquidatorService {
                             reason,
                             "Market filtered out"
                         );
+                        filtered.record("oracle");
                         continue;
                     }
                     Err(e) => {
@@ -1079,6 +1091,7 @@ impl LiquidatorService {
                             error = %e,
                             "Failed to probe the market's oracle, skipping until next refresh"
                         );
+                        filtered.record("oracle-probe-error");
                         continue;
                     }
                 }
@@ -1095,6 +1108,7 @@ impl LiquidatorService {
                         reason = filter_reason.unwrap_or_default(),
                         "Market filtered out"
                     );
+                    filtered.record("asset-filter");
                 }
             }
 
@@ -1148,6 +1162,25 @@ impl LiquidatorService {
 
                 supported_markets.insert(market, liquidator);
             }
+
+            // One line per refresh with the outcome and its breakdown; the same
+
+            // numbers feed the `markets_registered` / `markets_filtered` gauges.
+
+            self.metrics
+                .set_registry_counts(supported_markets.len() as u64, &filtered);
+
+            tracing::info!(
+
+                registered = supported_markets.len(),
+
+                filtered = filtered.total(),
+
+                by_reason = ?filtered.by_reason(),
+
+                "Registry refresh summary"
+
+            );
 
             self.markets = supported_markets;
 

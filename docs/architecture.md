@@ -79,7 +79,7 @@ External I/O crosses two boundaries: NEAR RPC / contract calls (registry, market
 
 **`notifier.rs`** — notifications; the notification extension seam: the `NotificationChannel` trait (`send(&self, text)`; Telegram is the shipped implementation) behind a shell that owns failure dedup, the in-flight semaphore, and `drain()` — a fork's channel implements the trait and plugs into `Notifier::with_channel`.
 
-**`metrics.rs`** — dependency-free Prometheus text-format metrics (counters, gauges, and labelled families — `templar_liquidator_inventory_reserved_raw{asset=…}` tracks live per-asset reservations), with `# HELP`/`# TYPE` lines, process-lifetime, exposed via `http.rs`.
+**`metrics.rs`** — dependency-free Prometheus text-format metrics (counters, gauges, and labelled families — `templar_liquidator_inventory_reserved_raw{asset=…}` tracks live per-asset reservations, `templar_liquidator_markets_filtered{reason=…}` and `templar_liquidator_markets_registered` are set at every registry refresh from a fixed reason set), with `# HELP`/`# TYPE` lines, process-lifetime, exposed via `http.rs`.
 
 **`http.rs`** — the optional operational HTTP surface (`GET /healthz`, `GET /metrics`), started only when `HTTP_PORT` is set and never in `RUN_MODE=once`.
 

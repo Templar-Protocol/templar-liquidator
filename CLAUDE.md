@@ -104,7 +104,8 @@ One line per file in `src/`:
   `NotificationChannel` trait (Telegram is the shipped impl) behind a shell
   that owns dedup, the in-flight semaphore, and `drain()`.
 - `metrics.rs` — dependency-free Prometheus text-format counters/gauges
-  with `# HELP` lines and labelled families (per-asset reserved gauge),
+  with `# HELP` lines and labelled families (per-asset reserved gauge,
+  per-reason filtered-markets gauge set at each registry refresh),
   process-lifetime, exposed via `http.rs`.
 - `http.rs` — optional `GET /healthz` (readiness, not liveness) and
   `GET /metrics`; only started when `HTTP_PORT` is set, never in

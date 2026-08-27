@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-27
+
 ### Removed
 
 - [**breaking**] Pyth Core (Hermes): the scan-side Hermes fetch, the Pyth Core VAA push, the LST-over-Hermes path, and `PYTH_HERMES_URL` / `--hermes-url` (the flag is rejected at startup; the env var is ignored). Pyth Core no longer supports NEAR from 2026-08-26 16:00 UTC: the upgraded Hermes payloads are signed by Pyth's routers inside a Wormhole-shaped envelope that `pyth-oracle.near` can never verify, so no NEAR contract can consume Pyth Core any more (Hermes itself is authenticated now — the same Pyth API key as `LAZER_API_TOKEN` — not deprecated). Pyth Core is therefore no longer integrated — a Pyth Core source contributes no scan-side price and is not pushed. Direct-Pyth and LST oracles are filtered at registration with a reason naming the cutover and the fix (re-pointing the market to a proxy oracle); a re-pointed market is picked up automatically at the next registry refresh.

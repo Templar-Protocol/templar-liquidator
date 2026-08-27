@@ -774,17 +774,20 @@ impl Args {
             None
         };
 
-        // A live push-check without the Pyth Pro token would push nothing
-        // and then "verify" it — refuse rather than report a hollow pass.
+        // A live push-check with no push leg at all would push nothing and
+        // then "verify" it — refuse rather than report a hollow pass. Either
+        // leg suffices: the Pyth Pro token, or the RedStone leg (on by
+        // default), which is what a RedStone-only market is checked with.
         if self.effective_run_mode() == RunMode::PushCheck
             && !self.dry_run
             && self
                 .lazer_api_token
                 .as_deref()
                 .is_none_or(|token| token.trim().is_empty())
+            && redstone_push.is_none()
         {
             return Err(
-                "RUN_MODE=push-check with DRY_RUN=false needs LAZER_API_TOKEN: without the Pyth Pro token there is nothing to push, so the check would prove nothing"
+                "RUN_MODE=push-check with DRY_RUN=false needs a push leg: set LAZER_API_TOKEN (Pyth Pro) or leave REDSTONE_PUSH=true (RedStone); with neither there is nothing to push, so the check would prove nothing"
                     .to_string(),
             );
         }
@@ -1065,21 +1068,33 @@ mod tests {
     }
 
     /// `push-check` is a diagnostic mode: it parses like the others, and in
-    /// live mode it needs the Pyth Pro token — without one there is nothing
-    /// to push, so "checking" the push would be a lie; dry-run only reads.
+    /// live mode it needs at least one push leg — the Pyth Pro token, or the
+    /// RedStone leg (on by default) — since with neither there is nothing to
+    /// push and "checking" the push would be a lie; dry-run only reads.
     #[test]
-    fn push_check_mode_parses_and_refuses_live_without_the_pyth_pro_token() {
+    fn push_check_mode_parses_and_refuses_live_without_a_push_leg() {
         let config = parse_with(&["--run-mode", "push-check"])
             .build_config()
             .expect("dry-run push-check needs no token");
         assert_eq!(config.run_mode, RunMode::PushCheck);
 
-        let err = parse_with(&["--run-mode", "push-check", "--dry-run=false"])
+        parse_with(&["--run-mode", "push-check", "--dry-run=false"])
             .build_config()
-            .expect_err("live push-check without a token must refuse to start");
+            .expect("tokenless live push-check runs on the RedStone leg alone");
+
+        let err = parse_with(&[
+            "--run-mode",
+            "push-check",
+            "--dry-run=false",
+            "--redstone-push=false",
+        ])
+        .build_config()
+        .expect_err("live push-check with no push leg must refuse to start");
         assert!(
-            err.contains("LAZER_API_TOKEN") && err.contains("push-check"),
-            "names the knob and the mode: {err}"
+            err.contains("LAZER_API_TOKEN")
+                && err.contains("REDSTONE_PUSH")
+                && err.contains("push-check"),
+            "names both knobs and the mode: {err}"
         );
 
         parse_with(&[

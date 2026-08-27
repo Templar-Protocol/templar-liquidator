@@ -16,8 +16,10 @@
 //! pushes fresh Pyth Pro payloads to each Pyth Pro–sourced adapter and
 //! re-aggregates the proxy ([`OracleFetcher::update_onchain_prices`]); the
 //! market contract then reads its own on-chain oracle. RedStone adapters are
-//! pushed by the RedStone leg ([`crate::redstone_push`]) for feeds without a
-//! Pyth Pro source — nothing else keeps those adapters fresh.
+//! pushed by the RedStone leg ([`crate::redstone_push`]) for the feeds the
+//! Pyth Pro push cannot refresh — those without a Pyth Pro source, and every
+//! feed when no Pyth Pro push is available — nothing else keeps those
+//! adapters fresh.
 
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
@@ -286,18 +288,23 @@ pub struct OracleFetcher {
     /// RedStone push leg: `None` when disabled (`REDSTONE_PUSH=false`) or
     /// when its no-redirect client could not be built.
     redstone_push: Option<crate::redstone_push::RedStonePushClient>,
-    /// Last successful RedStone write per (adapter, feed) — see
-    /// [`RedStonePushMemo`].
+    /// Last successful RedStone write, or in-flight reservation, per
+    /// (adapter, feed) — see [`RedStonePushMemo`].
     redstone_push_memo: RedStonePushMemo,
 }
 
 /// A RedStone feed id as the adapter and the proxy sources name it.
 pub(crate) type RedStoneFeedId = templar_common::oracle::redstone::FeedId;
 
-/// Shared memo of the last successful RedStone write per (adapter, feed),
-/// so a market round with several positions — or several markets on one
-/// adapter — does not resubmit inside the adapter's minimum interval and
-/// burn gas on writes the contract rejects.
+/// Shared memo per (adapter, feed) of the last successful RedStone write —
+/// or of an in-flight reservation, taken when a push finds the feed due and
+/// released if the build or write fails — so a market round with several
+/// positions, or several markets on one adapter, does not resubmit inside
+/// the adapter's minimum interval and burn gas on writes the contract
+/// rejects. A push future dropped between reserve and release leaves its
+/// entry behind; the cost is bounded — the refresh is suppressed for at most
+/// one `min_interval_between_updates_ms` — and equals what the rejected
+/// duplicate write would have cost in delay, without the gas.
 pub type RedStonePushMemo =
     std::sync::Arc<std::sync::Mutex<HashMap<(AccountId, RedStoneFeedId), std::time::Instant>>>;
 
@@ -565,7 +572,17 @@ impl OracleFetcher {
             .await
         {
             Ok(result) if result.operation.status == OperationStatus::Succeeded => {
-                // The reservation taken above stands as the write's timestamp.
+                // Refresh the reservation to the time the write landed: the
+                // adapter's interval runs from the write, not from the
+                // moment the feed was found due.
+                let landed = std::time::Instant::now();
+                let mut memo = self
+                    .redstone_push_memo
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for feed in &due {
+                    memo.insert((adapter.clone(), feed.clone()), landed);
+                }
                 tracing::info!(%adapter, feeds = ?names, operation_id = %result.operation.id.0, "Pushed RedStone prices");
                 true
             }

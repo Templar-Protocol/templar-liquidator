@@ -222,8 +222,9 @@ RUN_MODE=push-check DRY_RUN=false ALLOWED_MARKETS=ibtc-ixlmusdc.v1.tmplr.near ./
 
 Each market logs one line with `before` / `after` ages per feed, `pushed`,
 and the `verdict`; the run ends with a `push-check completed` summary. Live
-mode needs the signer key and `LAZER_API_TOKEN` (refused at startup
-otherwise). Use `ALLOWED_MARKETS` to bound what gets pushed; without it
+mode needs the signer key and at least one push leg — `LAZER_API_TOKEN` for
+Pyth Pro, or `REDSTONE_PUSH` (on by default) for RedStone; with neither it
+is refused at startup. Use `ALLOWED_MARKETS` to bound what gets pushed; without it
 every admitted market is checked. The two freshness reads are the crate's
 only on-chain price reads and exist for this mode alone — scan pricing stays
 off-chain.

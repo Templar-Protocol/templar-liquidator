@@ -15,7 +15,7 @@ running:
 ```bash
 cp .env.example .env
 nano .env  # fill in the three required vars below
-docker run --env-file .env ghcr.io/templar-protocol/templar-liquidator:0.2.0
+docker run --env-file .env ghcr.io/templar-protocol/templar-liquidator:1.0.0
 ```
 
 Or build and run locally with Docker Compose:

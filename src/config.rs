@@ -48,6 +48,14 @@ pub enum RunMode {
     /// One registry refresh + one liquidation round, then exit.
     /// For cron / Cloud Run Jobs / K8s CronJob deployments.
     Once,
+    /// Diagnostic: one registry refresh, then for every admitted market push
+    /// prices on-chain (live mode only) and report whether its oracle reads
+    /// fresh — proves the push path without a liquidation. Exit 0 only when
+    /// this process's push succeeded and every market then read fresh
+    /// (live), or after a successful non-empty refresh in dry-run, which
+    /// only reads and reports; a failed or empty registry refresh exits 1
+    /// in both.
+    PushCheck,
 }
 
 /// Rejects zero at the config boundary: a `0`-attempt retry loop never runs
@@ -752,6 +760,21 @@ impl Args {
             None
         };
 
+        // A live push-check without the Pyth Pro token would push nothing
+        // and then "verify" it — refuse rather than report a hollow pass.
+        if self.effective_run_mode() == RunMode::PushCheck
+            && !self.dry_run
+            && self
+                .lazer_api_token
+                .as_deref()
+                .is_none_or(|token| token.trim().is_empty())
+        {
+            return Err(
+                "RUN_MODE=push-check with DRY_RUN=false needs LAZER_API_TOKEN: without the Pyth Pro token there is nothing to push, so the check would prove nothing"
+                    .to_string(),
+            );
+        }
+
         // The Pyth Pro on-chain push source shares LAZER_API_TOKEN with the
         // scan-side API leg. The gateway constructor enforces wss:// and a
         // non-empty token; its error variants are static text (no input
@@ -1012,6 +1035,35 @@ mod tests {
             err.contains("REDSTONE_GATEWAY_URL"),
             "names the knob: {err}"
         );
+    }
+
+    /// `push-check` is a diagnostic mode: it parses like the others, and in
+    /// live mode it needs the Pyth Pro token — without one there is nothing
+    /// to push, so "checking" the push would be a lie; dry-run only reads.
+    #[test]
+    fn push_check_mode_parses_and_refuses_live_without_the_pyth_pro_token() {
+        let config = parse_with(&["--run-mode", "push-check"])
+            .build_config()
+            .expect("dry-run push-check needs no token");
+        assert_eq!(config.run_mode, RunMode::PushCheck);
+
+        let err = parse_with(&["--run-mode", "push-check", "--dry-run=false"])
+            .build_config()
+            .expect_err("live push-check without a token must refuse to start");
+        assert!(
+            err.contains("LAZER_API_TOKEN") && err.contains("push-check"),
+            "names the knob and the mode: {err}"
+        );
+
+        parse_with(&[
+            "--run-mode",
+            "push-check",
+            "--dry-run=false",
+            "--lazer-api-token",
+            "t",
+        ])
+        .build_config()
+        .expect("live push-check with a token starts");
     }
 
     #[test]

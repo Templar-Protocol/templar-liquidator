@@ -8,7 +8,7 @@ This document maps the module graph in [`src/`](../src/) and the data that flows
 flowchart TD
     Main["main.rs<br/>entry point: tracing, Args::parse, run"]
     Config["config.rs<br/>Args (clap) → ServiceConfig"]
-    Service["service.rs<br/>LiquidatorService: run() / run_once()"]
+    Service["service.rs<br/>LiquidatorService: run() / run_once() / run_push_check()"]
 
     Main --> Config --> Service
 

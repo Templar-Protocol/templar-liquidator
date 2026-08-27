@@ -149,7 +149,7 @@ Full reference (every env var / CLI flag, defaults, precedence rules): [docs/con
 | `NEAR_NETWORK` | `testnet` | `mainnet` or `testnet` |
 | `NEAR_RPC_URL` | network default | Custom RPC endpoint (recommended for mainnet — see [FAQ](#faq)) |
 | `DRY_RUN` | `true` | Simulate only; set to exactly `false` to go live |
-| `RUN_MODE` | `loop` | `loop` (continuous) or `once` (single cycle, for cron/Cloud Run) |
+| `RUN_MODE` | `loop` | `loop` (continuous), `once` (single cycle, for cron/Cloud Run), or `push-check` (diagnostic: push prices and report oracle freshness, no liquidation) |
 | `MIN_PROFIT_BPS` | `50` | Minimum profit margin (basis points) to attempt a liquidation |
 | `PARTIAL_LIQUIDATION_PERCENTAGE` / `FIXED_LIQUIDATION_AMOUNT_USD` | 100% if neither set | Sizing strategy (mutually exclusive) |
 | `COLLATERAL_STRATEGY` | `hold` | `hold` or `swap-to-borrow` |
@@ -169,7 +169,7 @@ When `HTTP_PORT` is set, the bot serves:
 
 Neither endpoint is authenticated — anyone who can reach the port can read them. Note that the per-asset reserved gauge makes `/metrics` more sensitive than the process-lifetime counters alone: it signals, in real time and ahead of the transaction being observable on-chain, that a repay of a specific size is in flight — if you previously opted into remote scraping, re-evaluate with that in mind. `HTTP_BIND_ADDR` defaults to `127.0.0.1`, and `docker-compose.yml`/`docker-compose.prod.yml` publish the container port to `127.0.0.1` on the host too, so out of the box this surface isn't reachable from anywhere but the host itself. It is **not** inherently private, though: exposing it to another machine (a Prometheus scraper on your network, say) is a deliberate two-part opt-in — set `HTTP_BIND_ADDR=0.0.0.0` (or the specific interface you want) *and* change the Compose port mapping's host side away from `127.0.0.1` — and once you do, put it behind your own network controls (private network, VPN, reverse-proxy auth), since the bot doesn't add any of its own. See [docs/configuration.md](docs/configuration.md#observability) for both knobs and [docs/deploy-vm.md](docs/deploy-vm.md) for why a host firewall rule alone isn't a substitute for keeping the Compose binding on loopback.
 
-Both endpoints are inert in `RUN_MODE=once` — a single-cycle run exits before anything could scrape them.
+Both endpoints are inert in `RUN_MODE=once` and `push-check` — a single-cycle run exits before anything could scrape them.
 
 ## Deployment
 

@@ -640,6 +640,48 @@ impl OracleFetcher {
         Ok(any_updated)
     }
 
+    /// Reads the proxy's cached EMA publish times through the same
+    /// `list_ema_prices_no_older_than` view the market contract reads, with
+    /// a wide bound so age is measured rather than filtered. This is the one
+    /// on-chain price read in the crate and it is a diagnostic
+    /// (`RUN_MODE=push-check`), never scan pricing: it shows what the market
+    /// would see, before and after a push. A feed the proxy has never cached
+    /// comes back as `None`.
+    ///
+    /// # Errors
+    ///
+    /// The view call failing (transport, or the contract rejecting the
+    /// call) is a [`LiquidatorError::PriceFetchError`].
+    pub async fn onchain_publish_times(
+        &self,
+        oracle: &AccountId,
+        price_ids: &[PriceIdentifier],
+    ) -> LiquidatorResult<HashMap<PriceIdentifier, Option<i64>>> {
+        // Ten years: wide enough that the view never filters, small enough
+        // that the contract's seconds→nanoseconds conversion cannot overflow.
+        const WIDE_BOUND_SECS: u64 = 10 * 365 * 24 * 60 * 60;
+        let args = near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
+            "price_ids": price_ids,
+            "age": WIDE_BOUND_SECS,
+        }))
+        .map_err(|error| LiquidatorError::PriceFetchError(RpcError::DeserializeError(error)))?;
+        let result = self
+            .client
+            .read(contract::ViewFunction {
+                contract_id: oracle.clone(),
+                method_name: ContractMethodName("list_ema_prices_no_older_than".to_string()),
+                args: ContractArgs::Raw(Base64Bytes(args)),
+            })
+            .await
+            .map_err(|error| LiquidatorError::PriceFetchError(error.into()))?;
+        let response: OracleResponse = near_sdk::serde_json::from_value(result.value)
+            .map_err(|error| LiquidatorError::PriceFetchError(RpcError::DeserializeError(error)))?;
+        Ok(response
+            .into_iter()
+            .map(|(id, price)| (id, price.map(|price| price.publish_time.as_secs())))
+            .collect())
+    }
+
     /// Refreshes a proxy oracle cache by invoking its on-chain `update_prices` flow.
     ///
     /// Best-effort: the gateway write returns only the operation status, not the
@@ -1153,6 +1195,43 @@ mod tests {
             &mut tokenless,
         );
         assert!(tokenless[&adapter].contains(&RedStoneFeedId::from("LTC")));
+    }
+
+    /// The push-check freshness read goes through the proxy's own
+    /// `list_ema_prices_no_older_than` view with a wide bound, so what the
+    /// operator sees is exactly what the market would read; a feed the proxy
+    /// has never cached comes back as `None`, not as an error.
+    #[tokio::test]
+    async fn onchain_publish_times_read_the_proxy_cache() {
+        let a = PriceIdentifier([0xAA; 32]);
+        let b = PriceIdentifier([0xBB; 32]);
+        let view = format!(
+            r#"{{"{}":{{"price":"7887689348217","conf":"2256651783","expo":-8,"publish_time":1787699242}},"{}":null}}"#,
+            hex::encode(a.0),
+            hex::encode(b.0)
+        );
+        let bytes: Vec<String> = view.bytes().map(|x| x.to_string()).collect();
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":"x","result":{{"result":[{}],"logs":[],"block_height":1,"block_hash":"11111111111111111111111111111111"}}}}"#,
+            bytes.join(",")
+        );
+        let (url, requests) = crate::rpc::test_support::scripted_server(vec![(200, body)]).await;
+        let fetcher = crate::rpc::test_support::oracle_fetcher_for(url.as_str());
+
+        let times = fetcher
+            .onchain_publish_times(&"proxy.test.near".parse().unwrap(), &[a, b])
+            .await
+            .expect("view read succeeds");
+
+        assert_eq!(times.get(&a), Some(&Some(1_787_699_242)));
+        assert_eq!(times.get(&b), Some(&None));
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].contains(r#""method_name":"list_ema_prices_no_older_than""#),
+            "{}",
+            sent[0]
+        );
     }
 
     use templar_proxy_oracle_near_common::{

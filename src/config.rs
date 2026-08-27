@@ -312,6 +312,39 @@ pub struct Args {
     )]
     pub redstone_api_url: Url,
 
+    /// RedStone data-package gateway the RedStone push leg fetches signed
+    /// packages from (public, no key). Must be `https`.
+    #[arg(
+        long,
+        env = "REDSTONE_GATEWAY_URL",
+        default_value = "https://oracle-gateway-1.a.redstone.finance"
+    )]
+    pub redstone_gateway_url: Url,
+
+    /// RedStone data-service id whose signer set the adapters are configured
+    /// with; packages from any other service are rejected on-chain.
+    #[arg(
+        long,
+        env = "REDSTONE_DATA_SERVICE_ID",
+        default_value = "redstone-primary-prod"
+    )]
+    pub redstone_data_service_id: String,
+
+    /// Push RedStone-signed packages to the RedStone adapter before a
+    /// liquidation, for the feeds the Pyth Pro push cannot refresh: those
+    /// with no Pyth Pro source, and — without a `LAZER_API_TOKEN` — every
+    /// feed. Nothing else keeps those adapters fresh. Same optional-value
+    /// form as `--dry-run`.
+    #[arg(
+        long,
+        env = "REDSTONE_PUSH",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_value_t = true,
+        default_missing_value = "true"
+    )]
+    pub redstone_push: bool,
+
     /// Lazer (Pyth Pro) price API, used to compose Lazer-sourced
     /// proxy-oracle prices off-chain at scan time. Only used when
     /// `LAZER_API_TOKEN` is set — Lazer has no anonymous tier — and must be
@@ -455,6 +488,9 @@ impl std::fmt::Debug for Args {
                 &self.lazer_ws_url.origin().ascii_serialization(),
             )
             .field("redstone_api_url", &self.redstone_api_url)
+            .field("redstone_gateway_url", &self.redstone_gateway_url)
+            .field("redstone_data_service_id", &self.redstone_data_service_id)
+            .field("redstone_push", &self.redstone_push)
             .field(
                 "lazer_api_url",
                 &self.lazer_api_url.origin().ascii_serialization(),
@@ -711,17 +747,47 @@ impl Args {
 
         let signer_key = ValidatedSignerKey::try_from(self.signer_key.as_str())?;
 
-        // A live push-check without the Pyth Pro token would push nothing
-        // and then "verify" it — refuse rather than report a hollow pass.
+        let redstone_push = if self.redstone_push {
+            if self.redstone_gateway_url.scheme() != "https" {
+                return Err(format!(
+                    "REDSTONE_GATEWAY_URL must be https (got scheme '{}'): the packages are signed, but the gateway decides which feed set the bot submits",
+                    self.redstone_gateway_url.scheme()
+                ));
+            }
+            // The endpoint is appended to the URL's path and the URL is
+            // logged in full, so it must carry nothing but origin and path.
+            if !self.redstone_gateway_url.username().is_empty()
+                || self.redstone_gateway_url.password().is_some()
+                || self.redstone_gateway_url.query().is_some()
+                || self.redstone_gateway_url.fragment().is_some()
+            {
+                return Err(
+                    "REDSTONE_GATEWAY_URL must carry no credentials, query or fragment: only an origin and an optional path prefix"
+                        .to_string(),
+                );
+            }
+            Some(crate::redstone_push::RedStonePushConfig {
+                gateway_url: self.redstone_gateway_url.clone(),
+                data_service_id: self.redstone_data_service_id.clone(),
+            })
+        } else {
+            None
+        };
+
+        // A live push-check with no push leg at all would push nothing and
+        // then "verify" it — refuse rather than report a hollow pass. Either
+        // leg suffices: the Pyth Pro token, or the RedStone leg (on by
+        // default), which is what a RedStone-only market is checked with.
         if self.effective_run_mode() == RunMode::PushCheck
             && !self.dry_run
             && self
                 .lazer_api_token
                 .as_deref()
                 .is_none_or(|token| token.trim().is_empty())
+            && redstone_push.is_none()
         {
             return Err(
-                "RUN_MODE=push-check with DRY_RUN=false needs LAZER_API_TOKEN: without the Pyth Pro token there is nothing to push, so the check would prove nothing"
+                "RUN_MODE=push-check with DRY_RUN=false needs a push leg: set LAZER_API_TOKEN (Pyth Pro) or leave REDSTONE_PUSH=true (RedStone); with neither there is nothing to push, so the check would prove nothing"
                     .to_string(),
             );
         }
@@ -787,6 +853,7 @@ impl Args {
             lazer_ws_url: self.lazer_ws_url.clone(),
             pyth_pro_source,
             redstone_api_url: self.redstone_api_url.clone(),
+            redstone_push,
             // The config type's constructor enforces HTTPS — a bearer token
             // over plain http travels in cleartext. Refused at startup,
             // where the operator sees it, rather than leaking the credential
@@ -877,6 +944,11 @@ mod tests {
                 .parse()
                 .expect("valid ws url"),
             redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
+            redstone_gateway_url: "https://oracle-gateway-1.a.redstone.finance"
+                .parse()
+                .unwrap(),
+            redstone_data_service_id: "redstone-primary-prod".to_string(),
+            redstone_push: true,
             lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
             lazer_api_token: None,
             min_swap_value_usd: 10.0,
@@ -954,22 +1026,75 @@ mod tests {
         assert_eq!(declared_default("once"), ["false"]);
     }
 
-    /// `push-check` is a diagnostic mode: it parses like the others, and in
-    /// live mode it needs the Pyth Pro token — without one there is nothing
-    /// to push, so "checking" the push would be a lie; dry-run only reads.
+    /// The RedStone push leg is on by default against RedStone's public
+    /// gateway, can be switched off, and refuses a cleartext gateway: the
+    /// packages are signed, but the URL still decides which server's view
+    /// of the feed set the bot submits.
     #[test]
-    fn push_check_mode_parses_and_refuses_live_without_the_pyth_pro_token() {
+    fn redstone_push_defaults_on_can_be_disabled_and_requires_https() {
+        let config = parse_with(&[]).build_config().expect("valid test config");
+        let push = config.redstone_push.expect("on by default");
+        assert_eq!(
+            push.gateway_url.as_str(),
+            "https://oracle-gateway-1.a.redstone.finance/"
+        );
+        assert_eq!(push.data_service_id, "redstone-primary-prod");
+
+        let off = parse_with(&["--redstone-push=false"])
+            .build_config()
+            .unwrap();
+        assert!(off.redstone_push.is_none());
+
+        let err = parse_with(&["--redstone-gateway-url", "http://gw.example"])
+            .build_config()
+            .expect_err("plain http must be refused");
+        assert!(
+            err.contains("REDSTONE_GATEWAY_URL"),
+            "names the knob: {err}"
+        );
+        for bad in [
+            "https://gw.example/gw?key=abc",
+            "https://gw.example/gw#frag",
+            "https://user:pw@gw.example/gw",
+        ] {
+            let err = parse_with(&["--redstone-gateway-url", bad])
+                .build_config()
+                .expect_err("a query, fragment or credential must be refused");
+            assert!(err.contains("REDSTONE_GATEWAY_URL"), "{bad}: {err}");
+        }
+        parse_with(&["--redstone-gateway-url", "https://mirror.example/redstone"])
+            .build_config()
+            .expect("a path prefix is allowed");
+    }
+
+    /// `push-check` is a diagnostic mode: it parses like the others, and in
+    /// live mode it needs at least one push leg — the Pyth Pro token, or the
+    /// RedStone leg (on by default) — since with neither there is nothing to
+    /// push and "checking" the push would be a lie; dry-run only reads.
+    #[test]
+    fn push_check_mode_parses_and_refuses_live_without_a_push_leg() {
         let config = parse_with(&["--run-mode", "push-check"])
             .build_config()
             .expect("dry-run push-check needs no token");
         assert_eq!(config.run_mode, RunMode::PushCheck);
 
-        let err = parse_with(&["--run-mode", "push-check", "--dry-run=false"])
+        parse_with(&["--run-mode", "push-check", "--dry-run=false"])
             .build_config()
-            .expect_err("live push-check without a token must refuse to start");
+            .expect("tokenless live push-check runs on the RedStone leg alone");
+
+        let err = parse_with(&[
+            "--run-mode",
+            "push-check",
+            "--dry-run=false",
+            "--redstone-push=false",
+        ])
+        .build_config()
+        .expect_err("live push-check with no push leg must refuse to start");
         assert!(
-            err.contains("LAZER_API_TOKEN") && err.contains("push-check"),
-            "names the knob and the mode: {err}"
+            err.contains("LAZER_API_TOKEN")
+                && err.contains("REDSTONE_PUSH")
+                && err.contains("push-check"),
+            "names both knobs and the mode: {err}"
         );
 
         parse_with(&[
@@ -1508,22 +1633,19 @@ mod tests {
         );
     }
 
-    /// Both knobs were documented no-ops (nothing consumed either value), so
-    /// they are gone rather than silently accepted — a removed flag must fail
-    /// startup loudly, not swallow an operator's intent.
+    /// A documented no-op knob (nothing consumed the value) is gone rather
+    /// than silently accepted — a removed flag must fail startup loudly, not
+    /// swallow an operator's intent. (`--redstone-gateway-url` left the same
+    /// way and returned with a real function: the RedStone push leg.)
     #[test]
     fn removed_knobs_are_rejected_at_parse_time() {
-        for args in [
-            &["--transaction-timeout", "60"][..],
-            &["--redstone-gateway-url", "https://example.com"][..],
-        ] {
-            let err = try_parse_with(args).expect_err("removed flag must be rejected");
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::UnknownArgument,
-                "{args:?}"
-            );
-        }
+        let args = ["--transaction-timeout", "60"];
+        let err = try_parse_with(&args).expect_err("removed flag must be rejected");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
 
     /// Hermes is gone: the knob is rejected like the other removed knobs, so

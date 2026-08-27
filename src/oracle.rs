@@ -16,7 +16,10 @@
 //! pushes fresh Pyth Pro payloads to each Pyth Pro–sourced adapter and
 //! re-aggregates the proxy ([`OracleFetcher::update_onchain_prices`]); the
 //! market contract then reads its own on-chain oracle. RedStone adapters are
-//! relayer-pushed, not pushed by this bot.
+//! pushed by the RedStone leg ([`crate::redstone_push`]) for the feeds the
+//! Pyth Pro push cannot refresh — those without a Pyth Pro source, and every
+//! feed when no Pyth Pro push is available — nothing else keeps those
+//! adapters fresh.
 
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
@@ -26,7 +29,7 @@ use templar_common::{
 };
 use templar_gateway_client::SigningClient;
 use templar_gateway_core::GatewayContext;
-use templar_gateway_methods_spec::{contract, proxy_oracle};
+use templar_gateway_methods_spec::{contract, proxy_oracle, redstone};
 use templar_gateway_oracle_updates_dispatch::{Dispatch as OracleUpdatesDispatch, WithLazerSource};
 use templar_gateway_oracle_updates_spec::oracle as oracle_updates;
 use templar_gateway_types::{
@@ -37,7 +40,6 @@ use templar_proxy_oracle_near_common::{
     price_transformer::{Action, Call},
     request::OracleRequest,
 };
-use url::Url;
 
 use crate::{
     rpc::{gateway_is_method_not_found, RpcError},
@@ -221,6 +223,40 @@ pub(crate) fn offchain_admission(
 pub type PythProUpdatesClient =
     SigningClient<OracleUpdatesDispatch, WithLazerSource<GatewayContext>>;
 
+/// Collects one feed's RedStone adapters and feed ids — only when the Pyth
+/// Pro push cannot refresh the feed: it has no Pyth Pro source, or the Pyth
+/// Pro push is not available (no `LAZER_API_TOKEN`). A feed the Pyth Pro
+/// push does refresh is skipped: the proxy aggregates from one fresh source
+/// (`min_sources` 1), so a RedStone push there would cost a transaction for
+/// nothing. Transformers are unwrapped.
+pub(crate) fn collect_redstone_targets_for_feed<'a>(
+    sources: impl Iterator<Item = &'a Source>,
+    pyth_pro_push_available: bool,
+    targets: &mut HashMap<AccountId, std::collections::BTreeSet<RedStoneFeedId>>,
+) {
+    let requests: Vec<&OracleRequest> = sources
+        .map(|source| match source {
+            Source::Request(request) => request,
+            Source::Transformer(transformer) => &transformer.request,
+        })
+        .collect();
+    if pyth_pro_push_available
+        && requests
+            .iter()
+            .any(|request| matches!(request, OracleRequest::Lazer(_)))
+    {
+        return;
+    }
+    for request in requests {
+        if let OracleRequest::RedStone(req) = request {
+            targets
+                .entry(req.oracle_id.clone())
+                .or_default()
+                .insert(req.price_id.clone());
+        }
+    }
+}
+
 /// Shared cache of detected proxy oracle accounts.
 pub type ProxyOracleCache =
     std::sync::Arc<tokio::sync::RwLock<std::collections::HashSet<AccountId>>>;
@@ -249,6 +285,34 @@ pub struct OracleFetcher {
     /// registration. The config type's constructor enforces HTTPS, so this
     /// client can never send the bearer token over cleartext.
     lazer_api: Option<crate::lazer::LazerApiClient>,
+    /// RedStone push leg: `None` when disabled (`REDSTONE_PUSH=false`) or
+    /// when its no-redirect client could not be built.
+    redstone_push: Option<crate::redstone_push::RedStonePushClient>,
+    /// Last successful RedStone write, or in-flight reservation, per
+    /// (adapter, feed) — see [`RedStonePushMemo`].
+    redstone_push_memo: RedStonePushMemo,
+}
+
+/// A RedStone feed id as the adapter and the proxy sources name it.
+pub(crate) type RedStoneFeedId = templar_common::oracle::redstone::FeedId;
+
+/// Shared memo per (adapter, feed) of the last successful RedStone write —
+/// or of an in-flight reservation, taken when a push finds the feed due and
+/// released if the build or write fails — so a market round with several
+/// positions, or several markets on one adapter, does not resubmit inside
+/// the adapter's minimum interval and burn gas on writes the contract
+/// rejects. A push future dropped between reserve and release leaves its
+/// entry behind; the cost is bounded — the refresh is suppressed for at most
+/// one `min_interval_between_updates_ms` — and equals what the rejected
+/// duplicate write would have cost in delay, without the gas.
+pub type RedStonePushMemo =
+    std::sync::Arc<std::sync::Mutex<HashMap<(AccountId, RedStoneFeedId), std::time::Instant>>>;
+
+/// Push targets of one proxy, resolved from a single read of its sources.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UpdateTargets {
+    pub pyth_pro: HashMap<AccountId, Vec<u32>>,
+    pub redstone: HashMap<AccountId, Vec<RedStoneFeedId>>,
 }
 
 impl OracleFetcher {
@@ -262,11 +326,29 @@ impl OracleFetcher {
     pub fn new(
         client: SigningClient,
         pyth_pro_updates: Option<PythProUpdatesClient>,
-        redstone_api_url: Url,
-        lazer_api: Option<crate::lazer::LazerApiConfig>,
+        apis: crate::OracleApis,
         proxy_oracle_cache: Option<ProxyOracleCache>,
+        redstone_push_memo: Option<RedStonePushMemo>,
     ) -> Self {
+        let crate::OracleApis {
+            redstone_api_url,
+            lazer_api,
+            redstone_push,
+        } = apis;
         Self {
+            redstone_push_memo: redstone_push_memo.unwrap_or_default(),
+            redstone_push: redstone_push.and_then(|config| {
+                match crate::redstone_push::RedStonePushClient::new(config) {
+                    Ok(client) => Some(client),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "Could not build the no-redirect RedStone gateway client; RedStone-only feeds will not be pushed"
+                        );
+                        None
+                    }
+                }
+            }),
             client,
             pyth_pro_updates,
             proxy_oracle_cache: proxy_oracle_cache.unwrap_or_else(|| {
@@ -286,6 +368,11 @@ impl OracleFetcher {
                 }
             }),
         }
+    }
+
+    /// Returns a clone of the shared RedStone last-push memo.
+    pub fn redstone_push_memo(&self) -> RedStonePushMemo {
+        self.redstone_push_memo.clone()
     }
 
     /// Returns a clone of the shared proxy oracle cache handle.
@@ -326,21 +413,27 @@ impl OracleFetcher {
         }
     }
 
-    /// Resolves a proxy oracle's sources to the Pyth Pro adapters (and feed
-    /// ids) whose payloads this bot pushes on-chain before a live liquidation.
-    /// Pyth Core and RedStone sources are externally pushed and never appear
-    /// here; a non-proxy oracle has nothing to push.
-    pub async fn resolve_pyth_pro_update_targets(
+    /// Resolves both push legs' targets from one read of the proxy's sources
+    /// per price id: the Pyth Pro adapters (and feed ids) whose payloads this
+    /// bot pushes, and the RedStone adapters (and feed ids) of feeds the
+    /// Pyth Pro push cannot refresh. A non-proxy oracle has nothing to push.
+    ///
+    /// # Errors
+    ///
+    /// A proxy-config read failure is propagated rather than skipped, so an
+    /// incomplete target set is never pushed.
+    pub async fn resolve_update_targets(
         &self,
         oracle: &AccountId,
         price_ids: &[PriceIdentifier],
-    ) -> LiquidatorResult<HashMap<AccountId, Vec<u32>>> {
-        let mut targets: HashMap<AccountId, std::collections::BTreeSet<u32>> = HashMap::new();
+    ) -> LiquidatorResult<UpdateTargets> {
         if !self.is_proxy_oracle(oracle).await? {
-            return Ok(HashMap::new());
+            return Ok(UpdateTargets::default());
         }
-        // A read failure is propagated rather than skipped, so we never push
-        // an incomplete set of feeds.
+        let mut pyth_pro: HashMap<AccountId, std::collections::BTreeSet<u32>> = HashMap::new();
+        let mut redstone: HashMap<AccountId, std::collections::BTreeSet<RedStoneFeedId>> =
+            HashMap::new();
+        let pyth_pro_push_available = self.pyth_pro_updates.is_some();
         for &pid in price_ids {
             let result = self
                 .client
@@ -349,14 +442,41 @@ impl OracleFetcher {
                 .map_err(|error| LiquidatorError::PriceFetchError(error.into()))?;
             if let Some(proxy) = result.proxy {
                 for source in proxy.sources() {
-                    Self::collect_pyth_pro_targets_from_source(source, &mut targets);
+                    Self::collect_pyth_pro_targets_from_source(source, &mut pyth_pro);
                 }
+                collect_redstone_targets_for_feed(
+                    proxy.sources(),
+                    pyth_pro_push_available,
+                    &mut redstone,
+                );
             }
         }
-        Ok(targets
-            .into_iter()
-            .map(|(adapter, feeds)| (adapter, feeds.into_iter().collect()))
-            .collect())
+        Ok(UpdateTargets {
+            pyth_pro: pyth_pro
+                .into_iter()
+                .map(|(adapter, feeds)| (adapter, feeds.into_iter().collect()))
+                .collect(),
+            redstone: redstone
+                .into_iter()
+                .map(|(adapter, feeds)| (adapter, feeds.into_iter().collect()))
+                .collect(),
+        })
+    }
+
+    /// The Pyth Pro half of [`Self::resolve_update_targets`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::resolve_update_targets`].
+    pub async fn resolve_pyth_pro_update_targets(
+        &self,
+        oracle: &AccountId,
+        price_ids: &[PriceIdentifier],
+    ) -> LiquidatorResult<HashMap<AccountId, Vec<u32>>> {
+        Ok(self
+            .resolve_update_targets(oracle, price_ids)
+            .await?
+            .pyth_pro)
     }
 
     /// Collects Pyth Pro adapter targets from one proxy source entry.
@@ -371,8 +491,8 @@ impl OracleFetcher {
                     .or_default()
                     .insert(req.feed_id);
             }
-            // Pyth Core (not integrated) and RedStone (relayer-pushed) are
-            // not this bot's to push.
+            // Pyth Core is nobody's to push on NEAR; RedStone has its own leg
+            // (`collect_redstone_targets_for_feed`).
             Source::Request(OracleRequest::Pyth(_) | OracleRequest::RedStone(_)) => {}
             Source::Transformer(transformer) => Self::collect_pyth_pro_targets_from_source(
                 &Source::Request(transformer.request.clone()),
@@ -381,11 +501,112 @@ impl OracleFetcher {
         }
     }
 
+    fn release_redstone_reservation(&self, adapter: &AccountId, feeds: &[RedStoneFeedId]) {
+        let mut memo = self
+            .redstone_push_memo
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::redstone_push::release(&mut memo, adapter, feeds);
+    }
+
+    /// Builds a payload for `feed_ids` against the adapter's own rules
+    /// (`get_config`: signer set, threshold, timestamp window) and submits
+    /// `write_prices`. Best-effort: any failure is logged and the feeds stay
+    /// as they are on-chain, which the market contract re-validates
+    /// fail-closed.
+    async fn update_redstone_prices(
+        &self,
+        adapter: &AccountId,
+        feed_ids: &[RedStoneFeedId],
+        packages: &HashMap<String, Vec<crate::redstone_push::SignedPackage>>,
+    ) -> bool {
+        let rules = match self
+            .client
+            .read(redstone::GetConfig {
+                oracle_id: adapter.clone(),
+            })
+            .await
+        {
+            Ok(result) => crate::redstone_push::AdapterRules::from(&result.config),
+            Err(error) => {
+                tracing::warn!(%adapter, %error, "Failed to read the RedStone adapter config; nothing pushed to it");
+                return false;
+            }
+        };
+        let min_interval = std::time::Duration::from_millis(rules.min_interval_ms);
+        let now = std::time::Instant::now();
+        // Reserve under the lock: a concurrent liquidation must not find the
+        // same feeds due; a failed build or write releases them below.
+        let due: Vec<RedStoneFeedId> = {
+            let mut memo = self
+                .redstone_push_memo
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::redstone_push::reserve_due(&mut memo, adapter, feed_ids, min_interval, now)
+        };
+        if due.is_empty() {
+            tracing::debug!(%adapter, feeds = ?feed_ids, "RedStone feeds pushed within the adapter's minimum interval; skipping");
+            return false;
+        }
+        let names: Vec<String> = due.iter().map(|feed| feed.as_ref().to_string()).collect();
+        let payload = match crate::redstone_push::build_payload(
+            packages,
+            &names,
+            &rules,
+            unix_now_ms(),
+        ) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(%adapter, %error, "RedStone payload not built; its feeds stay as they are on-chain");
+                self.release_redstone_reservation(adapter, &due);
+                return false;
+            }
+        };
+        match self
+            .client
+            .execute(redstone::WritePrices {
+                oracle_id: adapter.clone(),
+                feed_ids: due.clone(),
+                payload: Base64Bytes(payload),
+            })
+            .await
+        {
+            Ok(result) if result.operation.status == OperationStatus::Succeeded => {
+                // Refresh the reservation to the time the write landed: the
+                // adapter's interval runs from the write, not from the
+                // moment the feed was found due.
+                let landed = std::time::Instant::now();
+                let mut memo = self
+                    .redstone_push_memo
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for feed in &due {
+                    memo.insert((adapter.clone(), feed.clone()), landed);
+                }
+                tracing::info!(%adapter, feeds = ?names, operation_id = %result.operation.id.0, "Pushed RedStone prices");
+                true
+            }
+            Ok(result) => {
+                tracing::warn!(%adapter, feeds = ?names, status = ?result.operation.status, "RedStone push did not succeed");
+                self.release_redstone_reservation(adapter, &due);
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%adapter, feeds = ?names, %error, "RedStone push failed");
+                self.release_redstone_reservation(adapter, &due);
+                false
+            }
+        }
+    }
+
     /// Pushes fresh Pyth Pro payloads on-chain for every resolved adapter,
-    /// then re-aggregates the proxy. Returns `Ok(true)` if any update was
-    /// sent. Best-effort per adapter: a failed push is logged and the
-    /// liquidation proceeds against existing on-chain state, which the
-    /// market contract re-validates fail-closed.
+    /// RedStone packages for the feeds the Pyth Pro push cannot refresh —
+    /// those without a Pyth Pro source, and every feed when no Pyth Pro push
+    /// is available — (when the RedStone leg is enabled), then re-aggregates
+    /// the proxy. Returns
+    /// `Ok(true)` if any update was sent. Best-effort per adapter: a failed
+    /// push is logged and the liquidation proceeds against existing on-chain
+    /// state, which the market contract re-validates fail-closed.
     pub async fn update_onchain_prices(
         &self,
         oracle: &AccountId,
@@ -396,28 +617,48 @@ impl OracleFetcher {
             return Ok(false);
         }
         let mut any_updated = false;
-        // Without a push client there is nothing to push with, so the per-id
-        // proxy reads that resolve targets are skipped outright. (A
-        // mixed-source feed is admitted tokenless and does carry a Pyth Pro
-        // adapter — it simply cannot be pushed; the startup log says so.)
-        if let Some(client) = &self.pyth_pro_updates {
+        // One read of the proxy's sources serves both legs. Without either
+        // leg there is nothing to resolve for. (A mixed-source feed is
+        // admitted tokenless; the RedStone leg then covers its RedStone
+        // source, since the Pyth Pro adapter cannot be pushed.)
+        if self.pyth_pro_updates.is_some() || self.redstone_push.is_some() {
             // Best-effort like the pushes themselves: a transient proxy-config
             // read failure must not skip the re-aggregation below.
-            match self
-                .resolve_pyth_pro_update_targets(oracle, price_ids)
-                .await
-            {
+            match self.resolve_update_targets(oracle, price_ids).await {
                 Ok(targets) => {
-                    for (adapter, feed_ids) in &targets {
-                        if self.update_pyth_pro_prices(client, adapter, feed_ids).await {
-                            any_updated = true;
+                    if let Some(client) = &self.pyth_pro_updates {
+                        for (adapter, feed_ids) in &targets.pyth_pro {
+                            if self.update_pyth_pro_prices(client, adapter, feed_ids).await {
+                                any_updated = true;
+                            }
+                        }
+                    }
+                    if let Some(push) = &self.redstone_push {
+                        if !targets.redstone.is_empty() {
+                            match push.fetch_packages().await {
+                                Ok(packages) => {
+                                    for (adapter, feed_ids) in &targets.redstone {
+                                        if self
+                                            .update_redstone_prices(adapter, feed_ids, &packages)
+                                            .await
+                                        {
+                                            any_updated = true;
+                                        }
+                                    }
+                                }
+                                Err(error) => tracing::warn!(
+                                    %oracle,
+                                    %error,
+                                    "Failed to fetch RedStone packages; RedStone-only feeds stay as they are on-chain"
+                                ),
+                            }
                         }
                     }
                 }
                 Err(e) => tracing::warn!(
                     %oracle,
                     error = %e,
-                    "Failed to resolve Pyth Pro push targets; re-aggregating the proxy from existing adapter state"
+                    "Failed to resolve push targets; re-aggregating the proxy from existing adapter state"
                 ),
             }
         }
@@ -860,6 +1101,14 @@ impl OracleFetcher {
     }
 }
 
+/// Milliseconds since the Unix epoch, saturating — for the RedStone
+/// timestamp window only.
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,6 +1171,56 @@ mod tests {
             "reason must name the cause and the fix: {reason}"
         );
         assert_eq!(requests.lock().unwrap().len(), 1, "one probe, no retries");
+    }
+
+    /// RedStone is pushed only for feeds the Pyth Pro push cannot refresh:
+    /// with the Pyth Pro push available, a feed with any Pyth Pro source
+    /// yields no RedStone target (one transaction fewer per liquidation); a
+    /// feed with only Pyth Core and/or RedStone sources yields its RedStone
+    /// adapters and feed ids, transformers unwrapped; and without the Pyth
+    /// Pro push (no token) even a mixed feed is RedStone-pushed.
+    #[test]
+    fn redstone_targets_cover_only_feeds_without_a_pyth_pro_source() {
+        let mut targets = HashMap::new();
+        collect_redstone_targets_for_feed(
+            [&lazer_source(), &redstone_source()].into_iter(),
+            true,
+            &mut targets,
+        );
+        assert!(
+            targets.is_empty(),
+            "a Pyth Pro–sourced feed needs no RedStone push"
+        );
+
+        collect_redstone_targets_for_feed(
+            [&pyth_source(), &redstone_source()].into_iter(),
+            true,
+            &mut targets,
+        );
+        let adapter: AccountId = "redstone.near".parse().unwrap();
+        assert_eq!(
+            targets[&adapter],
+            std::collections::BTreeSet::from([RedStoneFeedId::from("LTC")])
+        );
+
+        let mut under_transformer = HashMap::new();
+        collect_redstone_targets_for_feed(
+            [&transformer_source(redstone_request())].into_iter(),
+            true,
+            &mut under_transformer,
+        );
+        assert!(under_transformer[&adapter].contains(&RedStoneFeedId::from("LTC")));
+
+        // Without a Pyth Pro push (no token) the Pyth Pro source refreshes
+        // nothing, so the mixed feed's RedStone source is the only way to a
+        // fresh price and is pushed.
+        let mut tokenless = HashMap::new();
+        collect_redstone_targets_for_feed(
+            [&lazer_source(), &redstone_source()].into_iter(),
+            false,
+            &mut tokenless,
+        );
+        assert!(tokenless[&adapter].contains(&RedStoneFeedId::from("LTC")));
     }
 
     /// The push-check freshness read goes through the proxy's own

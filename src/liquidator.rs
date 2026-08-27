@@ -103,6 +103,7 @@ pub mod oracle;
 pub mod profitability;
 pub mod push_check;
 pub mod redstone;
+pub mod redstone_push;
 pub mod rpc;
 pub mod scanner;
 pub mod service;
@@ -772,6 +773,8 @@ pub struct SwapConfig {
 pub struct OracleApis {
     pub redstone_api_url: url::Url,
     pub lazer_api: Option<crate::lazer::LazerApiConfig>,
+    /// RedStone push leg; `None` disables it.
+    pub redstone_push: Option<crate::redstone_push::RedStonePushConfig>,
 }
 
 /// Loop-liquidation policy: whether to repeat against the same position, and
@@ -790,6 +793,7 @@ pub struct SharedHandles {
     pub inventory: inventory::SharedInventory,
     pub notifier: crate::notifier::SharedNotifier,
     pub proxy_oracle_cache: Option<oracle::ProxyOracleCache>,
+    pub redstone_push_memo: Option<oracle::RedStonePushMemo>,
 }
 
 impl Liquidator {
@@ -814,9 +818,9 @@ impl Liquidator {
         let oracle_fetcher = oracle::OracleFetcher::new(
             handles.client.clone(),
             handles.pyth_pro_updates.clone(),
-            oracle_apis.redstone_api_url,
-            oracle_apis.lazer_api,
+            oracle_apis,
             handles.proxy_oracle_cache.clone(),
+            handles.redstone_push_memo.clone(),
         );
         let executor = executor::LiquidationExecutor::new(
             handles.client.clone(),

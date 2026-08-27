@@ -262,8 +262,12 @@ pub(crate) mod test_support {
         crate::OracleFetcher::new(
             client,
             None,
-            "https://redstone.invalid".parse().unwrap(),
-            lazer_api,
+            crate::OracleApis {
+                redstone_api_url: "https://redstone.invalid".parse().unwrap(),
+                lazer_api,
+                redstone_push: None,
+            },
+            None,
             None,
         )
     }

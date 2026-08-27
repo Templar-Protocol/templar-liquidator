@@ -966,7 +966,7 @@ impl LiquidatorService {
                         reason,
                         "Market filtered out"
                     );
-                    filtered.record("ignored");
+                    filtered.record(crate::metrics::FilterReason::Ignored);
                     continue;
                 }
 
@@ -993,14 +993,14 @@ impl LiquidatorService {
                                 deployment = %market,
                                 "Skipping non-market deployment (no get_configuration method)"
                             );
-                            filtered.record("not-a-market");
+                            filtered.record(crate::metrics::FilterReason::NotAMarket);
                         } else {
                             tracing::warn!(
                                 market = %market,
                                 error = %e,
                                 "Failed to fetch market configuration, skipping"
                             );
-                            filtered.record("config-read-error");
+                            filtered.record(crate::metrics::FilterReason::ConfigReadError);
                         }
                         continue;
                     }
@@ -1022,14 +1022,14 @@ impl LiquidatorService {
                                 market = %market,
                                 "Contract missing NEP-330 metadata, skipping"
                             );
-                            filtered.record("version");
+                            filtered.record(crate::metrics::FilterReason::Version);
                         } else {
                             tracing::warn!(
                                 market = %market,
                                 error = %e,
                                 "Failed to read contract version, skipping until next refresh"
                             );
-                            filtered.record("version-read-error");
+                            filtered.record(crate::metrics::FilterReason::VersionReadError);
                         }
                         continue;
                     }
@@ -1040,7 +1040,7 @@ impl LiquidatorService {
                         version = %version_string,
                         "Invalid semver format, skipping"
                     );
-                    filtered.record("version");
+                    filtered.record(crate::metrics::FilterReason::Version);
                     continue;
                 };
                 if version < crate::scanner::MarketVersion::MIN_SUPPORTED {
@@ -1050,7 +1050,7 @@ impl LiquidatorService {
                         min_required = %crate::scanner::MarketVersion::MIN_SUPPORTED,
                         "Skipping market - unsupported version"
                     );
-                    filtered.record("version");
+                    filtered.record(crate::metrics::FilterReason::Version);
                     continue;
                 }
 
@@ -1081,7 +1081,7 @@ impl LiquidatorService {
                             reason,
                             "Market filtered out"
                         );
-                        filtered.record("oracle");
+                        filtered.record(crate::metrics::FilterReason::Oracle);
                         continue;
                     }
                     Err(e) => {
@@ -1091,7 +1091,7 @@ impl LiquidatorService {
                             error = %e,
                             "Failed to probe the market's oracle, skipping until next refresh"
                         );
-                        filtered.record("oracle-probe-error");
+                        filtered.record(crate::metrics::FilterReason::OracleProbeError);
                         continue;
                     }
                 }
@@ -1108,7 +1108,7 @@ impl LiquidatorService {
                         reason = filter_reason.unwrap_or_default(),
                         "Market filtered out"
                     );
-                    filtered.record("asset-filter");
+                    filtered.record(crate::metrics::FilterReason::AssetFilter);
                 }
             }
 
@@ -1170,7 +1170,7 @@ impl LiquidatorService {
             tracing::info!(
                 registered = supported_markets.len(),
                 filtered = filtered.total(),
-                by_reason = ?filtered.by_reason(),
+                by_reason = ?filtered.by_label(),
                 "Registry refresh summary"
             );
 

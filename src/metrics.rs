@@ -66,13 +66,53 @@ pub struct Metrics {
     filtered_by_reason: std::sync::Mutex<std::collections::BTreeMap<String, u64>>,
 }
 
-/// One registry refresh's count of filtered markets by reason label.
+/// Why a registry deployment was not admitted at a refresh — the closed set
+/// of `reason` label values of `templar_liquidator_markets_filtered`. A new
+/// series needs a new variant here, never a string at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FilterReason {
+    /// Excluded by `ALLOWED_MARKETS` / `IGNORED_MARKETS`.
+    Ignored,
+    /// A registry deployment without `get_configuration` (not a market).
+    NotAMarket,
+    /// Missing, unparseable, or unsupported contract version.
+    Version,
+    /// The oracle cannot be priced off-chain (see `offchain_priceable`).
+    Oracle,
+    /// Rejected by the asset / decimals filter.
+    AssetFilter,
+    /// Transient: the market configuration could not be read.
+    ConfigReadError,
+    /// Transient: the contract version could not be read.
+    VersionReadError,
+    /// Transient: the oracle probe failed.
+    OracleProbeError,
+}
+
+impl FilterReason {
+    /// The stable label value; renaming one is a metrics-breaking change.
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Ignored => "ignored",
+            Self::NotAMarket => "not-a-market",
+            Self::Version => "version",
+            Self::Oracle => "oracle",
+            Self::AssetFilter => "asset-filter",
+            Self::ConfigReadError => "config-read-error",
+            Self::VersionReadError => "version-read-error",
+            Self::OracleProbeError => "oracle-probe-error",
+        }
+    }
+}
+
+/// One registry refresh's count of filtered markets by reason.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct FilterTally(std::collections::BTreeMap<&'static str, u64>);
+pub(crate) struct FilterTally(std::collections::BTreeMap<FilterReason, u64>);
 
 impl FilterTally {
-    /// Counts one market filtered for `reason` (a fixed label value).
-    pub(crate) fn record(&mut self, reason: &'static str) {
+    /// Counts one market filtered for `reason`.
+    pub(crate) fn record(&mut self, reason: FilterReason) {
         *self.0.entry(reason).or_insert(0) += 1;
     }
 
@@ -81,9 +121,14 @@ impl FilterTally {
         self.0.values().sum()
     }
 
+    /// Counts keyed by the label the gauge uses — the same rendering for
+    /// the summary log and the metric.
     #[must_use]
-    pub(crate) fn by_reason(&self) -> &std::collections::BTreeMap<&'static str, u64> {
-        &self.0
+    pub(crate) fn by_label(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        self.0
+            .iter()
+            .map(|(reason, count)| (reason.label(), *count))
+            .collect()
     }
 }
 
@@ -140,8 +185,8 @@ impl Metrics {
             for count in map.values_mut() {
                 *count = 0;
             }
-            for (reason, count) in filtered.by_reason() {
-                map.insert((*reason).to_string(), *count);
+            for (label, count) in filtered.by_label() {
+                map.insert(label.to_string(), count);
             }
         }
     }
@@ -365,9 +410,9 @@ mod tests {
     fn registry_gauges_render_registered_and_filtered_by_reason() {
         let m = Metrics::default();
         let mut tally = FilterTally::default();
-        tally.record("oracle");
-        tally.record("oracle");
-        tally.record("ignored");
+        tally.record(FilterReason::Oracle);
+        tally.record(FilterReason::Oracle);
+        tally.record(FilterReason::Ignored);
         assert_eq!(tally.total(), 3);
         m.set_registry_counts(15, &tally);
         let out = m.render();
@@ -378,7 +423,7 @@ mod tests {
         assert!(out.contains(r#"templar_liquidator_markets_filtered{reason="ignored"} 1"#));
 
         let mut later = FilterTally::default();
-        later.record("ignored");
+        later.record(FilterReason::Ignored);
         m.set_registry_counts(28, &later);
         let out = m.render();
         assert!(out.contains("templar_liquidator_markets_registered 28\n"));

@@ -1854,9 +1854,6 @@ fn unix_now_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    /// The allowlist defines the universe when set (empty = all markets, the
-    /// pre-knob behavior), and IGNORED_MARKETS still subtracts within it —
-    /// a market on both lists is ignored.
     /// Overlapping registries list one market twice; it is admitted, counted
     /// and given a liquidator once, in first-listed order.
     #[test]
@@ -1872,6 +1869,9 @@ mod tests {
         assert_eq!(out, vec![m("a.near"), m("b.near"), m("c.near")]);
     }
 
+    /// The allowlist defines the universe when set (empty = all markets, the
+    /// pre-knob behavior), and IGNORED_MARKETS still subtracts within it —
+    /// a market on both lists is ignored.
     #[test]
     fn allowlist_admits_members_and_denylist_subtracts() {
         let m = |s: &str| s.parse::<AccountId>().unwrap();

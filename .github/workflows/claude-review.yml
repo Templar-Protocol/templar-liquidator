@@ -126,11 +126,32 @@ jobs:
       # in-repo copy is author-controlled — and the allowlist names only this
       # copy, which the model cannot alter either: its Write tool is confined
       # to the checkout.
-      - name: Materialise the review API wrapper from the base branch
-        continue-on-error: true
+      #
+      # Failing to materialise it is not fatal but IS disqualifying: without
+      # the wrapper the model has no way to read existing comments or submit a
+      # review, so the run would pay for a full `deep` review and then have
+      # nowhere to put it. The step therefore always succeeds and records the
+      # outcome, and the review step below is gated on it — a missing wrapper
+      # skips the review loudly instead of buying one that cannot be posted.
+      # `continue-on-error` would not do: it rewrites the step's conclusion to
+      # `success`, so the failure is invisible in the job summary.
+      #
+      # Note `git show` failing still leaves an empty, non-executable file at
+      # the target path (the redirect is created before git runs, and `-e`
+      # aborts before `chmod`), hence the `rm -f` — otherwise the next reader
+      # finds a file that exists and gets "permission denied" rather than a
+      # clear absence.
+      - id: wrapper
+        name: Materialise the review API wrapper from the base branch
         run: |
-          git show "origin/${{ github.event.pull_request.base.ref }}:scripts/claude-review-api.sh" > "${RUNNER_TEMP}/claude-review-api.sh"
-          chmod +x "${RUNNER_TEMP}/claude-review-api.sh"
+          if git show "origin/${{ github.event.pull_request.base.ref }}:scripts/claude-review-api.sh" > "${RUNNER_TEMP}/claude-review-api.sh"; then
+            chmod +x "${RUNNER_TEMP}/claude-review-api.sh"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            rm -f "${RUNNER_TEMP}/claude-review-api.sh"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::scripts/claude-review-api.sh is not on ${{ github.event.pull_request.base.ref }} — skipping the review, which would have no way to post its findings."
+          fi
 
       # What this PR was last reviewed at. A baseline must be a run of this
       # workflow that demonstrably completed: its tracking comment on THIS PR
@@ -209,7 +230,17 @@ jobs:
           echo "scope: ${reason}"
           echo "range ${from}..${HEAD_SHA}: ${files} files, ${lines} changed lines -> ${depth}"
 
+      # Gated on the wrapper above: with no way to post, a review is only cost.
+      #
+      # Note this step also self-skips whenever claude-review.yml itself
+      # differs from the copy on the default branch — the action validates
+      # that before it starts ("Workflow validation failed. The workflow file
+      # must exist and have identical content to the version on the
+      # repository's default branch"). So no PR that edits this file gets
+      # reviewed, the `claude-review` label included, and a change to this
+      # workflow only takes effect once it has been merged to main.
       - uses: anthropics/claude-code-action@dcb57747bfceeaa1fa72638cae52295d1d853d4a # v1.0.199
+        if: steps.wrapper.outputs.ok == 'true'
         # Long-running work blocks the main session instead of being moved to
         # the background. A backgrounded subagent reports by waking its parent
         # on a later turn, and a non-interactive run has no later turn.

@@ -136,6 +136,10 @@ jobs:
       # `continue-on-error` would not do: it rewrites the step's conclusion to
       # `success`, so the failure is invisible in the job summary.
       #
+      # `chmod` is part of the condition, not the body: `-e` exempts only the
+      # condition of an `if`, so leaving it in the body would abort the step on
+      # a chmod failure rather than routing it through the fail-closed branch.
+      #
       # Note `git show` failing still leaves an empty, non-executable file at
       # the target path (the redirect is created before git runs, and `-e`
       # aborts before `chmod`), hence the `rm -f` — otherwise the next reader
@@ -144,13 +148,13 @@ jobs:
       - id: wrapper
         name: Materialise the review API wrapper from the base branch
         run: |
-          if git show "origin/${{ github.event.pull_request.base.ref }}:scripts/claude-review-api.sh" > "${RUNNER_TEMP}/claude-review-api.sh"; then
-            chmod +x "${RUNNER_TEMP}/claude-review-api.sh"
+          if git show "origin/${{ github.event.pull_request.base.ref }}:scripts/claude-review-api.sh" > "${RUNNER_TEMP}/claude-review-api.sh" \
+            && chmod +x "${RUNNER_TEMP}/claude-review-api.sh"; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             rm -f "${RUNNER_TEMP}/claude-review-api.sh"
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::scripts/claude-review-api.sh is not on ${{ github.event.pull_request.base.ref }} — skipping the review, which would have no way to post its findings."
+            echo "::warning::could not materialise scripts/claude-review-api.sh from ${{ github.event.pull_request.base.ref }} (see the error above) — skipping the review, which would have no way to post its findings."
           fi
 
       # What this PR was last reviewed at. A baseline must be a run of this

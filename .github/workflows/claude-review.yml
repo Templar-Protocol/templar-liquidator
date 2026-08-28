@@ -254,6 +254,10 @@ jobs:
           # model: the permission layer rejects env-prefixed commands, so the
           # script's target cannot be steered from inside the session.
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          # The workspace root scripts/claude-review-api.sh confines its
+          # payload argument to. Pinned here rather than relied on as ambient
+          # runner state, for the same reason as GH_REPO/PR_NUMBER above.
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true

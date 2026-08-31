@@ -35,7 +35,7 @@ jobs:
       # contract (market, mock-ft, mock-mt, mock-oracle) the first time each
       # is requested.
       - name: Install cargo-near
-        uses: Templar-Protocol/contracts/.github/actions/cargo-near@8f8fe1d1a057756f71438abc75d7b3c688b282f0
+        uses: Templar-Protocol/contracts/.github/actions/cargo-near@c0577ce3df33034f89f5f9fa2c3e5348d1c877d8
 
       # `cargo near build` runs with its cwd inside /tmp/contracts, so rustup
       # resolves *that* checkout's own rust-toolchain.toml (a different

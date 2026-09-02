@@ -8546,7 +8546,6 @@ dependencies = [
  "futures",
  "hex",
  "k256 0.14.0",
- "near-account-id",
  "near-api",
  "near-crypto 0.37.3",
  "near-jsonrpc-client 0.22.0",

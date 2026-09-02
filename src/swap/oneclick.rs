@@ -19,8 +19,8 @@
 
 use std::fmt::Write;
 
-use near_account_id::AccountType;
 use near_sdk::{
+    account_id::AccountType,
     json_types::U128,
     serde::{Deserialize, Serialize},
     AccountId,

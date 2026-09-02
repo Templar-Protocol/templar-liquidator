@@ -110,7 +110,7 @@ async fn liquidator_executes_liquidation_on_sandbox() -> Result<()> {
 
     // Mint inventory: the liquidator funds borrow liquidity + liquidation
     // capital; the borrower funds collateral. `mint` credits the predecessor.
-    let mint = |account: ManagedAccountId, token: near_account_id::AccountId, amount: &str| {
+    let mint = |account: ManagedAccountId, token: near_sdk::account_id::AccountId, amount: &str| {
         let client = client.clone();
         let amount = amount.to_owned();
         async move {

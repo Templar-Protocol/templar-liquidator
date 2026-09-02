@@ -143,6 +143,12 @@ impl std::fmt::Debug for ValidatedSignerKey {
 /// anything formatted `Args` (a `tracing::debug!(?args)`, a panic payload,
 /// etc). See the impl below for the redaction and [`ServiceConfig`]'s own
 /// hand-written `Debug` for the same pattern applied to the built config.
+/// The RedStone data service both legs read: the scan-side price API
+/// ([`crate::redstone::DATA_SERVICE`]) and the push leg's signed packages.
+/// One constant so the two cannot drift — a scan priced from one service and
+/// a package pushed from another would disagree about the same feed.
+pub const DEFAULT_REDSTONE_DATA_SERVICE_ID: &str = "redstone-primary-prod";
+
 #[derive(Clone, Parser)]
 #[command(name = "templar-liquidator")]
 #[command(about = "Inventory-based liquidator bot for Templar Protocol")]
@@ -324,11 +330,13 @@ pub struct Args {
     pub redstone_gateway_url: Url,
 
     /// RedStone data-service id whose signer set the adapters are configured
-    /// with; packages from any other service are rejected on-chain.
+    /// with; packages from any other service are rejected on-chain. The same
+    /// service the scan-side price API is queried with — see
+    /// [`DEFAULT_REDSTONE_DATA_SERVICE_ID`].
     #[arg(
         long,
         env = "REDSTONE_DATA_SERVICE_ID",
-        default_value = "redstone-primary-prod"
+        default_value = DEFAULT_REDSTONE_DATA_SERVICE_ID
     )]
     pub redstone_data_service_id: String,
 

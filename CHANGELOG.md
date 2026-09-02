@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Scan-side RedStone pricing, which had stopped returning any price at all. The public API's multi-symbol endpoint answers `500` for every symbol under `provider=redstone`, so every RedStone-priced market failed with "Oracle prices missing or stale" and was skipped each cycle — a silent, complete loss of one of the two scan-side price sources, visible only as `WARN RedStone API returned error status`. The `provider` is a data service, not a vendor name: queries now go to `redstone-primary-prod`, the same service the push leg pulls signed packages from, sharing one constant so the two cannot drift. Against mainnet this took a round from 12 markets scanned and 6 skipped to **20 scanned, 0 skipped, 0 errors**. Note the tempting fix is wrong: adding `&limit=1` also turns the 500s into 200s, but serves quotes roughly a month stale.
+
 ## [1.1.0] - 2026-09-02
 
 ### Changed

@@ -109,9 +109,12 @@ updates:
     commit-message:
       prefix: "deps(devcontainer)"
     groups:
-      # All feature bumps in one PR. Features only affect the dev container
-      # build, so there is nothing to gain from reading them one at a time —
-      # and ungrouped they compete for the PR limit with each other.
+      # Compatible feature bumps in one PR; a major arrives on its own, the
+      # same carve-out as cargo. Majors are exactly where this ecosystem has
+      # teeth — the docker-in-docker 1.0.9 -> 4.x drift above was a major —
+      # so that is the one bump that should not share a PR with routine ones.
       devcontainer-features:
+        applies-to: version-updates
         patterns: ["*"]
+        update-types: ["minor", "patch"]
 

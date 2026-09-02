@@ -86,14 +86,14 @@ That 5.26% is `spread / (1 - spread)` — the exact fraction the [`borrow_to_col
 Verify it yourself against live chain state:
 
 ```bash
-set -a; source .env; set +a   # needs NEAR_API_KEY if hitting FastNEAR
+set -a; source .env; set +a   # needs NEAR_RPC_API_KEY if hitting FastNEAR
 
 curl -s https://rpc.mainnet.fastnear.com \
-  -H "Authorization: Bearer $NEAR_API_KEY" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $NEAR_RPC_API_KEY" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"v1.tmplr.near","method_name":"list_deployments","args_base64":"'"$(printf '{"offset":0,"count":10}' | base64 -w0)"'"}}'
 
 curl -s https://rpc.mainnet.fastnear.com \
-  -H "Authorization: Bearer $NEAR_API_KEY" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $NEAR_RPC_API_KEY" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"ibtc-usdc.v1.tmplr.near","method_name":"get_configuration","args_base64":""}}'
 ```
 

@@ -174,7 +174,9 @@ pub struct Args {
     pub near_rpc_url: Option<String>,
 
     /// API key for the RPC endpoint, sent as an `Authorization` header. May also
-    /// be supplied as an `apiKey` query parameter on `--near-rpc-url`.
+    /// be supplied as an `apiKey` query parameter on `--near-rpc-url`, for
+    /// endpoints that authenticate that way — at the cost of putting the
+    /// credential in every place a URL is printed.
     #[arg(long, env = "NEAR_RPC_API_KEY")]
     pub near_rpc_api_key: Option<String>,
 
@@ -518,6 +520,20 @@ impl std::fmt::Debug for Args {
             .field("http_bind_addr", &self.http_bind_addr)
             .finish()
     }
+}
+
+/// Whether the deprecated `NEAR_API_KEY` is the only RPC credential present.
+///
+/// The run scripts map the old spelling onto `NEAR_RPC_API_KEY`, but the binary
+/// reads only the canonical name — so a `.env` carrying just the old one
+/// authenticates under `scripts/run-mainnet.sh` and silently does not under
+/// `cargo run`, the container, or a scheduled cloud job. Silently is the
+/// problem: unauthenticated calls are not refused, they are rate-limited
+/// part-way through a registry scan, and the round then completes over
+/// whatever it could read and exits 0.
+fn legacy_rpc_key_only(canonical: Option<&str>, legacy: Option<&str>) -> bool {
+    let present = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
+    !present(canonical) && present(legacy)
 }
 
 impl Args {
@@ -885,6 +901,17 @@ impl Args {
             run_mode = ?self.effective_run_mode(),
             "Starting liquidator bot"
         );
+
+        // The run scripts accept the old `NEAR_API_KEY` spelling and map it
+        // across; nothing else does. This is the launch path where that
+        // mapping does not exist, so say so here — the failure it otherwise
+        // causes announces itself as a clean cycle.
+        let legacy_key = std::env::var("NEAR_API_KEY").ok();
+        if legacy_rpc_key_only(self.near_rpc_api_key.as_deref(), legacy_key.as_deref()) {
+            tracing::warn!(
+                "NEAR_API_KEY is set but NEAR_RPC_API_KEY is not. Only NEAR_RPC_API_KEY is read here — rename it, or this run's RPC calls go out unauthenticated and a rate-limited partial scan will look like a clean one."
+            );
+        }
 
         if self.dry_run {
             tracing::info!("DRY RUN MODE: Scanning only, no transactions will be executed");
@@ -1858,5 +1885,31 @@ mod tests {
         // that it mirrors Args's own default rather than an independently
         // chosen value that could drift from it.
         assert_eq!(create_test_args().dry_run, parse_with(&[]).dry_run);
+    }
+
+    #[test]
+    fn legacy_key_alone_is_the_only_case_worth_warning_about() {
+        // The case the warning exists for: a `.env` that predates the rename,
+        // launched by something other than the run scripts.
+        assert!(legacy_rpc_key_only(None, Some("old-key")));
+
+        // Both set, or only the canonical one: the binary has what it reads,
+        // so the old name is redundant rather than a silent misconfiguration.
+        assert!(!legacy_rpc_key_only(Some("new-key"), Some("old-key")));
+        assert!(!legacy_rpc_key_only(Some("new-key"), None));
+        assert!(!legacy_rpc_key_only(None, None));
+    }
+
+    #[test]
+    fn an_empty_legacy_key_is_not_a_key() {
+        // `NEAR_API_KEY=` in a .env exports an empty string rather than
+        // nothing, and warning about it would send the operator looking for a
+        // credential that is not there.
+        assert!(!legacy_rpc_key_only(None, Some("")));
+        assert!(!legacy_rpc_key_only(None, Some("   ")));
+
+        // The mirror image: an empty canonical key does not satisfy the
+        // binary either, so the old name is still worth naming.
+        assert!(legacy_rpc_key_only(Some(""), Some("old-key")));
     }
 }

@@ -24,7 +24,7 @@ The bot refuses to start without these three:
 |---|---|---|---|
 | `NEAR_NETWORK` | `--network`, `-n` | `testnet` | `mainnet` or `testnet`. |
 | `NEAR_RPC_URL` | `--near-rpc-url` | network default (`https://rpc.mainnet.fastnear.com` / `https://rpc.testnet.fastnear.com`) | Custom RPC endpoint. |
-| `NEAR_RPC_API_KEY` | `--near-rpc-api-key` | unset | API key for the RPC endpoint, sent as an `Authorization` header. May also be folded into `NEAR_RPC_URL` as an `?apiKey=` query parameter (what `scripts/run-mainnet.sh` / `scripts/run-testnet.sh` do with `NEAR_API_KEY` from the shell environment — note that shell-script variable is distinct from this one). |
+| `NEAR_RPC_API_KEY` | `--near-rpc-api-key` | unset | API key for the RPC endpoint, sent as an `Authorization` header. Effectively required against a public endpoint: unauthenticated, a full-registry scan gets rate-limited part-way through and the round completes over whatever it could read, without failing. The run scripts export it and accept the older `NEAR_API_KEY` spelling as a deprecated alias, mapping it across with a notice; the binary reads only `NEAR_RPC_API_KEY`, and warns at startup when it finds the old name alone. Endpoints that authenticate by query parameter instead of by header take the key folded into `NEAR_RPC_URL` as `?apiKey=` — still supported, and the only option against such an endpoint, but it puts the credential in every place a URL is printed, so the header is the default and what the scripts use. |
 
 ## Execution
 

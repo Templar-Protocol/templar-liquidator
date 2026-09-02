@@ -86,14 +86,14 @@ That 5.26% is `spread / (1 - spread)` — the exact fraction the [`borrow_to_col
 Verify it yourself against live chain state:
 
 ```bash
-set -a; source .env; set +a   # needs NEAR_API_KEY if hitting FastNEAR
+set -a; source .env; set +a   # needs NEAR_RPC_API_KEY if hitting FastNEAR
 
 curl -s https://rpc.mainnet.fastnear.com \
-  -H "Authorization: Bearer $NEAR_API_KEY" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $NEAR_RPC_API_KEY" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"v1.tmplr.near","method_name":"list_deployments","args_base64":"'"$(printf '{"offset":0,"count":10}' | base64 -w0)"'"}}'
 
 curl -s https://rpc.mainnet.fastnear.com \
-  -H "Authorization: Bearer $NEAR_API_KEY" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $NEAR_RPC_API_KEY" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"ibtc-usdc.v1.tmplr.near","method_name":"get_configuration","args_base64":""}}'
 ```
 
@@ -178,7 +178,7 @@ Both endpoints are inert in `RUN_MODE=once` and `push-check` — a single-cycle 
 
 ## FAQ
 
-**Which RPC should I use?** Public endpoints rate-limit under sustained scanning — that includes both the binary's own compiled-in default (`https://rpc.mainnet.fastnear.com` / `https://rpc.testnet.fastnear.com`, used when `NEAR_RPC_URL` is unset) and `free.rpc.fastnear.com`, the endpoint `.env.example` sets explicitly. For mainnet, get a [FastNEAR](https://fastnear.com) API key and set `NEAR_RPC_URL` + `NEAR_RPC_API_KEY` — the key is sent as an `Authorization` header (or folded into the URL as `?apiKey=`).
+**Which RPC should I use?** Public endpoints rate-limit under sustained scanning — that includes the binary's own compiled-in default (`https://rpc.mainnet.fastnear.com` / `https://rpc.testnet.fastnear.com`, used when `NEAR_RPC_URL` is unset) and the keyless `free.rpc.fastnear.com` tier. For mainnet, get a [FastNEAR](https://fastnear.com) API key and set `NEAR_RPC_URL` + `NEAR_RPC_API_KEY` — the key is sent as an `Authorization` header. Endpoints that authenticate by query parameter instead take it folded into the URL as `?apiKey=` — supported, but it puts the credential in every place a URL is printed, so prefer the header where you have the choice.
 
 **What inventory do I need to hold?** The **borrow assets** of every market you serve — e.g. USDC in `SIGNER_ACCOUNT_ID`'s wallet to liquidate USDC-borrow markets. The bot never buys inventory; it only spends what's already there.
 

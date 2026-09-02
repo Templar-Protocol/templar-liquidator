@@ -151,21 +151,32 @@ done
 # flag — an argv flag would need `--dry-run=false` to select live mode, and
 # omitting it entirely would leave the binary on its own default either way.
 
-# Add NEAR_RPC_URL if set. The bot no longer sends an X-API-Key header, so fold
-# any NEAR_API_KEY into the URL (FastNear/QuickNode accept `?apiKey=<key>`).
-# Pass it via the environment (clap reads `NEAR_RPC_URL`) rather than argv, so
-# the secret-bearing URL isn't exposed in the process list.
-if [ -n "$NEAR_RPC_URL" ]; then
-    if [ -n "$NEAR_API_KEY" ]; then
-        case "$NEAR_RPC_URL" in
-            *\?*) NEAR_RPC_URL="${NEAR_RPC_URL}&apiKey=${NEAR_API_KEY}" ;;
-            *)    NEAR_RPC_URL="${NEAR_RPC_URL}?apiKey=${NEAR_API_KEY}" ;;
-        esac
-    fi
-    export NEAR_RPC_URL
-elif [ -n "$NEAR_API_KEY" ]; then
-    echo "WARNING: NEAR_API_KEY is set but NEAR_RPC_URL is not; the key is ignored. Set NEAR_RPC_URL to an authenticated endpoint." >&2
+# RPC endpoint and its key. The binary reads both from the environment
+# (clap: NEAR_RPC_URL, NEAR_RPC_API_KEY) and sends the key as an
+# Authorization header, so nothing here needs to put a credential in a URL.
+#
+# NEAR_API_KEY is the older spelling, from when the bot had no header support
+# and this script folded the key into the URL as `?apiKey=`. It is still
+# accepted, mapped onto NEAR_RPC_API_KEY, because a credential inside a URL
+# reaches every place a URL is printed — logs, process lists, error messages
+# — while a header does not.
+# A value that is only whitespace is not a key. Trimming before the tests below
+# keeps three things in agreement: the deprecation notice still fires when
+# NEAR_RPC_API_KEY is blank-but-set (which would otherwise look present and
+# suppress it), no empty credential is exported, and the binary's own check —
+# which trims — reaches the same verdict about the same .env.
+NEAR_RPC_API_KEY="$(printf '%s' "$NEAR_RPC_API_KEY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+NEAR_API_KEY="$(printf '%s' "$NEAR_API_KEY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+if [ -z "$NEAR_RPC_API_KEY" ] && [ -n "$NEAR_API_KEY" ]; then
+    NEAR_RPC_API_KEY="$NEAR_API_KEY"
+    echo "NOTE: NEAR_API_KEY is deprecated. Rename it to NEAR_RPC_API_KEY in .env; the binary reads that one directly." >&2
 fi
+
+# A key without an explicit URL is not a mistake any more: the binary applies
+# it to the network's default endpoint, which is the one it would call anyway.
+[ -n "$NEAR_RPC_URL" ] && export NEAR_RPC_URL
+[ -n "$NEAR_RPC_API_KEY" ] && export NEAR_RPC_API_KEY
 
 # Add liquidation strategy arguments (mutually exclusive)
 [ -n "$PARTIAL_LIQUIDATION_PERCENTAGE" ] && CMD_ARGS+=("--partial-percentage" "$PARTIAL_LIQUIDATION_PERCENTAGE")

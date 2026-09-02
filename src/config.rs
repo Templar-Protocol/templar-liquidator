@@ -775,11 +775,18 @@ impl Args {
         // the data service for BOTH RedStone legs, and blank fails far from
         // its cause — the scan query degrades to `provider=` and the push URL
         // loses its last path segment, each looking like an upstream problem.
-        if self.redstone_data_service_id.trim().is_empty() {
-            return Err(
-                "REDSTONE_DATA_SERVICE_ID must name a data service (e.g. redstone-primary-prod): it selects both the scan-side price query and the push leg's signed packages, and an empty value silently breaks each of them"
-                    .to_string(),
-            );
+        // Any whitespace, not just an all-blank value: a trailing space is
+        // easy to leave in a `.env` line or a compose `env_file`, both of
+        // which preserve it, and trimming to decide while storing the padded
+        // string would admit exactly the case this rejects. Rejected rather
+        // than trimmed so the operator fixes the source of the typo.
+        if self.redstone_data_service_id.is_empty()
+            || self.redstone_data_service_id.contains(char::is_whitespace)
+        {
+            return Err(format!(
+                "REDSTONE_DATA_SERVICE_ID must name a data service with no whitespace (e.g. redstone-primary-prod), got {:?}: it selects both the scan-side price query and the push leg's signed packages, and a padded or empty value breaks each of them somewhere far from here",
+                self.redstone_data_service_id
+            ));
         }
 
         let redstone_push = if self.redstone_push {

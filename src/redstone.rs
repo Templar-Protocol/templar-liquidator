@@ -46,11 +46,17 @@ pub(crate) const MAX_FUTURE_SKEW_MS: i64 = 30_000;
 /// as the 500s showed, invisible at runtime too until every RedStone-priced
 /// market quietly stops being scanned.
 pub(crate) fn prices_url(base_url: &Url, symbols: &[String], data_service: &str) -> String {
-    format!(
-        "{}/prices?symbols={}&provider={data_service}",
-        base_url.as_str().trim_end_matches('/'),
-        symbols.join(",")
-    )
+    let mut url = base_url.clone();
+    url.set_path(&format!("{}/prices", url.path().trim_end_matches('/')));
+    // Built through `query_pairs_mut` rather than interpolated: the symbols
+    // come from on-chain oracle configuration, so a `&` or `=` in one would
+    // otherwise close the parameter and append another — including a
+    // `limit=1` that would answer 200 with month-old quotes. The API accepts
+    // the encoded separator (`symbols=XLM%2CLTC` returns both symbols).
+    url.query_pairs_mut()
+        .append_pair("symbols", &symbols.join(","))
+        .append_pair("provider", data_service);
+    url.into()
 }
 
 /// One symbol's entry in the RedStone `/prices` multi-symbol response.
@@ -251,11 +257,40 @@ mod tests {
 
         assert_eq!(
             url,
-            "https://api.redstone.finance/prices?symbols=XLM,LTC&provider=redstone-primary-prod"
+            "https://api.redstone.finance/prices?symbols=XLM%2CLTC&provider=redstone-primary-prod"
         );
         assert!(
             !url.contains("limit="),
             "limit= turns the 500 into a 200 serving quotes a month old: {url}"
+        );
+    }
+
+    /// Symbols come from on-chain oracle configuration, so they are not this
+    /// bot's to trust: an unencoded `&` would close the parameter and let the
+    /// rest be read as another one — `limit=1` among them, which answers 200
+    /// with month-old quotes rather than failing.
+    #[test]
+    fn prices_url_encodes_symbols_rather_than_trusting_them() {
+        let base: Url = "https://api.redstone.finance".parse().unwrap();
+        let url = prices_url(
+            &base,
+            &["XLM&limit=1".to_string()],
+            crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID,
+        );
+
+        assert!(
+            !url.contains("&limit=1"),
+            "a symbol must not be able to append a parameter: {url}"
+        );
+        assert!(url.contains("symbols=XLM%26limit%3D1"), "{url}");
+        assert_eq!(
+            Url::parse(&url)
+                .unwrap()
+                .query_pairs()
+                .filter(|(k, _)| k == "limit")
+                .count(),
+            0,
+            "no limit parameter may survive: {url}"
         );
     }
 

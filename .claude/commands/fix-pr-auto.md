@@ -17,18 +17,20 @@ PR to green unattended.
 
 ## Arguments
 
-- `$ARGUMENTS`: the PR number (required — if empty, ask once and proceed).
+- `$ARGUMENTS`: the PR number. **If it is empty, ask once — and validate the
+  answer, not `$ARGUMENTS`**, which the ask does not update. Order matters:
+  validating first would abort a bare `/fix-pr-auto` before it ever asked.
 
-  **Validate it before it reaches any command**, and use the validated value
-  everywhere below. It is interpolated into `gh` invocations, so a value
-  carrying extra words or a flag (`--repo …`) would redirect them; this is also
-  simply the common case of a mistyped invocation:
+  Everything below uses the validated `pr_number`, never the raw argument: it
+  is interpolated into `gh` invocations, so a value carrying extra words or a
+  flag (`--repo …`) would redirect them, and a mistyped invocation is the
+  ordinary case rather than the adversarial one.
 
   ```bash
-  case "$ARGUMENTS" in
-    '' | *[!0-9]* | 0*) echo "not a PR number: '$ARGUMENTS'" >&2; exit 1 ;;
+  pr_number="$ARGUMENTS"          # if empty, ask once and assign the answer here
+  case "$pr_number" in
+    '' | *[!0-9]* | 0*) echo "not a PR number: '$pr_number'" >&2; exit 1 ;;
   esac
-  pr_number="$ARGUMENTS"
   ```
 
 ## This repo's shape (what the loop is steering against)
@@ -252,7 +254,7 @@ All reviews delivered = no check run or workflow run still going for the PR's
 CURRENT head sha:
 
 ```bash
-HEAD=$(gh pr view $ARGUMENTS --json headRefOid --jq .headRefOid)
+HEAD=$(gh pr view "$pr_number" --json headRefOid --jq .headRefOid)
 gh api "repos/Templar-Protocol/templar-liquidator/commits/$HEAD/check-runs?per_page=100" \
   --jq '[.check_runs[] | select(.status != "completed")] | length'
 gh api "repos/Templar-Protocol/templar-liquidator/actions/runs?head_sha=$HEAD&per_page=50" \
@@ -295,7 +297,7 @@ it did.** The tell is its tracking comment:
 # the PR crosses 30 comments, which a few rounds of tracking comments, summaries
 # and PR-level replies reach easily. Both in-repo readers of this endpoint
 # paginate (`claude-review.yml`, `sweep-claude-review-comments.sh`).
-gh api --paginate "repos/Templar-Protocol/templar-liquidator/issues/$ARGUMENTS/comments?per_page=100" \
+gh api --paginate "repos/Templar-Protocol/templar-liquidator/issues/$pr_number/comments?per_page=100" \
   --jq '.[] | select(.user.login=="claude[bot]") | .created_at + "  " + (.body | split("\n")[0])'
 ```
 
@@ -324,7 +326,7 @@ Four ways it silently does not run:
   false)`, so a PR opened as a draft — or opened with a label in the same
   breath — can race into a skip.
 
-Force a fresh full review with `gh pr edit $ARGUMENTS --add-label
+Force a fresh full review with `gh pr edit "$pr_number" --add-label
 claude-review` (works on drafts, lands in a few minutes). The trigger is the
 `labeled` event, so to force it a *second* time you must remove the label
 first.
@@ -363,7 +365,7 @@ Four things block a merge, not one. Collect all of them before triaging:
            }
          }
        }
-     }' -F n=$ARGUMENTS
+     }' -F n="$pr_number"
    ```
 
    **Both `pageInfo`s are load-bearing**, and both need their `endCursor` —
@@ -389,7 +391,7 @@ Four things block a merge, not one. Collect all of them before triaging:
    reviews **with `--paginate`**:
 
    ```bash
-   gh api --paginate repos/Templar-Protocol/templar-liquidator/pulls/$ARGUMENTS/reviews \
+   gh api --paginate "repos/Templar-Protocol/templar-liquidator/pulls/$pr_number/reviews" \
      --jq '.[] | select(.body != "")
                | select(.user.login == "claude[bot]" or .user.login == "coderabbitai[bot]"
                         or .user.login == "copilot-pull-request-reviewer[bot]")
@@ -422,7 +424,8 @@ Four things block a merge, not one. Collect all of them before triaging:
    drops the newest page — the one these findings live on.
 
 3. **Failing checks** — group the head sha's check runs **by name and classify
-   only the latest attempt of each**. A name can carry several runs (step 0),
+   only the latest attempt of each**. A name can carry several runs (the static
+   check set above),
    so judging every run flags an earlier attempt that a later one has already
    superseded — a re-run that went green would still read as a failure and burn
    a round. On that latest attempt: any conclusion other than `success` is a
@@ -469,7 +472,7 @@ for you. In descending order of likelihood:
   `mergeable: MERGEABLE`, zero approvals outstanding, and still `BLOCKED`:
 
   ```bash
-  gh api repos/Templar-Protocol/templar-liquidator/pulls/$ARGUMENTS/commits \
+  gh api "repos/Templar-Protocol/templar-liquidator/pulls/$pr_number/commits" \
     --jq '.[] | {sha:.sha[0:8], verified:.commit.verification.verified, reason:.commit.verification.reason}'
   ```
 
@@ -673,7 +676,7 @@ review baseline, and (for commits this loop made server-side) cannot be
 re-signed.
 
 - `BEHIND`, no conflicts →
-  `gh api -X PUT repos/Templar-Protocol/templar-liquidator/pulls/$ARGUMENTS/update-branch`.
+  `gh api -X PUT "repos/Templar-Protocol/templar-liquidator/pulls/$pr_number/update-branch"`.
   That is the "Update branch" button: the merge commit is created server-side
   and web-flow signed, so it satisfies `required_signatures` for free. Note
   `strict_required_status_checks_policy: false`, so being behind `main` does
@@ -714,7 +717,7 @@ the `(#N)`). Via the path chosen in preflight:
   `gh api graphql --input <file>` with a `{query, variables}` JSON body;
   `-F input=@file` does NOT work — it passes the file's contents as a *string*.
   Take `expectedHeadOid` from the server immediately before the mutation —
-  `gh pr view $ARGUMENTS --json headRefOid --jq .headRefOid` — never from
+  `gh pr view "$pr_number" --json headRefOid --jq .headRefOid` — never from
   `git rev-parse origin/<branch>`: this mutation moves the remote branch
   server-side without touching the local remote-tracking ref, so that ref is
   stale the moment you use it once. A stale value fails the mutation with an
@@ -754,7 +757,7 @@ the `(#N)`). Via the path chosen in preflight:
 
 For every thread addressed this round, in this order:
 
-1. Reply in-thread (`.../pulls/$ARGUMENTS/comments/{databaseId}/replies`):
+1. Reply in-thread (`.../pulls/$pr_number/comments/{databaseId}/replies`):
    fixed → what changed, one or two sentences; declined → the evidence;
    question → the answer. No thread is silently skipped. Reply **per comment**,
    not one aggregated summary comment — and Copilot's suppressed comments,

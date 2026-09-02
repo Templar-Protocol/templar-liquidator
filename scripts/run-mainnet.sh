@@ -110,6 +110,9 @@ fi
 if [ -n "$IGNORED_MARKETS" ]; then
     echo "  Ignored Markets:      $IGNORED_MARKETS"
 fi
+if [ -n "$DEPRECATED_MARKETS" ]; then
+    echo "  Retired Markets:      $DEPRECATED_MARKETS"
+fi
 
 echo ""
 
@@ -213,6 +216,24 @@ if [ -n "$IGNORED_MARKETS" ]; then
     IFS=',' read -ra MARKETS <<< "$IGNORED_MARKETS"
     for market in "${MARKETS[@]}"; do
         CMD_ARGS+=("--ignored-markets" "$market")
+    done
+fi
+
+# Forwarded the same way, and for the same reason: this script sources .env
+# without `set -a`, so a value there is shell-local and never reaches the
+# binary's environment. Missing this block, a .env naming retired markets
+# would launch a bot that happily scans them.
+if [ -n "$DEPRECATED_MARKETS" ]; then
+    IFS=',' read -ra MARKETS <<< "$DEPRECATED_MARKETS"
+    for market in "${MARKETS[@]}"; do
+        # Trimmed here because clap parses this list straight into AccountId
+        # with no trim step of its own, where IGNORED_MARKETS arrives as
+        # strings that build_config trims before parsing. So `a.near, b.near`
+        # costs that list nothing and would refuse startup for this one.
+        # Empty tokens (a trailing comma) are dropped.
+        market="${market#"${market%%[![:space:]]*}"}"
+        market="${market%"${market##*[![:space:]]}"}"
+        [ -n "$market" ] && CMD_ARGS+=("--deprecated-markets" "$market")
     done
 fi
 

@@ -13,6 +13,8 @@ use templar_gateway_client::{
 };
 use templar_gateway_core::GatewayContextBuilder;
 use templar_gateway_methods_spec::{contract, market, registry};
+
+use crate::metrics::FilterReason;
 use templar_gateway_oracle_updates_dispatch::GatewayContextBuilderOracleExt as _;
 use templar_gateway_types::common::Pagination;
 use tokio::{
@@ -104,6 +106,12 @@ pub struct ServiceConfig {
     pub allowed_markets: Vec<near_sdk::AccountId>,
     /// Market account IDs to ignore
     pub ignored_markets: Vec<near_sdk::AccountId>,
+
+    /// Markets the venue has retired. Subtracted like `ignored_markets` but
+    /// reported under its own `markets_filtered{reason="deprecated"}` label:
+    /// an operator needs to tell "we stopped funding this" from "this market
+    /// is gone".
+    pub deprecated_markets: Vec<near_sdk::AccountId>,
     /// Enable loop liquidation - repeatedly liquidate until position is healthy
     pub loop_liquidation: bool,
     /// Maximum iterations for loop liquidation (safety limit)
@@ -188,6 +196,7 @@ impl std::fmt::Debug for ServiceConfig {
             .field("ignored_collateral_assets", &self.ignored_collateral_assets)
             .field("allowed_markets", &self.allowed_markets)
             .field("ignored_markets", &self.ignored_markets)
+            .field("deprecated_markets", &self.deprecated_markets)
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field(
@@ -977,9 +986,10 @@ impl LiquidatorService {
             let mut filtered = crate::metrics::FilterTally::default();
             for market in &all_markets {
                 // Step 0: admission by allow/deny lists, before any RPC calls
-                if let Some(reason) = market_rejection_reason(
+                if let Some((label, reason)) = market_rejection_reason(
                     market,
                     &self.config.allowed_markets,
+                    &self.config.deprecated_markets,
                     &self.config.ignored_markets,
                 ) {
                     tracing::info!(
@@ -987,7 +997,7 @@ impl LiquidatorService {
                         reason,
                         "Market filtered out"
                     );
-                    filtered.record(crate::metrics::FilterReason::Ignored);
+                    filtered.record(label);
                     continue;
                 }
 
@@ -1716,24 +1726,39 @@ fn dedupe_deployments(listed: Vec<AccountId>) -> Vec<AccountId> {
         .collect()
 }
 
-/// Why one registry market is rejected by the operator's allow/deny
-/// lists — `Some(reason)` rejects, `None` admits. An empty
-/// allowlist admits everything (the pre-knob behavior); a non-empty one is
-/// the universe, and the denylist subtracts within it — a market on both
-/// lists is ignored. Checked before any per-market RPC.
+/// Why one registry market is rejected by the operator's allow/deny lists —
+/// `Some((label, cause))` rejects, `None` admits. Checked before any
+/// per-market RPC.
+///
+/// `DEPRECATED_MARKETS` and `IGNORED_MARKETS` both subtract, and deliberately
+/// do not share a metrics label. Ignoring is this operator's temporary
+/// choice — no inventory for that asset today; deprecation is a statement
+/// about the venue, which outlives any one deployment. A market on both
+/// reports deprecation, the stronger of the two, and a deprecated market is
+/// refused even inside an explicit `ALLOWED_MARKETS`: that list says which
+/// markets to consider, never that a retired one is fair game.
+///
+/// An empty allowlist admits everything (the pre-knob behavior); a non-empty
+/// one is the universe, and both denylists subtract within it.
 fn market_rejection_reason(
     market: &AccountId,
     allowed_markets: &[AccountId],
+    deprecated_markets: &[AccountId],
     ignored_markets: &[AccountId],
-) -> Option<&'static str> {
-    // Allowlist first: it defines the universe, and the denylist subtracts
+) -> Option<(FilterReason, &'static str)> {
+    // Deprecation first: it is the only one of the three that is true no
+    // matter how this deployment is configured.
+    if deprecated_markets.contains(market) {
+        return Some((FilterReason::Deprecated, "deprecated market"));
+    }
+    // Then the allowlist: it defines the universe, and the denylist subtracts
     // within it — so a market outside the allowlist reports the allowlist
     // as its reason even if it also appears in IGNORED_MARKETS.
     if !allowed_markets.is_empty() && !allowed_markets.contains(market) {
-        return Some("not in ALLOWED_MARKETS");
+        return Some((FilterReason::Ignored, "not in ALLOWED_MARKETS"));
     }
     if ignored_markets.contains(market) {
-        return Some("ignored market");
+        return Some((FilterReason::Ignored, "ignored market"));
     }
     None
 }
@@ -1890,30 +1915,74 @@ mod tests {
         let ignored = vec![m("b.near"), m("c.near")];
         let none: Vec<AccountId> = vec![];
 
-        assert_eq!(market_rejection_reason(&m("x.near"), &none, &none), None);
         assert_eq!(
-            market_rejection_reason(&m("a.near"), &allowed, &none),
+            market_rejection_reason(&m("x.near"), &none, &none, &none),
+            None
+        );
+        assert_eq!(
+            market_rejection_reason(&m("a.near"), &allowed, &none, &none),
             None,
             "allowlisted market admitted"
         );
         assert_eq!(
-            market_rejection_reason(&m("x.near"), &allowed, &none),
-            Some("not in ALLOWED_MARKETS"),
+            market_rejection_reason(&m("x.near"), &allowed, &none, &none),
+            Some((FilterReason::Ignored, "not in ALLOWED_MARKETS")),
         );
         assert_eq!(
-            market_rejection_reason(&m("c.near"), &none, &ignored),
-            Some("ignored market"),
+            market_rejection_reason(&m("c.near"), &none, &none, &ignored),
+            Some((FilterReason::Ignored, "ignored market")),
         );
         assert_eq!(
-            market_rejection_reason(&m("b.near"), &allowed, &ignored),
-            Some("ignored market"),
+            market_rejection_reason(&m("b.near"), &allowed, &none, &ignored),
+            Some((FilterReason::Ignored, "ignored market")),
             "a market on both lists is ignored"
         );
         // Outside the allowlist AND denylisted: the allowlist is the
         // universe, so it names the reason.
         assert_eq!(
-            market_rejection_reason(&m("c.near"), &allowed, &ignored),
-            Some("not in ALLOWED_MARKETS"),
+            market_rejection_reason(&m("c.near"), &allowed, &none, &ignored),
+            Some((FilterReason::Ignored, "not in ALLOWED_MARKETS")),
+        );
+    }
+
+    /// A retired market is a permanent statement about the venue; an ignored
+    /// one is this operator's temporary choice. They must not share a label,
+    /// or `markets_filtered{reason=…}` cannot tell "we stopped funding this"
+    /// from "this market no longer exists to serve".
+    #[test]
+    fn deprecated_markets_are_reported_apart_from_ignored() {
+        let m = |s: &str| s.parse::<AccountId>().unwrap();
+        let none: Vec<AccountId> = vec![];
+        let deprecated = vec![m("old.near"), m("both.near")];
+        let ignored = vec![m("skip.near"), m("both.near")];
+
+        assert_eq!(
+            market_rejection_reason(&m("old.near"), &none, &deprecated, &none),
+            Some((FilterReason::Deprecated, "deprecated market")),
+        );
+        assert_eq!(
+            market_rejection_reason(&m("skip.near"), &none, &none, &ignored),
+            Some((FilterReason::Ignored, "ignored market")),
+        );
+        // Retirement outranks a temporary skip: the stronger statement is
+        // the one an operator needs to see.
+        assert_eq!(
+            market_rejection_reason(&m("both.near"), &none, &deprecated, &ignored),
+            Some((FilterReason::Deprecated, "deprecated market")),
+            "a market on both lists reports deprecation"
+        );
+        // A deprecated market inside an explicit allowlist is still refused:
+        // ALLOWED_MARKETS says which markets to consider, never that a
+        // retired one is fair game.
+        let allowed = vec![m("old.near")];
+        assert_eq!(
+            market_rejection_reason(&m("old.near"), &allowed, &deprecated, &none),
+            Some((FilterReason::Deprecated, "deprecated market")),
+        );
+        assert_eq!(
+            market_rejection_reason(&m("live.near"), &none, &deprecated, &ignored),
+            None,
+            "an unlisted market is still admitted"
         );
     }
 

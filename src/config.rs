@@ -287,9 +287,30 @@ pub struct Args {
     #[arg(long, env = "ALLOWED_MARKETS", value_delimiter = ',')]
     pub allowed_markets: Vec<AccountId>,
 
-    /// Market account IDs to ignore (comma-separated)
+    /// Market account IDs to ignore (comma-separated). This operator's own
+    /// choice, and expected to change: no inventory for that asset this week,
+    /// a market under investigation. For markets the venue itself has
+    /// retired, use `DEPRECATED_MARKETS` — the two are reported apart.
     #[arg(long, env = "IGNORED_MARKETS", value_delimiter = ',')]
     pub ignored_markets: Vec<String>,
+
+    /// Market account IDs the venue has retired (comma-separated).
+    ///
+    /// Subtracted exactly like `IGNORED_MARKETS`, but counted under
+    /// `markets_filtered{reason="deprecated"}` instead of `"ignored"`, and
+    /// refused even inside an explicit `ALLOWED_MARKETS`. Kept apart because
+    /// the two answer different questions: an ignored market is a funding or
+    /// operational decision that changes week to week, while a deprecated one
+    /// is a fact about the venue that outlives any deployment — and a
+    /// protocol that retires a market rarely disables it on-chain, so
+    /// nothing the bot can read tells it apart from a live one.
+    ///
+    /// Typed `AccountId`, like `ALLOWED_MARKETS` and unlike `IGNORED_MARKETS`'
+    /// warn-and-skip: a typo dropped from this list silently un-retires a
+    /// market the venue has closed, which is the one outcome the list exists
+    /// to prevent. A bad entry refuses startup instead.
+    #[arg(long, env = "DEPRECATED_MARKETS", value_delimiter = ',')]
+    pub deprecated_markets: Vec<AccountId>,
 
     /// Enable loop liquidation - repeatedly liquidate until position is healthy
     #[arg(long, env = "LOOP_LIQUIDATION", default_value_t = false)]
@@ -492,6 +513,7 @@ impl std::fmt::Debug for Args {
             .field("ignored_collateral_assets", &self.ignored_collateral_assets)
             .field("allowed_markets", &self.allowed_markets)
             .field("ignored_markets", &self.ignored_markets)
+            .field("deprecated_markets", &self.deprecated_markets)
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field(
@@ -706,6 +728,13 @@ impl Args {
             );
         }
 
+        if !self.deprecated_markets.is_empty() {
+            tracing::info!(
+                deprecated_markets = ?self.deprecated_markets,
+                "Market filtering: skipping markets the venue has retired"
+            );
+        }
+
         if !self.allowed_markets.is_empty() {
             tracing::info!(
                 allowed_markets = ?self.allowed_markets,
@@ -890,6 +919,7 @@ impl Args {
             ignored_collateral_assets,
             allowed_markets: self.allowed_markets.clone(),
             ignored_markets,
+            deprecated_markets: self.deprecated_markets.clone(),
             loop_liquidation: self.loop_liquidation,
             max_loop_iterations: self.max_loop_iterations,
             lazer_ws_url: self.lazer_ws_url.clone(),
@@ -992,6 +1022,7 @@ mod tests {
             ignored_collateral_assets: vec![],
             allowed_markets: vec![],
             ignored_markets: vec![],
+            deprecated_markets: vec![],
             loop_liquidation: false,
             max_loop_iterations: std::num::NonZeroU32::new(10).unwrap(),
             lazer_ws_url: "wss://pyth-lazer-0.dourolabs.app/v1/stream"
@@ -1575,18 +1606,44 @@ mod tests {
     /// URL loses its last path segment. Refuse it at startup instead.
     #[test]
     fn redstone_data_service_id_must_not_be_blank() {
-        let err = try_parse_with(&["--redstone-data-service-id", ""])
-            .map(|args| args.build_config())
-            .expect("clap accepts the empty string")
-            .expect_err("a blank data service id must refuse startup");
-        assert!(
-            err.contains("REDSTONE_DATA_SERVICE_ID"),
-            "the error must name the knob to fix: {err}"
-        );
+        for bad in [
+            "",
+            "redstone-primary-prod ",
+            " redstone-primary-prod",
+            "redstone primary prod",
+        ] {
+            let err = try_parse_with(&["--redstone-data-service-id", bad])
+                .map(|args| args.build_config())
+                .expect("clap accepts any string here")
+                .expect_err("a blank or padded data service id must refuse startup");
+            assert!(
+                err.contains("REDSTONE_DATA_SERVICE_ID"),
+                "the error must name the knob to fix: {err}"
+            );
+        }
 
         let args = parse_with(&["--redstone-data-service-id", "redstone-avalanche-prod"]);
         let config = args.build_config().expect("a named service is accepted");
         assert_eq!(config.redstone_data_service_id, "redstone-avalanche-prod");
+    }
+
+    /// The retired-market list must refuse startup on an unparseable entry,
+    /// the same way the allowlist does. Both reviewers asked for this, and the
+    /// reason is asymmetric: a typo silently dropped from a DENYlist
+    /// un-retires a market the venue has closed, so the bot would scan and
+    /// liquidate somewhere it was told not to go. Nothing else in the suite
+    /// would catch the field being loosened back to `Vec<String>`.
+    #[test]
+    fn deprecated_markets_parse_typed_and_fail_closed() {
+        let args = parse_with(&["--deprecated-markets", "old.tmplr.near,older.tmplr.near"]);
+        assert_eq!(args.deprecated_markets.len(), 2);
+        let config = args.build_config().expect("valid test config");
+        assert_eq!(config.deprecated_markets.len(), 2);
+        assert_eq!(config.deprecated_markets[0].to_string(), "old.tmplr.near");
+
+        let err = try_parse_with(&["--deprecated-markets", "not..valid..id"])
+            .expect_err("an unparseable retired-market entry must refuse startup");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     /// A well-formed key whose embedded public half does not match its

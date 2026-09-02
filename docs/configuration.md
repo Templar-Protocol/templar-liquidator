@@ -69,7 +69,8 @@ All comma-delimited (`value_delimiter = ','` in clap — repeat the flag or comm
 | `ALLOWED_COLLATERAL_ASSETS` | `--allowed-collateral-assets` | empty (all assets allowed) | Allowlist of collateral asset ids; if set, only markets with these collateral assets are processed. |
 | `IGNORED_COLLATERAL_ASSETS` | `--ignored-collateral-assets` | empty | Collateral asset ids to skip. |
 | `ALLOWED_MARKETS` | `--allowed-markets` | empty (all markets) | Allowlist of market account ids; when set, only these markets are processed. `IGNORED_MARKETS` still subtracts within the allowlist (a market on both lists is skipped). Entries are parsed as account ids at startup — an unparseable entry refuses to start rather than silently emptying the allowlist (which would fail open to every market). |
-| `IGNORED_MARKETS` | `--ignored-markets` | empty | Market account ids to skip entirely. |
+| `IGNORED_MARKETS` | `--ignored-markets` | empty | Market account ids to skip entirely — this operator's own choice, expected to change (no inventory for that asset this week, a market under investigation). Counted as `markets_filtered{reason="ignored"}`. |
+| `DEPRECATED_MARKETS` | `--deprecated-markets` | empty | Market account ids the **venue** has retired. Subtracted exactly like `IGNORED_MARKETS`, but counted as `markets_filtered{reason="deprecated"}` and refused even inside an explicit `ALLOWED_MARKETS`. Kept separate because the two answer different questions, and a protocol that retires a market rarely disables it on-chain — the registry keeps listing it and its contract keeps accepting borrows, so nothing the bot can read distinguishes it from a live market. Entries are parsed as account ids at startup: a typo dropped from a denylist would silently un-retire a closed market, so a bad entry refuses to start. |
 
 ## Oracle price sources
 

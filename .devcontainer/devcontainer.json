@@ -19,23 +19,15 @@
   // current major tag resolves to — same effect, so a rebuild can't silently
   // execute changed feature install scripts.
   //
-  // The current major differs per feature: terraform and github-cli are on
-  // 1.x, docker-in-docker is on 4.x. Don't assume ":1" is current — resolve
+  // The current major differs per feature: github-cli is on 1.x,
+  // docker-in-docker on 4.x. Don't assume ":1" is current — resolve
   // each one. To refresh deliberately:
   //   docker buildx imagetools inspect ghcr.io/devcontainers/features/<name>:<major>
   // and confirm the new exact version before bumping it here.
   //
-  // docker-in-docker must stay on 2.x or newer. 1.0.9 unconditionally
-  // installed Compose v1, and on any non-x86_64 host that path ran
-  // `pip3 install --user pipx` against the system Python — which bookworm
-  // refuses with PEP 668's "externally-managed-environment", failing the
-  // whole build. It broke arm64 (Apple Silicon) only, so amd64 hosts never
-  // saw it. 4.x installs a standalone Compose v2 binary and never touches
-  // system Python.
-  //
-  // github-cli is pinned to the same exact version terraform's own
-  // `dependsOn: github-cli:1` resolves to, so the feature is installed once
-  // rather than twice per build.
+  // docker-in-docker must stay on 2.x or newer: 1.x installs Compose v1
+  // through the system Python, which bookworm refuses (PEP 668), failing
+  // the build on arm64 hosts. 4.x ships a standalone Compose v2 binary.
   //
   // node is REQUIRED to build this crate, not just to run the Claude Code CLI
   // installed in post-create.sh. templar-gateway-oracle-updates-dispatch (a
@@ -47,7 +39,6 @@
   //
   // Pinned to 22; Node 20 went end-of-life in April 2026.
   "features": {
-    "ghcr.io/devcontainers/features/terraform:1.5.0": {},
     "ghcr.io/devcontainers/features/github-cli:1.1.2": {},
     "ghcr.io/devcontainers/features/docker-in-docker:4.1.0": {},
     "ghcr.io/devcontainers/features/node:2.1.0": { "version": "22" }
@@ -90,7 +81,6 @@
       "extensions": [
         "rust-lang.rust-analyzer",
         "tamasfe.even-better-toml",
-        "hashicorp.terraform",
         "anthropic.claude-code"
       ]
     }

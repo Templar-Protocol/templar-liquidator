@@ -93,11 +93,9 @@ updates:
         patterns: ["*"]
 
   # ── Dev container ────────────────────────────────────
-  # This is the ecosystem that would have caught the bug fixed in #13: the
-  # docker-in-docker feature sat pinned at 1.0.9 (Nov 2022) while its current
-  # major moved to 4.x, and the stale install script broke every arm64
-  # rebuild. Features are pinned to exact versions on purpose, so without
-  # Dependabot watching them nothing ages them forward.
+  # Features are pinned to exact versions on purpose, so without Dependabot
+  # watching them nothing ages them forward — and a feature left years behind
+  # eventually ships an install script the current base image refuses to run.
   - package-ecosystem: "devcontainers"
     directory: "/"
     schedule:

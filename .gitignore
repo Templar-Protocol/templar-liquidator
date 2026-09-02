@@ -1,17 +1,4 @@
 /target
 .env
 *.log
-
-# Terraform: forks must not commit state (it can contain resolved values) or
-# their own tfvars.
-**/.terraform/
-*.tfstate
-*.tfstate.*
-*.tfvars
-!*.tfvars.example
-
-# Claude Code scratch state. `.claude/commands/` is intentionally tracked (the
-# /fix-pr and /fix-pr-auto commands are shared tooling); worktrees are
-# per-machine checkouts and are embedded git repos, which must never be
-# committed into this one.
 .claude/worktrees/

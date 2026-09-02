@@ -1,13 +1,11 @@
-# Never lifted alongside the Dockerfile from the contracts monorepo - without
-# this the build context ships target/, which is gigabytes.
+# Without this file the build context ships target/, which is gigabytes.
 
 # Build output / VCS / CI
 target/
 .git/
 .github/
 
-# Infra and docs not needed inside the image
-terraform/
+# Docs and tooling not needed inside the image
 docs/
 scripts/
 deny.toml

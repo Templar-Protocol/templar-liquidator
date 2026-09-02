@@ -243,7 +243,7 @@ jobs:
       # repository's default branch"). So no PR that edits this file gets
       # reviewed, the `claude-review` label included, and a change to this
       # workflow only takes effect once it has been merged to main.
-      - uses: anthropics/claude-code-action@dcb57747bfceeaa1fa72638cae52295d1d853d4a # v1.0.199
+      - uses: anthropics/claude-code-action@a874e9ecd7bb36efdad65429c6b35815f5a08f10 # v1.0.210
         if: steps.wrapper.outputs.ok == 'true'
         # Long-running work blocks the main session instead of being moved to
         # the background. A backgrounded subagent reports by waking its parent

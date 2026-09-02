@@ -772,6 +772,10 @@ pub struct SwapConfig {
 #[derive(Clone)]
 pub struct OracleApis {
     pub redstone_api_url: url::Url,
+    /// The RedStone data service both legs name. One value so the scan-side
+    /// price API and the push leg's signed packages describe the same feed
+    /// set; see [`crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID`].
+    pub redstone_data_service: String,
     pub lazer_api: Option<crate::lazer::LazerApiConfig>,
     /// RedStone push leg; `None` disables it.
     pub redstone_push: Option<crate::redstone_push::RedStonePushConfig>,

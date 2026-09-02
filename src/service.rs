@@ -116,6 +116,12 @@ pub struct ServiceConfig {
     pub pyth_pro_source: Option<templar_gateway_oracle_updates_dispatch::LazerSourceConfig>,
     /// RedStone public price API for scan-side proxy price composition
     pub redstone_api_url: url::Url,
+
+    /// The RedStone data service both legs name, from
+    /// `REDSTONE_DATA_SERVICE_ID`. Held here rather than read out of
+    /// `redstone_push` because the push leg is optional and scan-side pricing
+    /// still needs it when the push is disabled.
+    pub redstone_data_service_id: String,
     /// RedStone push leg (`REDSTONE_PUSH`, `REDSTONE_GATEWAY_URL`,
     /// `REDSTONE_DATA_SERVICE_ID`); `None` when disabled.
     pub redstone_push: Option<crate::redstone_push::RedStonePushConfig>,
@@ -188,6 +194,7 @@ impl std::fmt::Debug for ServiceConfig {
             )
             .field("pyth_pro_source", &self.pyth_pro_source.is_some())
             .field("redstone_api_url", &self.redstone_api_url)
+            .field("redstone_data_service_id", &self.redstone_data_service_id)
             .field(
                 "redstone_push",
                 &self
@@ -335,6 +342,7 @@ impl LiquidatorService {
             pyth_pro_updates.clone(),
             crate::OracleApis {
                 redstone_api_url: config.redstone_api_url.clone(),
+                redstone_data_service: config.redstone_data_service_id.clone(),
                 lazer_api: config.lazer_api.clone(),
                 redstone_push: config.redstone_push.clone(),
             },
@@ -1161,6 +1169,7 @@ impl LiquidatorService {
                     },
                     crate::OracleApis {
                         redstone_api_url: self.config.redstone_api_url.clone(),
+                        redstone_data_service: self.config.redstone_data_service_id.clone(),
                         lazer_api: self.config.lazer_api.clone(),
                         redstone_push: self.config.redstone_push.clone(),
                     },

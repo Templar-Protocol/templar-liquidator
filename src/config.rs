@@ -135,6 +135,13 @@ impl std::fmt::Debug for ValidatedSignerKey {
     }
 }
 
+/// The RedStone data service used when the operator names none: the public
+/// service whose signer set the shipped adapters are configured with. It is
+/// the default for `REDSTONE_DATA_SERVICE_ID`, and that one value reaches
+/// both legs — the scan-side price API and the push leg's signed packages —
+/// so overriding the knob moves both together rather than splitting them.
+pub const DEFAULT_REDSTONE_DATA_SERVICE_ID: &str = "redstone-primary-prod";
+
 /// Command-line arguments for the liquidator bot.
 ///
 /// `Debug` is implemented by hand rather than derived: this struct holds the
@@ -143,12 +150,6 @@ impl std::fmt::Debug for ValidatedSignerKey {
 /// anything formatted `Args` (a `tracing::debug!(?args)`, a panic payload,
 /// etc). See the impl below for the redaction and [`ServiceConfig`]'s own
 /// hand-written `Debug` for the same pattern applied to the built config.
-/// The RedStone data service both legs read: the scan-side price API
-/// ([`crate::redstone::DATA_SERVICE`]) and the push leg's signed packages.
-/// One constant so the two cannot drift — a scan priced from one service and
-/// a package pushed from another would disagree about the same feed.
-pub const DEFAULT_REDSTONE_DATA_SERVICE_ID: &str = "redstone-primary-prod";
-
 #[derive(Clone, Parser)]
 #[command(name = "templar-liquidator")]
 #[command(about = "Inventory-based liquidator bot for Templar Protocol")]
@@ -876,6 +877,7 @@ impl Args {
             lazer_ws_url: self.lazer_ws_url.clone(),
             pyth_pro_source,
             redstone_api_url: self.redstone_api_url.clone(),
+            redstone_data_service_id: self.redstone_data_service_id.clone(),
             redstone_push,
             // The config type's constructor enforces HTTPS — a bearer token
             // over plain http travels in cleartext. Refused at startup,
@@ -981,7 +983,7 @@ mod tests {
             redstone_gateway_url: "https://oracle-gateway-1.a.redstone.finance"
                 .parse()
                 .unwrap(),
-            redstone_data_service_id: "redstone-primary-prod".to_string(),
+            redstone_data_service_id: DEFAULT_REDSTONE_DATA_SERVICE_ID.to_string(),
             redstone_push: true,
             lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
             lazer_api_token: None,

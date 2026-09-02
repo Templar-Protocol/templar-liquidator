@@ -33,20 +33,20 @@ pub(crate) const SYNTH_EXPO: i32 = -8;
 /// yields a negative age that passes every bound there is.
 pub(crate) const MAX_FUTURE_SKEW_MS: i64 = 30_000;
 
-/// The RedStone data service queried for scan-side prices. Matches
-/// `REDSTONE_DATA_SERVICE_ID`'s default, so both legs read the same service:
-/// a price this bot scans on and a package it later pushes come from one
-/// source of truth.
-pub(crate) const DATA_SERVICE: &str = crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID;
-
-/// The `/prices` URL for `symbols`, query included. Pure so the request this
-/// module actually sends can be asserted without a network round trip — the
-/// provider being wrong is invisible at the type level and, as the 500s
-/// showed, invisible at runtime too until every RedStone-priced market
-/// quietly stops being scanned.
-pub(crate) fn prices_url(base_url: &Url, symbols: &[String]) -> String {
+/// The `/prices` URL for `symbols` on `data_service`, query included.
+///
+/// The service is a parameter rather than a constant because the push leg
+/// already takes it from `REDSTONE_DATA_SERVICE_ID`: pinning scan pricing to
+/// the default here would let one knob move the push leg while scan stayed
+/// behind, which is the drift the two are meant not to have.
+///
+/// Pure so the request this module actually sends can be asserted without a
+/// network round trip — a wrong service is invisible at the type level and,
+/// as the 500s showed, invisible at runtime too until every RedStone-priced
+/// market quietly stops being scanned.
+pub(crate) fn prices_url(base_url: &Url, symbols: &[String], data_service: &str) -> String {
     format!(
-        "{}/prices?symbols={}&provider={DATA_SERVICE}",
+        "{}/prices?symbols={}&provider={data_service}",
         base_url.as_str().trim_end_matches('/'),
         symbols.join(",")
     )
@@ -158,21 +158,25 @@ pub(crate) fn parse_prices_response(
 pub struct RedStoneApiClient {
     http_client: reqwest::Client,
     base_url: Url,
+    /// The data service every request names, from `REDSTONE_DATA_SERVICE_ID`.
+    data_service: String,
 }
 
 impl std::fmt::Debug for RedStoneApiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedStoneApiClient")
             .field("base_url", &self.base_url.as_str())
+            .field("data_service", &self.data_service)
             .finish_non_exhaustive()
     }
 }
 
 impl RedStoneApiClient {
-    pub fn new(base_url: Url) -> Self {
+    pub fn new(base_url: Url, data_service: String) -> Self {
         Self {
             http_client: reqwest::Client::new(),
             base_url,
+            data_service,
         }
     }
 
@@ -188,7 +192,7 @@ impl RedStoneApiClient {
         if symbols.is_empty() {
             return HashMap::new();
         }
-        let url = prices_url(&self.base_url, symbols);
+        let url = prices_url(&self.base_url, symbols, &self.data_service);
         let response = self
             .http_client
             .get(&url)
@@ -236,9 +240,13 @@ mod tests {
     /// symbol and `redstone&limit=1` answers 200 with month-old quotes, so a
     /// wrong value here is either total silence or, worse, confident staleness.
     #[test]
-    fn prices_url_queries_the_live_data_service() {
+    fn prices_url_names_the_default_data_service() {
         let base: Url = "https://api.redstone.finance".parse().unwrap();
-        let url = prices_url(&base, &["XLM".to_string(), "LTC".to_string()]);
+        let url = prices_url(
+            &base,
+            &["XLM".to_string(), "LTC".to_string()],
+            crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID,
+        );
 
         assert_eq!(
             url,
@@ -248,10 +256,18 @@ mod tests {
             !url.contains("limit="),
             "limit= turns the 500 into a 200 serving quotes a month old: {url}"
         );
+    }
+
+    /// `REDSTONE_DATA_SERVICE_ID` reaches scan pricing, not just the push leg.
+    /// Pinned because the two drifting is invisible: the push would follow the
+    /// override while scan silently stayed on the default, and both legs would
+    /// still look healthy while describing different feed sets.
+    #[test]
+    fn prices_url_follows_a_configured_data_service() {
+        let base: Url = "https://api.redstone.finance".parse().unwrap();
         assert_eq!(
-            DATA_SERVICE,
-            crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID,
-            "scan and push must read the same data service"
+            prices_url(&base, &["XLM".to_string()], "redstone-avalanche-prod"),
+            "https://api.redstone.finance/prices?symbols=XLM&provider=redstone-avalanche-prod"
         );
     }
 
@@ -259,15 +275,16 @@ mod tests {
     /// neither may double a separator or swallow the prefix.
     #[test]
     fn prices_url_tolerates_base_url_shapes() {
+        let ds = crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID;
         let slash: Url = "https://api.redstone.finance/".parse().unwrap();
         assert_eq!(
-            prices_url(&slash, &["XLM".to_string()]),
+            prices_url(&slash, &["XLM".to_string()], ds),
             "https://api.redstone.finance/prices?symbols=XLM&provider=redstone-primary-prod"
         );
 
         let prefixed: Url = "https://proxy.example/redstone/".parse().unwrap();
         assert_eq!(
-            prices_url(&prefixed, &["XLM".to_string()]),
+            prices_url(&prefixed, &["XLM".to_string()], ds),
             "https://proxy.example/redstone/prices?symbols=XLM&provider=redstone-primary-prod"
         );
     }

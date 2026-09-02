@@ -280,9 +280,30 @@ pub struct Args {
     #[arg(long, env = "ALLOWED_MARKETS", value_delimiter = ',')]
     pub allowed_markets: Vec<AccountId>,
 
-    /// Market account IDs to ignore (comma-separated)
+    /// Market account IDs to ignore (comma-separated). This operator's own
+    /// choice, and expected to change: no inventory for that asset this week,
+    /// a market under investigation. For markets the venue itself has
+    /// retired, use `DEPRECATED_MARKETS` — the two are reported apart.
     #[arg(long, env = "IGNORED_MARKETS", value_delimiter = ',')]
     pub ignored_markets: Vec<String>,
+
+    /// Market account IDs the venue has retired (comma-separated).
+    ///
+    /// Subtracted exactly like `IGNORED_MARKETS`, but counted under
+    /// `markets_filtered{reason="deprecated"}` instead of `"ignored"`, and
+    /// refused even inside an explicit `ALLOWED_MARKETS`. Kept apart because
+    /// the two answer different questions: an ignored market is a funding or
+    /// operational decision that changes week to week, while a deprecated one
+    /// is a fact about the venue that outlives any deployment — and a
+    /// protocol that retires a market rarely disables it on-chain, so
+    /// nothing the bot can read tells it apart from a live one.
+    ///
+    /// Typed `AccountId`, like `ALLOWED_MARKETS` and unlike `IGNORED_MARKETS`'
+    /// warn-and-skip: a typo dropped from this list silently un-retires a
+    /// market the venue has closed, which is the one outcome the list exists
+    /// to prevent. A bad entry refuses startup instead.
+    #[arg(long, env = "DEPRECATED_MARKETS", value_delimiter = ',')]
+    pub deprecated_markets: Vec<AccountId>,
 
     /// Enable loop liquidation - repeatedly liquidate until position is healthy
     #[arg(long, env = "LOOP_LIQUIDATION", default_value_t = false)]
@@ -483,6 +504,7 @@ impl std::fmt::Debug for Args {
             .field("ignored_collateral_assets", &self.ignored_collateral_assets)
             .field("allowed_markets", &self.allowed_markets)
             .field("ignored_markets", &self.ignored_markets)
+            .field("deprecated_markets", &self.deprecated_markets)
             .field("loop_liquidation", &self.loop_liquidation)
             .field("max_loop_iterations", &self.max_loop_iterations)
             .field(
@@ -697,6 +719,13 @@ impl Args {
             );
         }
 
+        if !self.deprecated_markets.is_empty() {
+            tracing::info!(
+                deprecated_markets = ?self.deprecated_markets,
+                "Market filtering: skipping markets the venue has retired"
+            );
+        }
+
         if !self.allowed_markets.is_empty() {
             tracing::info!(
                 allowed_markets = ?self.allowed_markets,
@@ -863,6 +892,7 @@ impl Args {
             ignored_collateral_assets,
             allowed_markets: self.allowed_markets.clone(),
             ignored_markets,
+            deprecated_markets: self.deprecated_markets.clone(),
             loop_liquidation: self.loop_liquidation,
             max_loop_iterations: self.max_loop_iterations,
             lazer_ws_url: self.lazer_ws_url.clone(),
@@ -964,6 +994,7 @@ mod tests {
             ignored_collateral_assets: vec![],
             allowed_markets: vec![],
             ignored_markets: vec![],
+            deprecated_markets: vec![],
             loop_liquidation: false,
             max_loop_iterations: std::num::NonZeroU32::new(10).unwrap(),
             lazer_ws_url: "wss://pyth-lazer-0.dourolabs.app/v1/stream"

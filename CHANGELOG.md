@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `DEPRECATED_MARKETS` / `--deprecated-markets` — markets the venue has retired, kept apart from `IGNORED_MARKETS`. Both subtract before any per-market RPC, but a deprecated market is counted as `markets_filtered{reason="deprecated"}` rather than `"ignored"` and is refused even inside an explicit `ALLOWED_MARKETS`. The two answer different questions: ignoring is an operator's funding or operational choice that changes week to week, while deprecation is a fact about the venue. It needs its own list because a protocol that retires a market rarely disables it on-chain — the registry keeps listing it and its contract keeps accepting borrows — so nothing the bot can read tells it apart from a live market. Entries are parsed as account ids at startup (like `ALLOWED_MARKETS`, unlike `IGNORED_MARKETS`' warn-and-skip): silently dropping a typo would un-retire a closed market.
+
 ## [1.1.0] - 2026-09-02
 
 ### Changed

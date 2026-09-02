@@ -14,7 +14,7 @@ env:
   CARGO_TERM_COLOR: always
   # THE SINGLE-REV RULE (see this repo's CLAUDE.md): must match every
   # templar-* `rev =` pin in Cargo.toml.
-  CONTRACTS_REV: 8f8fe1d1a057756f71438abc75d7b3c688b282f0
+  CONTRACTS_REV: f1a62bece8179103095019f2e30d7d699adae3c5
 
 jobs:
   sandbox:
@@ -35,7 +35,7 @@ jobs:
       # contract (market, mock-ft, mock-mt, mock-oracle) the first time each
       # is requested.
       - name: Install cargo-near
-        uses: Templar-Protocol/contracts/.github/actions/cargo-near@8f8fe1d1a057756f71438abc75d7b3c688b282f0
+        uses: Templar-Protocol/contracts/.github/actions/cargo-near@f1a62bece8179103095019f2e30d7d699adae3c5
 
       # `cargo near build` runs with its cwd inside /tmp/contracts, so rustup
       # resolves *that* checkout's own rust-toolchain.toml (a different

@@ -73,6 +73,11 @@ pub struct Metrics {
 pub(crate) enum FilterReason {
     /// Excluded by `ALLOWED_MARKETS` / `IGNORED_MARKETS`.
     Ignored,
+    /// Named in `DEPRECATED_MARKETS`: retired by the venue, not by this
+    /// operator. Separate from `Ignored` because the two answer different
+    /// questions — "we chose not to serve this" versus "there is nothing
+    /// here left to serve".
+    Deprecated,
     /// A registry deployment without `get_configuration` (not a market).
     NotAMarket,
     /// Missing, unparseable, or unsupported contract version.
@@ -95,6 +100,7 @@ impl FilterReason {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Ignored => "ignored",
+            Self::Deprecated => "deprecated",
             Self::NotAMarket => "not-a-market",
             Self::Version => "version",
             Self::Oracle => "oracle",

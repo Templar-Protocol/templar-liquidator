@@ -48,7 +48,7 @@
   // Pinned to 22; Node 20 went end-of-life in April 2026.
   "features": {
     "ghcr.io/devcontainers/features/terraform:1.5.0": {},
-    "ghcr.io/devcontainers/features/github-cli:1.1.1": {},
+    "ghcr.io/devcontainers/features/github-cli:1.1.2": {},
     "ghcr.io/devcontainers/features/docker-in-docker:4.1.0": {},
     "ghcr.io/devcontainers/features/node:2.1.0": { "version": "22" }
   },

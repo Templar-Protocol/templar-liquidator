@@ -135,6 +135,13 @@ impl std::fmt::Debug for ValidatedSignerKey {
     }
 }
 
+/// The RedStone data service used when the operator names none: the public
+/// service whose signer set the shipped adapters are configured with. It is
+/// the default for `REDSTONE_DATA_SERVICE_ID`, and that one value reaches
+/// both legs — the scan-side price API and the push leg's signed packages —
+/// so overriding the knob moves both together rather than splitting them.
+pub const DEFAULT_REDSTONE_DATA_SERVICE_ID: &str = "redstone-primary-prod";
+
 /// Command-line arguments for the liquidator bot.
 ///
 /// `Debug` is implemented by hand rather than derived: this struct holds the
@@ -345,11 +352,13 @@ pub struct Args {
     pub redstone_gateway_url: Url,
 
     /// RedStone data-service id whose signer set the adapters are configured
-    /// with; packages from any other service are rejected on-chain.
+    /// with; packages from any other service are rejected on-chain. The same
+    /// service the scan-side price API is queried with — see
+    /// [`DEFAULT_REDSTONE_DATA_SERVICE_ID`].
     #[arg(
         long,
         env = "REDSTONE_DATA_SERVICE_ID",
-        default_value = "redstone-primary-prod"
+        default_value = DEFAULT_REDSTONE_DATA_SERVICE_ID
     )]
     pub redstone_data_service_id: String,
 
@@ -791,6 +800,24 @@ impl Args {
 
         let signer_key = ValidatedSignerKey::try_from(self.signer_key.as_str())?;
 
+        // Checked here rather than at either use site: this one value selects
+        // the data service for BOTH RedStone legs, and blank fails far from
+        // its cause — the scan query degrades to `provider=` and the push URL
+        // loses its last path segment, each looking like an upstream problem.
+        // Any whitespace, not just an all-blank value: a trailing space is
+        // easy to leave in a `.env` line or a compose `env_file`, both of
+        // which preserve it, and trimming to decide while storing the padded
+        // string would admit exactly the case this rejects. Rejected rather
+        // than trimmed so the operator fixes the source of the typo.
+        if self.redstone_data_service_id.is_empty()
+            || self.redstone_data_service_id.contains(char::is_whitespace)
+        {
+            return Err(format!(
+                "REDSTONE_DATA_SERVICE_ID must name a data service with no whitespace (e.g. redstone-primary-prod), got {:?}: it selects both the scan-side price query and the push leg's signed packages, and a padded or empty value breaks each of them somewhere far from here",
+                self.redstone_data_service_id
+            ));
+        }
+
         let redstone_push = if self.redstone_push {
             if self.redstone_gateway_url.scheme() != "https" {
                 return Err(format!(
@@ -898,6 +925,7 @@ impl Args {
             lazer_ws_url: self.lazer_ws_url.clone(),
             pyth_pro_source,
             redstone_api_url: self.redstone_api_url.clone(),
+            redstone_data_service_id: self.redstone_data_service_id.clone(),
             redstone_push,
             // The config type's constructor enforces HTTPS — a bearer token
             // over plain http travels in cleartext. Refused at startup,
@@ -1004,7 +1032,7 @@ mod tests {
             redstone_gateway_url: "https://oracle-gateway-1.a.redstone.finance"
                 .parse()
                 .unwrap(),
-            redstone_data_service_id: "redstone-primary-prod".to_string(),
+            redstone_data_service_id: DEFAULT_REDSTONE_DATA_SERVICE_ID.to_string(),
             redstone_push: true,
             lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
             lazer_api_token: None,
@@ -1570,6 +1598,33 @@ mod tests {
         let err = try_parse_with(&["--allowed-markets", "not..valid..id"])
             .expect_err("an unparseable allowlist entry must refuse startup");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    /// An empty data service id is representable through the CLI and reaches
+    /// both RedStone legs, where it fails far from its cause: the scan query
+    /// becomes `provider=` (the API answers, with nothing usable) and the push
+    /// URL loses its last path segment. Refuse it at startup instead.
+    #[test]
+    fn redstone_data_service_id_must_not_be_blank() {
+        for bad in [
+            "",
+            "redstone-primary-prod ",
+            " redstone-primary-prod",
+            "redstone primary prod",
+        ] {
+            let err = try_parse_with(&["--redstone-data-service-id", bad])
+                .map(|args| args.build_config())
+                .expect("clap accepts any string here")
+                .expect_err("a blank or padded data service id must refuse startup");
+            assert!(
+                err.contains("REDSTONE_DATA_SERVICE_ID"),
+                "the error must name the knob to fix: {err}"
+            );
+        }
+
+        let args = parse_with(&["--redstone-data-service-id", "redstone-avalanche-prod"]);
+        let config = args.build_config().expect("a named service is accepted");
+        assert_eq!(config.redstone_data_service_id, "redstone-avalanche-prod");
     }
 
     /// The retired-market list must refuse startup on an unparseable entry,

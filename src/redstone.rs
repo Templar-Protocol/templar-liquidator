@@ -7,8 +7,16 @@
 //! [`crate::oracle::OracleFetcher::update_onchain_prices`], so nothing here
 //! can bypass on-chain freshness or circuit-breaker state where funds move.
 //!
-//! Only the multi-symbol form (`/prices?symbols=A,B&provider=redstone`) is
-//! used: the single-symbol form serves a frozen quote upstream — never use it.
+//! Only the multi-symbol form (`/prices?symbols=A,B&provider=<service>`) is
+//! used: the single-symbol form serves a frozen quote upstream — never use
+//! it. `provider` is not optional — see below.
+//!
+//! The `provider` is the data service, not the vendor: `redstone-primary-prod`
+//! is the live one, and it is the same service id the push leg pulls signed
+//! packages from. The bare `provider=redstone` this once sent now answers 500
+//! for every symbol, and its `&limit=1` variant — the obvious way to make
+//! those 500s stop — answers 200 with quotes a month old. Neither the vendor
+//! name nor a 200 is evidence of a live feed; the data service is.
 
 use std::collections::HashMap;
 
@@ -25,6 +33,37 @@ pub(crate) const SYNTH_EXPO: i32 = -8;
 /// compare `now - publish_time` against a bound, and a future-dated quote
 /// yields a negative age that passes every bound there is.
 pub(crate) const MAX_FUTURE_SKEW_MS: i64 = 30_000;
+
+/// The `/prices` URL for `symbols` on `data_service`, query included.
+///
+/// The service is a parameter rather than a constant because the push leg
+/// already takes it from `REDSTONE_DATA_SERVICE_ID`: pinning scan pricing to
+/// the default here would let one knob move the push leg while scan stayed
+/// behind, which is the drift the two are meant not to have.
+///
+/// Pure so the request this module actually sends can be asserted without a
+/// network round trip — a wrong service is invisible at the type level and,
+/// as the 500s showed, invisible at runtime too until every RedStone-priced
+/// market quietly stops being scanned.
+pub(crate) fn prices_url(base_url: &Url, symbols: &[String], data_service: &str) -> String {
+    let mut url = base_url.clone();
+    // Dropped, not merged, exactly as `redstone_push::packages_url` does with
+    // the gateway URL: a `REDSTONE_API_URL` carrying its own query would
+    // otherwise contribute parameters to every price request — `limit=1`
+    // among them, the one that answers 200 with month-old quotes.
+    url.set_query(None);
+    url.set_fragment(None);
+    url.set_path(&format!("{}/prices", url.path().trim_end_matches('/')));
+    // Built through `query_pairs_mut` rather than interpolated: the symbols
+    // come from on-chain oracle configuration, so a `&` or `=` in one would
+    // otherwise close the parameter and append another — including a
+    // `limit=1` that would answer 200 with month-old quotes. The API accepts
+    // the encoded separator (`symbols=XLM%2CLTC` returns both symbols).
+    url.query_pairs_mut()
+        .append_pair("symbols", &symbols.join(","))
+        .append_pair("provider", data_service);
+    url.into()
+}
 
 /// One symbol's entry in the RedStone `/prices` multi-symbol response.
 #[derive(serde::Deserialize)]
@@ -132,21 +171,25 @@ pub(crate) fn parse_prices_response(
 pub struct RedStoneApiClient {
     http_client: reqwest::Client,
     base_url: Url,
+    /// The data service every request names, from `REDSTONE_DATA_SERVICE_ID`.
+    data_service: String,
 }
 
 impl std::fmt::Debug for RedStoneApiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedStoneApiClient")
             .field("base_url", &self.base_url.as_str())
+            .field("data_service", &self.data_service)
             .finish_non_exhaustive()
     }
 }
 
 impl RedStoneApiClient {
-    pub fn new(base_url: Url) -> Self {
+    pub fn new(base_url: Url, data_service: String) -> Self {
         Self {
             http_client: reqwest::Client::new(),
             base_url,
+            data_service,
         }
     }
 
@@ -162,14 +205,10 @@ impl RedStoneApiClient {
         if symbols.is_empty() {
             return HashMap::new();
         }
-        let url = format!("{}/prices", self.base_url.as_str().trim_end_matches('/'));
+        let url = prices_url(&self.base_url, symbols, &self.data_service);
         let response = self
             .http_client
             .get(&url)
-            .query(&[
-                ("symbols", symbols.join(",")),
-                ("provider", "redstone".to_string()),
-            ])
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await;
@@ -209,6 +248,108 @@ mod tests {
 
     const NOW_MS: i64 = 1_755_600_000_000;
     const MAX_AGE_MS: i64 = 3_600_000;
+
+    /// The provider is the whole request: `redstone` answers 500 for every
+    /// symbol and `redstone&limit=1` answers 200 with month-old quotes, so a
+    /// wrong value here is either total silence or, worse, confident staleness.
+    #[test]
+    fn prices_url_names_the_default_data_service() {
+        let base: Url = "https://api.redstone.finance".parse().unwrap();
+        let url = prices_url(
+            &base,
+            &["XLM".to_string(), "LTC".to_string()],
+            crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID,
+        );
+
+        assert_eq!(
+            url,
+            "https://api.redstone.finance/prices?symbols=XLM%2CLTC&provider=redstone-primary-prod"
+        );
+        assert!(
+            !url.contains("limit="),
+            "limit= turns the 500 into a 200 serving quotes a month old: {url}"
+        );
+    }
+
+    /// A base URL carrying its own query must not contribute parameters to
+    /// the price request — same rule `packages_url` applies to the gateway.
+    #[test]
+    fn prices_url_drops_a_base_url_query() {
+        let noisy: Url = "https://api.redstone.finance/?limit=1#frag"
+            .parse()
+            .unwrap();
+        let url = prices_url(
+            &noisy,
+            &["XLM".to_string()],
+            crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID,
+        );
+        assert!(!url.contains("limit="), "{url}");
+        assert!(!url.contains('#'), "{url}");
+        assert_eq!(
+            url,
+            "https://api.redstone.finance/prices?symbols=XLM&provider=redstone-primary-prod"
+        );
+    }
+
+    /// Symbols come from on-chain oracle configuration, so they are not this
+    /// bot's to trust: an unencoded `&` would close the parameter and let the
+    /// rest be read as another one — `limit=1` among them, which answers 200
+    /// with month-old quotes rather than failing.
+    #[test]
+    fn prices_url_encodes_symbols_rather_than_trusting_them() {
+        let base: Url = "https://api.redstone.finance".parse().unwrap();
+        let url = prices_url(
+            &base,
+            &["XLM&limit=1".to_string()],
+            crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID,
+        );
+
+        assert!(
+            !url.contains("&limit=1"),
+            "a symbol must not be able to append a parameter: {url}"
+        );
+        assert!(url.contains("symbols=XLM%26limit%3D1"), "{url}");
+        assert_eq!(
+            Url::parse(&url)
+                .unwrap()
+                .query_pairs()
+                .filter(|(k, _)| k == "limit")
+                .count(),
+            0,
+            "no limit parameter may survive: {url}"
+        );
+    }
+
+    /// `REDSTONE_DATA_SERVICE_ID` reaches scan pricing, not just the push leg.
+    /// Pinned because the two drifting is invisible: the push would follow the
+    /// override while scan silently stayed on the default, and both legs would
+    /// still look healthy while describing different feed sets.
+    #[test]
+    fn prices_url_follows_a_configured_data_service() {
+        let base: Url = "https://api.redstone.finance".parse().unwrap();
+        assert_eq!(
+            prices_url(&base, &["XLM".to_string()], "redstone-avalanche-prod"),
+            "https://api.redstone.finance/prices?symbols=XLM&provider=redstone-avalanche-prod"
+        );
+    }
+
+    /// A configured base URL may carry a trailing slash or a path prefix;
+    /// neither may double a separator or swallow the prefix.
+    #[test]
+    fn prices_url_tolerates_base_url_shapes() {
+        let ds = crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID;
+        let slash: Url = "https://api.redstone.finance/".parse().unwrap();
+        assert_eq!(
+            prices_url(&slash, &["XLM".to_string()], ds),
+            "https://api.redstone.finance/prices?symbols=XLM&provider=redstone-primary-prod"
+        );
+
+        let prefixed: Url = "https://proxy.example/redstone/".parse().unwrap();
+        assert_eq!(
+            prices_url(&prefixed, &["XLM".to_string()], ds),
+            "https://proxy.example/redstone/prices?symbols=XLM&provider=redstone-primary-prod"
+        );
+    }
 
     #[test]
     fn to_pyth_price_scales_to_expo_minus_8() {

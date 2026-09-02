@@ -264,6 +264,7 @@ pub(crate) mod test_support {
             None,
             crate::OracleApis {
                 redstone_api_url: "https://redstone.invalid".parse().unwrap(),
+                redstone_data_service: crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID.to_string(),
                 lazer_api,
                 redstone_push: None,
             },

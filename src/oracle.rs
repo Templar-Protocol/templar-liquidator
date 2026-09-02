@@ -332,6 +332,7 @@ impl OracleFetcher {
     ) -> Self {
         let crate::OracleApis {
             redstone_api_url,
+            redstone_data_service,
             lazer_api,
             redstone_push,
         } = apis;
@@ -354,7 +355,10 @@ impl OracleFetcher {
             proxy_oracle_cache: proxy_oracle_cache.unwrap_or_else(|| {
                 std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()))
             }),
-            redstone_api: crate::redstone::RedStoneApiClient::new(redstone_api_url),
+            redstone_api: crate::redstone::RedStoneApiClient::new(
+                redstone_api_url,
+                redstone_data_service,
+            ),
             lazer_api: lazer_api.and_then(|config| {
                 match crate::lazer::LazerApiClient::new(config) {
                     Ok(client) => Some(client),

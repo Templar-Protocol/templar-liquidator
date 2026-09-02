@@ -117,10 +117,12 @@ pub struct ServiceConfig {
     /// RedStone public price API for scan-side proxy price composition
     pub redstone_api_url: url::Url,
 
-    /// The RedStone data service both legs name, from
-    /// `REDSTONE_DATA_SERVICE_ID`. Held here rather than read out of
-    /// `redstone_push` because the push leg is optional and scan-side pricing
-    /// still needs it when the push is disabled.
+    /// Which RedStone data service to read, from `REDSTONE_DATA_SERVICE_ID`.
+    ///
+    /// One value feeds both legs: the scan-side `/prices` query and the push
+    /// leg's signed packages. Held here rather than read back out of
+    /// `redstone_push` because that leg is optional (`REDSTONE_PUSH=false`)
+    /// while scan pricing still needs the value.
     pub redstone_data_service_id: String,
     /// RedStone push leg (`REDSTONE_PUSH`, `REDSTONE_GATEWAY_URL`,
     /// `REDSTONE_DATA_SERVICE_ID`); `None` when disabled.

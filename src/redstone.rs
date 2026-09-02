@@ -7,8 +7,9 @@
 //! [`crate::oracle::OracleFetcher::update_onchain_prices`], so nothing here
 //! can bypass on-chain freshness or circuit-breaker state where funds move.
 //!
-//! Only the multi-symbol form (`/prices?symbols=A,B`) is used: the
-//! single-symbol form serves a frozen quote upstream — never use it.
+//! Only the multi-symbol form (`/prices?symbols=A,B&provider=<service>`) is
+//! used: the single-symbol form serves a frozen quote upstream — never use
+//! it. `provider` is not optional — see below.
 //!
 //! The `provider` is the data service, not the vendor: `redstone-primary-prod`
 //! is the live one, and it is the same service id the push leg pulls signed

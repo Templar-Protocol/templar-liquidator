@@ -771,6 +771,17 @@ impl Args {
 
         let signer_key = ValidatedSignerKey::try_from(self.signer_key.as_str())?;
 
+        // Checked here rather than at either use site: this one value selects
+        // the data service for BOTH RedStone legs, and blank fails far from
+        // its cause — the scan query degrades to `provider=` and the push URL
+        // loses its last path segment, each looking like an upstream problem.
+        if self.redstone_data_service_id.trim().is_empty() {
+            return Err(
+                "REDSTONE_DATA_SERVICE_ID must name a data service (e.g. redstone-primary-prod): it selects both the scan-side price query and the push leg's signed packages, and an empty value silently breaks each of them"
+                    .to_string(),
+            );
+        }
+
         let redstone_push = if self.redstone_push {
             if self.redstone_gateway_url.scheme() != "https" {
                 return Err(format!(
@@ -1549,6 +1560,26 @@ mod tests {
         let err = try_parse_with(&["--allowed-markets", "not..valid..id"])
             .expect_err("an unparseable allowlist entry must refuse startup");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    /// An empty data service id is representable through the CLI and reaches
+    /// both RedStone legs, where it fails far from its cause: the scan query
+    /// becomes `provider=` (the API answers, with nothing usable) and the push
+    /// URL loses its last path segment. Refuse it at startup instead.
+    #[test]
+    fn redstone_data_service_id_must_not_be_blank() {
+        let err = try_parse_with(&["--redstone-data-service-id", ""])
+            .map(|args| args.build_config())
+            .expect("clap accepts the empty string")
+            .expect_err("a blank data service id must refuse startup");
+        assert!(
+            err.contains("REDSTONE_DATA_SERVICE_ID"),
+            "the error must name the knob to fix: {err}"
+        );
+
+        let args = parse_with(&["--redstone-data-service-id", "redstone-avalanche-prod"]);
+        let config = args.build_config().expect("a named service is accepted");
+        assert_eq!(config.redstone_data_service_id, "redstone-avalanche-prod");
     }
 
     /// A well-formed key whose embedded public half does not match its

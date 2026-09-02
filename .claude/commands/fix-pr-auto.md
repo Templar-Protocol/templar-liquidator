@@ -19,6 +19,18 @@ PR to green unattended.
 
 - `$ARGUMENTS`: the PR number (required — if empty, ask once and proceed).
 
+  **Validate it before it reaches any command**, and use the validated value
+  everywhere below. It is interpolated into `gh` invocations, so a value
+  carrying extra words or a flag (`--repo …`) would redirect them; this is also
+  simply the common case of a mistyped invocation:
+
+  ```bash
+  case "$ARGUMENTS" in
+    '' | *[!0-9]* | 0*) echo "not a PR number: '$ARGUMENTS'" >&2; exit 1 ;;
+  esac
+  pr_number="$ARGUMENTS"
+  ```
+
 ## This repo's shape (what the loop is steering against)
 
 - Repo `Templar-Protocol/templar-liquidator`, **public**. Every PR targets
@@ -62,7 +74,7 @@ PR to green unattended.
   has no matrix and no path filters, so every PR into `main` produces at
   least:
 
-  ```
+  ```text
   lint-test  deny  docker  invariants  shellcheck  CI Summary   # ci.yml
   review  janitor                                               # claude-review.yml
   copilot-pull-request-reviewer                                 # the ruleset rule
@@ -145,8 +157,22 @@ PR to green unattended.
   `.github/workflows/` needs `workflow` scope; without it the push is rejected
   after the work is done.
 
-- `gh pr view $ARGUMENTS --json state,isDraft,headRefName,headRefOid` — the PR
-  must be OPEN; check out its branch; the working tree must be clean (if not:
+- **Resolve where the head actually lives, before any write.** This repo is
+  public and fork PRs are expected, so the head branch is not necessarily in
+  this repository:
+
+  ```bash
+  gh pr view "$pr_number" --json state,isDraft,headRefName,headRefOid,\
+headRepositoryOwner,headRepository,maintainerCanModify
+  ```
+
+  A cross-repository PR means step 5 must target `<headOwner>/<headRepo>` in
+  both `createCommitOnBranch` and any push — the base repo may hold an
+  unrelated branch of the same name, and `maintainerCanModify: false` means
+  there is no write path at all. Either target the head repository explicitly
+  or **stop and report**; never write to the base repo's same-named branch.
+
+- The PR must be OPEN; check out its branch; the working tree must be clean (if not:
   stop and tell the user what is dirty). If the main checkout is busy with
   other work, take a worktree under `.claude/worktrees/<pr-number>` rather than
   moving its HEAD; that path is gitignored (`.gitignore`, tracked — so it will
@@ -175,7 +201,7 @@ PR to green unattended.
     key::*) pub="${sk#key::}" ;;
     # -P '' so an encrypted key fails fast instead of blocking this
     # non-interactive loop on a passphrase prompt.
-    *) pub=$(cat "${sk%.pub}.pub" 2>/dev/null || ssh-keygen -y -P '' -f "$sk" 2>/dev/null) ;;
+    *) pub=$(cat "${sk%.pub}.pub" 2>/dev/null || ssh-keygen -y -P '' -f "$sk" 2>/dev/null || true) ;;
   esac
   # Needs the `user` OAuth scope, which this container's gh token normally
   # lacks — leaving this empty, failing the chain, and sending the run to
@@ -207,6 +233,14 @@ PR to green unattended.
     verified email on the account owning the signing key, and reading that list
     needs the `user` scope this token does not carry. Expect the email
     condition to be the one that fails.
+
+  One gap the chain cannot close: for a `key::ssh-…` value there is no key file
+  to inspect, and git signs through the agent — so the public half can be
+  registered and correct while the **private** half is absent from
+  `ssh-agent` and `git commit` fails after the preflight has already chosen
+  local signing. Confirm the agent holds it (`ssh-add -L` lists the same key
+  type and material) before trusting that path, and treat a failed `git commit`
+  as a route to GraphQL rather than an error to debug mid-round.
 
   A GPG (`gpg.format=openpgp`) setup is not handled here — take GraphQL, which
   is always correct, just slower. Any condition unmet → every push in this loop
@@ -369,9 +403,17 @@ Four things block a merge, not one. Collect all of them before triaging:
    `Suppressed comments (N)` shape this step harvests is triaged like any other
    finding, fixed, pushed as a `web-flow`-signed commit attributed to the token
    owner, and publicly answered, entirely unattended — while the identical text
-   posted as an inline comment would be correctly refused. A **non-bot review
-   body is reported to the user, never fixed**, exactly like a human-authored
-   thread; it is also not an exit-condition item.
+   posted as an inline comment would be correctly refused.
+
+   **Partition, do not discard** — read the bodies unfiltered and split them,
+   the same shape step 3 uses for threads. The filter above selects what goes
+   to *triage*; everything it rejects goes to the **report**, never to triage
+   and never to the exit condition. Dropping it instead loses the one case that
+   most needs a human: a maintainer's PR-level "hold this until we've confirmed
+   the oracle shape on mainnet" carries no inline comment, so it forms no
+   thread and step 3's human carve-out never sees it either — filtered here, it
+   would go unmentioned while the loop reported the PR ready. Run the same
+   query with the author test inverted to collect that half.
 
    REST defaults to `per_page=30` and this endpoint accumulates faster than
    three reviewers suggest: step 6 replies **per comment**, and every reply is
@@ -379,11 +421,15 @@ Four things block a merge, not one. Collect all of them before triaging:
    crosses 30 well inside the 5-round cap, after which the unpaginated call
    drops the newest page — the one these findings live on.
 
-3. **Failing checks** — any check run on the head sha whose conclusion is not
-   `success`, plus any `skipped` `ci.yml` job (see the static set above: those
-   are findings). `skipped` on `review`/`janitor` is normal. Only `CI Summary`
-   is *required*, but a red non-required check is still a finding: fix it, or
-   name it in the report.
+3. **Failing checks** — group the head sha's check runs **by name and classify
+   only the latest attempt of each**. A name can carry several runs (step 0),
+   so judging every run flags an earlier attempt that a later one has already
+   superseded — a re-run that went green would still read as a failure and burn
+   a round. On that latest attempt: any conclusion other than `success` is a
+   finding, and so is `skipped` on a `ci.yml` job (see the static set above).
+   `skipped` on `review`/`janitor` is normal, and a red `build (…)` from
+   `devcontainer.yml` is advisory. Only `CI Summary` is *required*, but a red
+   non-required check is still a finding: fix it, or name it in the report.
 
 4. **Mergeability** — `mergeStateStatus` from the query above. `DIRTY` means
    conflicts; `BEHIND` means the branch needs updating.
@@ -657,7 +703,12 @@ Single commit, subject `Address review round <n>` plus a body listing the
 threads addressed (this repo writes prose subjects; the squash merge appends
 the `(#N)`). Via the path chosen in preflight:
 
-- **Verified local signing** → `git commit` + `git push`.
+- **Verified local signing** → `git commit`, then push the branch explicitly:
+  `git push --no-follow-tags origin HEAD:<branch>`. A bare `git push` is
+  refspec- and tag-dependent (`push.followTags`, `remote.<name>.push`), and
+  this repo's hard rules forbid pushing a `v*` tag, which would start
+  `release.yml`. Neither is set in the dev container today; the explicit form
+  costs nothing and does not depend on that staying true.
 - **GraphQL** → `createCommitOnBranch` with `additions` = every changed file
   base64-encoded and `deletions` = every removed path. Send it as
   `gh api graphql --input <file>` with a `{query, variables}` JSON body;
@@ -671,8 +722,13 @@ the `(#N)`). Via the path chosen in preflight:
   the real head, not to drop the field. The commit is signed with GitHub's
   `web-flow` key and attributed to the **token owner** — a human account —
   which is also what keeps `require_extra_approval_for_unattributed_changes`
-  satisfied. Committed files land mode 644 — never rely on `+x` for anything
-  you add this way, which matters here because `scripts/*.sh` are executable.
+  satisfied. **`FileAddition` carries no file mode**, so this path cannot
+  express an executable bit — and every `scripts/*.sh` and `.devcontainer/*.sh`
+  in this repo is `100755`, with `ci.yml` invoking
+  `./scripts/check-repo-invariants.sh` directly. So: never rely on `+x` for
+  anything you add this way, and if a round's fix changes a file that must stay
+  executable, **stop at the uncertainty gate** rather than committing it
+  server-side — verify the resulting mode, or take a mode-preserving path.
 
   `additions` is **the files this round actually edited**, enumerated from the
   queued fixes — never everything `git status` reports. Build output, a scratch
@@ -775,5 +831,9 @@ nothing new is coming, report and stop whatever `mergeStateStatus` says.
 - Verification results per round, real output for anything that failed.
 - Current PR state: checks, unresolved threads, `mergeStateStatus` and — if it
   is not `CLEAN` — which of the causes in step 2 it is.
-- Say plainly that the PR is ready for **the maintainer** to merge — do not
+- Say plainly whether the PR is ready for **the maintainer** to merge — and
+  only when it actually is: every merge gate green and the reviewer coverage
+  complete. `DRAFT`, `BLOCKED`, `UNSTABLE`, an open human thread, a reviewer
+  that did not run, a stall, an unanswered uncertainty gate, or the round cap
+  each mean **not ready**; say so and name the blocker. Either way, do not
   merge.

@@ -41,9 +41,6 @@ const ONECLICK_API_BASE: &str = "https://1click.chaindefuser.com";
 /// Default maximum slippage in basis points (3% = 300 bps)
 pub const DEFAULT_MAX_SLIPPAGE_BPS: u32 = 300;
 
-/// Default transaction timeout in seconds
-const DEFAULT_TIMEOUT: u64 = 120;
-
 /// Polling interval for swap status checks in seconds
 const POLL_INTERVAL_SECONDS: u64 = 10;
 
@@ -111,7 +108,8 @@ struct QuoteRequest {
     quote_waiting_time_ms: Option<u64>,
 }
 
-/// Quote details from the 1-Click API
+/// Quote details from the 1-Click API. Only the fields the bot acts on —
+/// serde drops the rest of the response.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Quote {
@@ -121,34 +119,12 @@ struct Quote {
     deposit_memo: Option<String>,
     /// Actual input amount (may differ from requested)
     amount_in: String,
-    /// Formatted input amount
-    #[allow(dead_code)]
-    amount_in_formatted: String,
-    /// Input amount in USD
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[allow(dead_code)]
-    amount_in_usd: Option<String>,
-    /// Minimum input amount
-    #[allow(dead_code)]
-    min_amount_in: String,
     /// Expected output amount
     amount_out: String,
-    /// Formatted output amount
-    #[allow(dead_code)]
-    amount_out_formatted: String,
-    /// Output amount in USD
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[allow(dead_code)]
-    amount_out_usd: Option<String>,
     /// Minimum output amount
-    #[allow(dead_code)]
     min_amount_out: String,
     /// Deadline for the swap
-    #[allow(dead_code)]
     deadline: String,
-    /// Time when quote becomes inactive
-    #[allow(dead_code)]
-    time_when_inactive: String,
     /// Estimated time in seconds
     time_estimate: u64,
 }
@@ -158,11 +134,7 @@ struct Quote {
 #[serde(rename_all = "camelCase")]
 struct QuoteResponse {
     /// Timestamp of the quote
-    #[allow(dead_code)]
     timestamp: String,
-    /// Signature for verification
-    #[allow(dead_code)]
-    signature: String,
     /// The quote details
     quote: Quote,
 }
@@ -209,12 +181,8 @@ pub enum SwapStatus {
 struct StatusResponse {
     /// Current status
     status: SwapStatus,
-    /// Last update timestamp (optional, can be null during early stages)
-    #[allow(dead_code)]
-    updated_at: Option<String>,
     /// Swap details (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[allow(dead_code)]
     swap_details: Option<SwapDetails>,
 }
 
@@ -224,53 +192,39 @@ struct StatusResponse {
 struct SwapDetails {
     /// Intent transaction hashes
     #[serde(default)]
-    #[allow(dead_code)]
     intent_hashes: Vec<String>,
     /// NEAR transaction hashes
     #[serde(default)]
-    #[allow(dead_code)]
     near_tx_hashes: Vec<String>,
     /// Actual input amount (`null` during `PENDING_DEPOSIT`)
-    #[allow(dead_code)]
     amount_in: Option<String>,
     /// Formatted input amount (`null` during `PENDING_DEPOSIT`)
-    #[allow(dead_code)]
     amount_in_formatted: Option<String>,
     /// USD value of input amount (`null` during `PENDING_DEPOSIT`)
-    #[allow(dead_code)]
     amount_in_usd: Option<String>,
     /// Actual output amount (`null` during `PENDING_DEPOSIT`)
-    #[allow(dead_code)]
     amount_out: Option<String>,
     /// Formatted output amount (`null` during `PENDING_DEPOSIT`)
-    #[allow(dead_code)]
     amount_out_formatted: Option<String>,
     /// USD value of output amount (`null` during `PENDING_DEPOSIT`)
-    #[allow(dead_code)]
     amount_out_usd: Option<String>,
     /// Slippage in basis points (`null` during `PENDING_DEPOSIT`)
-    #[allow(dead_code)]
     slippage: Option<i32>,
     /// Origin chain transaction hashes
     #[serde(default)]
-    #[allow(dead_code)]
     origin_chain_tx_hashes: Vec<TxHashWithExplorer>,
     /// Destination chain transaction hashes
     #[serde(default)]
-    #[allow(dead_code)]
     destination_chain_tx_hashes: Vec<TxHashWithExplorer>,
     /// Refunded amount if applicable
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[allow(dead_code)]
     refunded_amount: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TxHashWithExplorer {
-    #[allow(dead_code)]
     hash: String,
-    #[allow(dead_code)]
     explorer_url: String,
 }
 
@@ -329,9 +283,6 @@ pub struct OneClickSwap {
     client: SigningClient,
     /// Maximum slippage in basis points
     max_slippage_bps: u32,
-    /// Transaction timeout
-    #[allow(dead_code)]
-    timeout: u64,
     /// HTTP client for API calls
     http_client: reqwest::Client,
     /// Optional API token for fee reduction
@@ -344,7 +295,6 @@ impl std::fmt::Debug for OneClickSwap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OneClickSwap")
             .field("max_slippage_bps", &self.max_slippage_bps)
-            .field("timeout", &self.timeout)
             .field("api_token", &self.api_token.is_some())
             .finish_non_exhaustive()
     }
@@ -366,7 +316,6 @@ impl OneClickSwap {
         Self {
             client,
             max_slippage_bps: max_slippage_bps.unwrap_or(DEFAULT_MAX_SLIPPAGE_BPS),
-            timeout: DEFAULT_TIMEOUT,
             http_client: reqwest::Client::new(),
             api_token,
             supported_tokens: std::sync::Arc::new(std::sync::RwLock::new(

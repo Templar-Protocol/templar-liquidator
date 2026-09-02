@@ -614,9 +614,8 @@ impl Args {
     ///
     /// Rejects a `SIGNER_KEY` that does not parse as a NEAR secret key, or
     /// that parses but carries a mismatched keypair (the embedded public
-    /// half disagrees with the secret half — the gateway signer would
-    /// refuse it later, previously as a panic deep in service
-    /// construction). Error messages never contain the key material.
+    /// half disagrees with the secret half — caught here so the gateway
+    /// signer never sees it). Error messages never contain the key material.
     pub fn build_config(&self) -> Result<ServiceConfig, String> {
         let strategy = self.create_strategy();
         let collateral_strategy = self.parse_collateral_strategy();

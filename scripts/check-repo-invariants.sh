@@ -39,15 +39,46 @@ elif [ "${#revs[@]}" -gt 1 ]; then
 else
 	note "all ${CONTRACTS_REPO} deps pinned to ${revs[0]}"
 
-	sandbox_rev=$(grep -oE '^\s*CONTRACTS_REV:\s*[0-9a-f]{7,40}' .github/workflows/sandbox.yml |
-		grep -oE '[0-9a-f]{7,40}' || true)
-	if [ -z "${sandbox_rev}" ]; then
-		bad "could not read CONTRACTS_REV from .github/workflows/sandbox.yml"
-	elif [ "${sandbox_rev}" != "${revs[0]}" ]; then
-		bad "sandbox.yml CONTRACTS_REV (${sandbox_rev}) != Cargo.toml rev (${revs[0]})"
-	else
-		note "sandbox.yml CONTRACTS_REV matches"
-	fi
+	# Cargo.toml may pin full 40-hex while a copy uses a short form (or the
+	# reverse); either direction is the same pin, so compare by prefix.
+	same_rev() {
+		case "$1" in "$2"*) return 0 ;; esac
+		case "$2" in "$1"*) return 0 ;; esac
+		return 1
+	}
+
+	# Every other copy of the pin, each extracted from the line that carries
+	# it rather than by scanning for bare hex — an unrelated hash in a doc
+	# must not trip this, and an anchored miss must fail loudly:
+	#   - sandbox.yml CONTRACTS_REV (the workflow's clone)
+	#   - sandbox.yml's cargo-near action ref (the @rev it installs FROM —
+	#     left behind, the job runs one rev's installer against another
+	#     rev's checkout)
+	#   - docs/testing.md's checkout walkthrough (the copy a human follows)
+	check_rev_copy() {
+		# $1: label for messages, $2: newline-separated extracted revs
+		if [ -z "$2" ]; then
+			bad "could not read the contracts rev from $1"
+			return
+		fi
+		local r ok=1
+		while IFS= read -r r; do
+			if ! same_rev "$r" "${revs[0]}"; then
+				bad "$1 pins ${r}, Cargo.toml pins ${revs[0]}"
+				ok=0
+			fi
+		done <<<"$2"
+		if [ "$ok" -eq 1 ]; then
+			note "$1 matches"
+		fi
+	}
+
+	check_rev_copy "sandbox.yml CONTRACTS_REV" \
+		"$(grep -oE '^\s*CONTRACTS_REV:\s*[0-9a-f]{7,40}' .github/workflows/sandbox.yml | grep -oE '[0-9a-f]{7,40}' | sort -u || true)"
+	check_rev_copy "sandbox.yml cargo-near action ref" \
+		"$(grep -oE 'Templar-Protocol/contracts/[^@[:space:]]*@[0-9a-f]{7,40}' .github/workflows/sandbox.yml | grep -oE '[0-9a-f]{7,40}$' | sort -u || true)"
+	check_rev_copy "docs/testing.md checkout" \
+		"$(grep -oE 'checkout [0-9a-f]{7,40}' docs/testing.md | awk '{print $2}' | sort -u || true)"
 fi
 
 # ── 2. THE THREE-WAY RUST PIN ────────────────────────

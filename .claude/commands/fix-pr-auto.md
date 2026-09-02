@@ -3,13 +3,19 @@ description: Autonomous review-fix loop — wait for the AI reviews, fix, reply,
 argument-hint: <pr-number>
 ---
 
-# Fix PR — Autonomous Loop
+# /fix-pr-auto — Autonomous Review-Fix Loop
 
 Drive a PR to convergence with its AI reviewers without hand-holding: wait for
 every in-flight review to finish, address all findings in one batch, push ONE
 commit per round, reply and resolve, then wait for the next review round —
-until there is nothing left to address. Interact with the user ONLY at the
-uncertainty gate (defined below) and in the final report.
+until there is nothing left to address. Once running, the loop interacts with
+the user only at the uncertainty gate (defined below) and in the final report —
+it never asks for confirmation of a finding, a fix, a reply or a resolve. The
+preflight is deliberately outside that: it stops and asks when the PR number is
+missing or invalid, when `gh` is not authenticated, and it stops rather than
+proceeding when the head is a fork it cannot write to. Step 4's branch rebuild
+asks too, every time. Those are the sanctioned interruptions; anything else
+during a round is not.
 
 `/fix-pr` is the single-pass, ask-before-each-step version of this. Use that
 one when you want a human in the loop on every finding; use this one to run a
@@ -392,7 +398,7 @@ Four things block a merge, not one. Collect all of them before triaging:
 
    ```bash
    gh api --paginate "repos/Templar-Protocol/templar-liquidator/pulls/$pr_number/reviews" \
-     --jq '.[] | select(.body != "")
+     --jq '.[] | select((.body // "") != "")
                | select(.user.login == "claude[bot]" or .user.login == "coderabbitai[bot]"
                         or .user.login == "copilot-pull-request-reviewer[bot]")
                | "\(.user.login)\n\(.body)"'

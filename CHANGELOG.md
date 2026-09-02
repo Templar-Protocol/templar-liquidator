@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-02
+
+### Changed
+
+- One RPC API key variable. The binary reads `NEAR_RPC_API_KEY` (sent as an `Authorization` header) on every launch path — `cargo run`, the container, a scheduled cloud job — where before only the run scripts' URL fold authenticated. The scripts export it directly; `.env.example` points `NEAR_RPC_URL` at the keyed `rpc.mainnet.fastnear.com` host, since a key sent to the keyless free tier changes nothing. At startup, a `.env` carrying only the legacy name gets a warning naming the rename, because the failure it prevents is silent: an unauthenticated full-registry scan is rate-limited part-way and the round completes over whatever it could read.
+- `k256` 0.13 → 0.14 (`recover_signer` follows ecdsa 0.17's `to_sec1_point` rename; recovery output unchanged, verified against captured RedStone signatures) and `sha3` 0.10 → 0.12.
+- `near-account-id` is no longer a direct dependency: the one import moved to `near_sdk::account_id`, so the version rides the pinned contracts stack and can never split from it again.
+- The pinned contracts rev moves 27 commits, `8f8fe1d1` → `f1a62bec` — every `templar-*` dependency, `sandbox.yml`'s `CONTRACTS_REV` and the checkout in `docs/testing.md` together. `templar-common` goes 1.5.0 → 2.0.0 (`templar-gateway-core` 0.3.0 → 0.5.0, `templar-gateway-types` 0.2.0 → 0.4.0); this crate compiles and passes its suite unchanged against both. Upstream includes the contracts-side migration of v1 markets to proxy oracles (#614), the prerequisite for the markets filtered since the Pyth Core cutover becoming liquidatable again.
+
+### Deprecated
+
+- The `NEAR_API_KEY` spelling. The run scripts still map it onto `NEAR_RPC_API_KEY` with a notice; nothing else reads it.
+
+### Removed
+
+- The last terraform remnants (ignore rules, the devcontainer feature and editor extension). The module itself left at `v0.2.0` and remains in git history there.
+- Eight 1-Click response fields nothing read (and nineteen stale `dead_code` allows on fields that *are* read); deserialization is unchanged, serde drops unknown keys.
+
+### Security
+
+- `cargo-deny` documents RUSTSEC-2026-0269 (wasmtime, reachable only through dev-dependencies' test harness; absent from the release binary — verified with `cargo tree -e normal`).
+- The PR review workflow gates on its API wrapper instead of continuing past a wrapper failure, and the wrapper's payload path is confined to the workspace.
+
 ## [1.0.0] - 2026-08-27
 
 ### Removed

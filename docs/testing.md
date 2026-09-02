@@ -64,7 +64,7 @@ that file).
 # 1. Check out the contracts monorepo at the exact pinned rev (must match
 #    Cargo.toml's `rev =` for every templar-* git dependency in this repo).
 git clone https://github.com/Templar-Protocol/contracts /tmp/contracts
-git -C /tmp/contracts checkout 8f8fe1d1a057756f71438abc75d7b3c688b282f0
+git -C /tmp/contracts checkout f1a62bece8179103095019f2e30d7d699adae3c5
 
 # 2. Point the compile-time env var at that checkout, then build+run the
 #    ignored test. -j 1 avoids the linker OOM noted below.

@@ -41,9 +41,6 @@ const ONECLICK_API_BASE: &str = "https://1click.chaindefuser.com";
 /// Default maximum slippage in basis points (3% = 300 bps)
 pub const DEFAULT_MAX_SLIPPAGE_BPS: u32 = 300;
 
-/// Default transaction timeout in seconds
-const DEFAULT_TIMEOUT: u64 = 120;
-
 /// Polling interval for swap status checks in seconds
 const POLL_INTERVAL_SECONDS: u64 = 10;
 
@@ -286,8 +283,6 @@ pub struct OneClickSwap {
     client: SigningClient,
     /// Maximum slippage in basis points
     max_slippage_bps: u32,
-    /// Transaction timeout
-    timeout: u64,
     /// HTTP client for API calls
     http_client: reqwest::Client,
     /// Optional API token for fee reduction
@@ -300,7 +295,6 @@ impl std::fmt::Debug for OneClickSwap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OneClickSwap")
             .field("max_slippage_bps", &self.max_slippage_bps)
-            .field("timeout", &self.timeout)
             .field("api_token", &self.api_token.is_some())
             .finish_non_exhaustive()
     }
@@ -322,7 +316,6 @@ impl OneClickSwap {
         Self {
             client,
             max_slippage_bps: max_slippage_bps.unwrap_or(DEFAULT_MAX_SLIPPAGE_BPS),
-            timeout: DEFAULT_TIMEOUT,
             http_client: reqwest::Client::new(),
             api_token,
             supported_tokens: std::sync::Arc::new(std::sync::RwLock::new(

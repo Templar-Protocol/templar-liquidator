@@ -48,6 +48,18 @@ else
 	else
 		note "sandbox.yml CONTRACTS_REV matches"
 	fi
+
+	# docs/testing.md walks a human through the same checkout by hand, so it
+	# carries the rev too — a copy this check missed once already.
+	doc_revs=$(grep -oE '[0-9a-f]{40}' docs/testing.md | sort -u || true)
+	if [ -z "${doc_revs}" ]; then
+		bad "no 40-hex rev found in docs/testing.md — its checkout walkthrough should pin the contracts rev"
+	elif [ "${doc_revs}" != "${revs[0]}" ]; then
+		bad "docs/testing.md pins a different rev than Cargo.toml (${revs[0]}):"
+		printf '    %s\n' "${doc_revs}"
+	else
+		note "docs/testing.md rev matches"
+	fi
 fi
 
 # ── 2. THE THREE-WAY RUST PIN ────────────────────────

@@ -160,6 +160,14 @@ done
 # accepted, mapped onto NEAR_RPC_API_KEY, because a credential inside a URL
 # reaches every place a URL is printed — logs, process lists, error messages
 # — while a header does not.
+# A value that is only whitespace is not a key. Trimming before the tests below
+# keeps three things in agreement: the deprecation notice still fires when
+# NEAR_RPC_API_KEY is blank-but-set (which would otherwise look present and
+# suppress it), no empty credential is exported, and the binary's own check —
+# which trims — reaches the same verdict about the same .env.
+NEAR_RPC_API_KEY="$(printf '%s' "$NEAR_RPC_API_KEY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+NEAR_API_KEY="$(printf '%s' "$NEAR_API_KEY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
 if [ -z "$NEAR_RPC_API_KEY" ] && [ -n "$NEAR_API_KEY" ]; then
     NEAR_RPC_API_KEY="$NEAR_API_KEY"
     echo "NOTE: NEAR_API_KEY is deprecated. Rename it to NEAR_RPC_API_KEY in .env; the binary reads that one directly." >&2

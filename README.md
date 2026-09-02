@@ -178,7 +178,7 @@ Both endpoints are inert in `RUN_MODE=once` and `push-check` — a single-cycle 
 
 ## FAQ
 
-**Which RPC should I use?** Public endpoints rate-limit under sustained scanning — that includes both the binary's own compiled-in default (`https://rpc.mainnet.fastnear.com` / `https://rpc.testnet.fastnear.com`, used when `NEAR_RPC_URL` is unset) and `free.rpc.fastnear.com`, the endpoint `.env.example` sets explicitly. For mainnet, get a [FastNEAR](https://fastnear.com) API key and set `NEAR_RPC_URL` + `NEAR_RPC_API_KEY` — the key is sent as an `Authorization` header. Endpoints that authenticate by query parameter instead take it folded into the URL as `?apiKey=` — supported, but it puts the credential in every place a URL is printed, so prefer the header where you have the choice.
+**Which RPC should I use?** Public endpoints rate-limit under sustained scanning — that includes the binary's own compiled-in default (`https://rpc.mainnet.fastnear.com` / `https://rpc.testnet.fastnear.com`, used when `NEAR_RPC_URL` is unset) and the keyless `free.rpc.fastnear.com` tier. For mainnet, get a [FastNEAR](https://fastnear.com) API key and set `NEAR_RPC_URL` + `NEAR_RPC_API_KEY` — the key is sent as an `Authorization` header. Endpoints that authenticate by query parameter instead take it folded into the URL as `?apiKey=` — supported, but it puts the credential in every place a URL is printed, so prefer the header where you have the choice.
 
 **What inventory do I need to hold?** The **borrow assets** of every market you serve — e.g. USDC in `SIGNER_ACCOUNT_ID`'s wallet to liquidate USDC-borrow markets. The bot never buys inventory; it only spends what's already there.
 

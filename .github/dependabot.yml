@@ -37,8 +37,14 @@ updates:
       - dependency-name: "test-utils"
     groups:
       # One PR for the long tail of compatible updates; anything major still
-      # arrives on its own so it gets read properly.
+      # arrives on its own so it gets read properly. "Major" is by version
+      # position, and for 0.x crates Dependabot counts a leftmost-non-zero
+      # bump (0.10 -> 0.11) as major — matching cargo's own compatibility
+      # rule. So a pre-1.0 crate arriving as its own PR is the group working,
+      # not failing: those bumps genuinely break APIs.
       cargo-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
         update-types: ["minor", "patch"]
 
   # ── GitHub Actions ───────────────────────────────────
@@ -79,6 +85,12 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
           - "version-update:semver-patch"
+    groups:
+      # Both images (the rust builder and the debian runtime) refresh in one
+      # PR: digest bumps carry no API risk to weigh individually, and one PR
+      # runs the CI suite once instead of twice.
+      docker-digests:
+        patterns: ["*"]
 
   # ── Dev container ────────────────────────────────────
   # This is the ecosystem that would have caught the bug fixed in #13: the
@@ -96,4 +108,10 @@ updates:
     labels: ["dependencies"]
     commit-message:
       prefix: "deps(devcontainer)"
+    groups:
+      # All feature bumps in one PR. Features only affect the dev container
+      # build, so there is nothing to gain from reading them one at a time —
+      # and ungrouped they compete for the PR limit with each other.
+      devcontainer-features:
+        patterns: ["*"]
 

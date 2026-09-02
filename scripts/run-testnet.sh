@@ -110,6 +110,9 @@ fi
 if [ -n "$IGNORED_MARKETS" ]; then
     echo "  Ignored Markets:      $IGNORED_MARKETS"
 fi
+if [ -n "$DEPRECATED_MARKETS" ]; then
+    echo "  Retired Markets:      $DEPRECATED_MARKETS"
+fi
 
 echo ""
 
@@ -224,7 +227,13 @@ fi
 if [ -n "$DEPRECATED_MARKETS" ]; then
     IFS=',' read -ra MARKETS <<< "$DEPRECATED_MARKETS"
     for market in "${MARKETS[@]}"; do
-        CMD_ARGS+=("--deprecated-markets" "$market")
+        # Trimmed, unlike the lists above, because this one is parsed as a
+        # typed AccountId: `a.near, b.near` would forward " b.near" and refuse
+        # startup outright, where a stray space in the others is only warned
+        # about and skipped. Empty tokens (a trailing comma) are dropped.
+        market="${market#"${market%%[![:space:]]*}"}"
+        market="${market%"${market##*[![:space:]]}"}"
+        [ -n "$market" ] && CMD_ARGS+=("--deprecated-markets" "$market")
     done
 fi
 

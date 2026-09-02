@@ -47,6 +47,12 @@ pub(crate) const MAX_FUTURE_SKEW_MS: i64 = 30_000;
 /// market quietly stops being scanned.
 pub(crate) fn prices_url(base_url: &Url, symbols: &[String], data_service: &str) -> String {
     let mut url = base_url.clone();
+    // Dropped, not merged, exactly as `redstone_push::packages_url` does with
+    // the gateway URL: a `REDSTONE_API_URL` carrying its own query would
+    // otherwise contribute parameters to every price request — `limit=1`
+    // among them, the one that answers 200 with month-old quotes.
+    url.set_query(None);
+    url.set_fragment(None);
     url.set_path(&format!("{}/prices", url.path().trim_end_matches('/')));
     // Built through `query_pairs_mut` rather than interpolated: the symbols
     // come from on-chain oracle configuration, so a `&` or `=` in one would
@@ -262,6 +268,26 @@ mod tests {
         assert!(
             !url.contains("limit="),
             "limit= turns the 500 into a 200 serving quotes a month old: {url}"
+        );
+    }
+
+    /// A base URL carrying its own query must not contribute parameters to
+    /// the price request — same rule `packages_url` applies to the gateway.
+    #[test]
+    fn prices_url_drops_a_base_url_query() {
+        let noisy: Url = "https://api.redstone.finance/?limit=1#frag"
+            .parse()
+            .unwrap();
+        let url = prices_url(
+            &noisy,
+            &["XLM".to_string()],
+            crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID,
+        );
+        assert!(!url.contains("limit="), "{url}");
+        assert!(!url.contains('#'), "{url}");
+        assert_eq!(
+            url,
+            "https://api.redstone.finance/prices?symbols=XLM&provider=redstone-primary-prod"
         );
     }
 

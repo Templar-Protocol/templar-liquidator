@@ -29,7 +29,6 @@ hex = { version = "0.4.3", features = ["serde"] }
 # package's signer locally before spending gas on a payload. Both already
 # sit in the dependency tree via the NEAR stack.
 k256 = "0.13"
-near-account-id = "2.6"
 near-api = "0.8.6"
 near-crypto = "0.37.3"
 near-jsonrpc-client = "0.22.0"

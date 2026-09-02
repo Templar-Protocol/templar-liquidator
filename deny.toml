@@ -43,6 +43,19 @@ ignore = [
     # a contracts rev whose test harness is off the vulnerable range.
     { id = "RUSTSEC-2026-0222", reason = "wasmtime is reachable only through near-sdk's unit-testing feature, activated solely by our dev-dependencies (templar-gateway-testing / test-utils); confirmed absent from the release binary via `cargo tree -e normal -i wasmtime` (empty). Clears when near-sdk ships a patched wasmtime." },
 
+    # RUSTSEC-2026-0269 — wasmtime 45.0.3, "Filesystem sandbox escape when
+    # paths or symlinks contain trailing slashes". Same crate and same path as
+    # RUSTSEC-2026-0222 above: near-sdk 5.29.0 (feature `unit-testing`) ->
+    # near-vm-runner -> wasmtime, and that feature is requested only by the
+    # dev-dependencies templar-gateway-testing / test-utils. Re-verified on
+    # this advisory rather than assumed: `cargo tree -e normal -i wasmtime`
+    # prints nothing, so no wasmtime code reaches the release binary — and the
+    # bot never loads untrusted WASM in any case. The wasmtime version is
+    # fixed by the pinned contracts rev (see THE SINGLE-REV RULE), so the
+    # upgrade is not ours to make; this clears when near-sdk ships a patched
+    # wasmtime and we bump that rev.
+    { id = "RUSTSEC-2026-0269", reason = "wasmtime is reachable only through near-sdk's unit-testing feature, activated solely by our dev-dependencies (templar-gateway-testing / test-utils); confirmed absent from the release binary via `cargo tree -e normal -i wasmtime` (empty). Clears when near-sdk ships a patched wasmtime." },
+
     # RUSTSEC-2024-0436 — `paste` 1.0.15, unmaintained (not a vulnerability;
     # repo archived, no safe upgrade). Path: alloy (via
     # templar-universal-account -> alloy-signer-local -> alloy) ->

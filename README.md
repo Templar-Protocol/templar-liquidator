@@ -174,7 +174,7 @@ Both endpoints are inert in `RUN_MODE=once` and `push-check` — a single-cycle 
 ## Deployment
 
 - **Any VM (Docker Compose)**: [docs/deploy-vm.md](docs/deploy-vm.md).
-- **Cron-style schedulers** (Cloud Run Jobs, Kubernetes CronJobs, plain cron): run the container with `RUN_MODE=once` on an interval and alert on non-zero exits — see [Run modes](#run-modes) and [docs/configuration.md](docs/configuration.md). A ready-made GCP Terraform module and its walkthrough are preserved in git history at [`v0.2.0`](https://github.com/Templar-Protocol/templar-liquidator/tree/v0.2.0/terraform) for forks that want them.
+- **Cron-style schedulers** (Cloud Run Jobs, Kubernetes CronJobs, plain cron): run the container with `RUN_MODE=once` on an interval and alert on non-zero exits — see [Run modes](#run-modes) and [docs/configuration.md](docs/configuration.md). A ready-made GCP Terraform module and its walkthrough are preserved in git history at [`v0.2.0`](https://github.com/Templar-Protocol/templar-liquidator/tree/v0.2.0/terraform) for forks that want them — recover the state/tfvars ignore rules from that tag's root `.gitignore` (`git show v0.2.0:.gitignore`) along with the module, or `terraform apply`'s state file, which can embed resolved secret values, is one `git add -A` away from a public commit.
 
 ## FAQ
 

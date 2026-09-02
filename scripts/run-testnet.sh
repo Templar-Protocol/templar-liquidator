@@ -217,6 +217,17 @@ if [ -n "$IGNORED_MARKETS" ]; then
     done
 fi
 
+# Forwarded the same way, and for the same reason: this script sources .env
+# without `set -a`, so a value there is shell-local and never reaches the
+# binary's environment. Missing this block, a .env naming retired markets
+# would launch a bot that happily scans them.
+if [ -n "$DEPRECATED_MARKETS" ]; then
+    IFS=',' read -ra MARKETS <<< "$DEPRECATED_MARKETS"
+    for market in "${MARKETS[@]}"; do
+        CMD_ARGS+=("--deprecated-markets" "$market")
+    done
+fi
+
 # Add oracle price update arguments
 [ -n "$LAZER_API_URL" ] && CMD_ARGS+=("--lazer-api-url" "$LAZER_API_URL")
 [ -n "$LAZER_WS_URL" ] && CMD_ARGS+=("--lazer-ws-url" "$LAZER_WS_URL")

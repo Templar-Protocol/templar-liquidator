@@ -1572,6 +1572,25 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
+    /// The retired-market list must refuse startup on an unparseable entry,
+    /// the same way the allowlist does. Both reviewers asked for this, and the
+    /// reason is asymmetric: a typo silently dropped from a DENYlist
+    /// un-retires a market the venue has closed, so the bot would scan and
+    /// liquidate somewhere it was told not to go. Nothing else in the suite
+    /// would catch the field being loosened back to `Vec<String>`.
+    #[test]
+    fn deprecated_markets_parse_typed_and_fail_closed() {
+        let args = parse_with(&["--deprecated-markets", "old.tmplr.near,older.tmplr.near"]);
+        assert_eq!(args.deprecated_markets.len(), 2);
+        let config = args.build_config().expect("valid test config");
+        assert_eq!(config.deprecated_markets.len(), 2);
+        assert_eq!(config.deprecated_markets[0].to_string(), "old.tmplr.near");
+
+        let err = try_parse_with(&["--deprecated-markets", "not..valid..id"])
+            .expect_err("an unparseable retired-market entry must refuse startup");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
     /// A well-formed key whose embedded public half does not match its
     /// secret half must fail at parse time with an actionable message —
     /// not panic deep in service construction — and the message must never

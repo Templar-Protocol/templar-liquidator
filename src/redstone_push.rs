@@ -210,7 +210,7 @@ pub(crate) fn recover_signer(package: &SignedPackage) -> Option<[u8; 20]> {
     let v = package.signature[64];
     let recovery = RecoveryId::from_byte(v.checked_sub(27).unwrap_or(v))?;
     let key = VerifyingKey::recover_from_prehash(&digest, &signature, recovery).ok()?;
-    let point = key.to_encoded_point(false);
+    let point = key.to_sec1_point(false);
     let hash = Keccak256::digest(&point.as_bytes()[1..]);
     let mut address = [0u8; 20];
     address.copy_from_slice(&hash[12..]);

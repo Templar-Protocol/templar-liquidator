@@ -76,14 +76,30 @@ esac
 # A literal key needs no recovery — but it is not a file either, so without
 # this branch the not-a-file test below would drag it through the recovery path
 # and warn that `git commit` will fail while signing in fact works.
+#
+# Ordered deliberately. allowed_signers needs no agent, so it is written first
+# and verification ends up configured even on a container that cannot sign.
+# Then the agent, which must not merely exist but actually HOLD the private
+# half: a registered, correct public key whose private half is missing signs
+# nothing, and announcing success there is the same misleading report this
+# branch exists to remove, one level deeper.
 case "${signing_key}" in
 key::*)
+	literal="${signing_key#key::}"
+	write_allowed_signers "${literal}"
+	# Compare type+material only, dropping the comment, which is arbitrary and
+	# differs between the config value and the agent's listing for the same key.
+	# `ssh-add -L` exits non-zero when the agent holds no identities, so under
+	# `pipefail` the pipeline fails and `!` reports the key as absent — which is
+	# the right answer for an empty agent, not an error to guard away.
 	if [ -z "${SSH_AUTH_SOCK:-}" ]; then
 		warn "commit signing is on and user.signingkey is a literal key, but no ssh-agent is forwarded to hold its private half, so 'git commit' will fail. Enable agent forwarding, or unset commit.gpgsign for this container."
-		exit 0
+	elif ! ssh-add -L 2>/dev/null | awk '{ print $1, $2 }' |
+		grep -qxF "$(awk '{ print $1, $2 }' <<<"${literal}")"; then
+		warn "commit signing is on but the forwarded agent does not hold the private half of user.signingkey, so 'git commit' will fail. On the host: ssh-add --apple-use-keychain <key> (macOS) or ssh-add <key>."
+	else
+		note "user.signingkey is a literal key; signing goes through the forwarded agent"
 	fi
-	write_allowed_signers "${signing_key#key::}"
-	note "user.signingkey is a literal key; signing goes through the forwarded agent"
 	exit 0
 	;;
 esac

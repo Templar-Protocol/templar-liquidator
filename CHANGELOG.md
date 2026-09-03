@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Dev container commit signing, which reported itself broken while working. `git-signing.sh` treats `user.signingkey` as a path, and git also accepts a literal public key prefixed with `key::` (2.34+) — for which the script's "configured key is not present here" test is trivially true, so it walked into its recovery branch, failed to find an agent key whose *comment* equals `user.email`, and warned that `git commit` will fail on every container start while signing in fact worked. It now recognises a `key::` value and exits. The header documents the literal form as the better fix and this script as the fallback: a path in the host's `~/.gitconfig` cannot resolve inside a container, whereas a literal key copies in verbatim on every rebuild and covers repos that ship no such script — which a per-repo script structurally cannot do. Comment-matching is noted as the fragility it is; the comment is arbitrary metadata, so the fallback fails on a perfectly good key whose comment happens to be a hostname.
+
 ## [1.2.0] - 2026-09-02
 
 ### Added

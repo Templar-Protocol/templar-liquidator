@@ -18,11 +18,27 @@
 #     error: No private key found for public key "..."
 #     fatal: failed to write commit object
 #
-# THE FIX. The private key never needs to enter the container. ssh-keygen can
-# sign through the forwarded agent as long as git knows WHICH key to use, and
-# it identifies the key by a public-key file. So: find the agent key whose
-# comment matches user.email, write just the public half locally, and point
-# user.signingkey at it. Public keys are not secret.
+# THE BETTER FIX, which makes this script unnecessary: give the HOST's
+# ~/.gitconfig a literal public key instead of a path (git 2.34+),
+#
+#     user.signingkey = key::ssh-ed25519 AAAAC3Nza... comment
+#
+# There is then no path to go stale, the value copies into every dev container
+# on every rebuild, and it covers repos that do not ship a script like this one
+# — which a per-repo script structurally cannot do. Pick the key by which one
+# GitHub has registered as an SSH SIGNING key (Settings -> SSH and GPG keys, or
+# `gh api users/<login>/ssh_signing_keys`), not by whichever `ssh-add -L` lists
+# first: an agent commonly holds several, and signing with an unregistered one
+# produces commits GitHub shows as Unverified.
+#
+# THE FALLBACK, which is what the rest of this file does, for a host still
+# configured with a path. The private key never needs to enter the container.
+# ssh-keygen can sign through the forwarded agent as long as git knows WHICH
+# key to use, and it identifies the key by a public-key file. So: find the
+# agent key whose comment matches user.email, write just the public half
+# locally, and point user.signingkey at it. Public keys are not secret. Note
+# the comment is arbitrary metadata, so this match fails on a perfectly good
+# key whose comment is a hostname — another reason to prefer the fix above.
 #
 # Verifying is a separate setting from signing: without
 # gpg.ssh.allowedSignersFile, git reports correctly-signed commits as "N" (no
@@ -44,6 +60,21 @@ email="$(git config --global --get user.email 2>/dev/null || true)"
 
 case "${signing_key}" in
 "~/"*) signing_key="${HOME}/${signing_key#\~/}" ;;
+esac
+
+# A `key::` value is a literal public key rather than a path, so there is no
+# file to find and nothing to recover — git hands the key straight to
+# ssh-keygen, which signs through the agent. See THE BETTER FIX in the header.
+#
+# Bail out explicitly. The not-a-file test below is true for a `key::` value —
+# it is not a path — so without this the script would walk into the recovery
+# branch, fail to comment-match, and warn that `git commit` will fail on every
+# container start while signing in fact works.
+case "${signing_key}" in
+key::*)
+	note "user.signingkey is a literal key; signing goes through the forwarded agent"
+	exit 0
+	;;
 esac
 
 # Recover a usable public key when the configured one is not present here.

@@ -18,15 +18,27 @@
 #     error: No private key found for public key "..."
 #     fatal: failed to write commit object
 #
-# THE FIX. The private key never needs to enter the container. ssh-keygen can
-# sign through the forwarded agent as long as git knows WHICH key to use, and
-# it identifies the key by a public-key file. So: find the agent key whose
-# comment matches user.email, write just the public half locally, and point
-# user.signingkey at it. Public keys are not secret.
+# THE FIX. The private key never needs to enter the container: ssh-keygen signs
+# through the forwarded agent, given a public key to identify WHICH key. Two
+# ways for user.signingkey to supply one, and only the second needs this script:
+#
+#   key::ssh-ed25519 AAAA... — a literal public key. No path to go stale, so
+#     setting it once in the HOST's ~/.gitconfig covers every container and
+#     every repo, including repos not shipping this script. Prefer it. Needs
+#     git 2.35+, which added the key:: prefix; 2.34 accepted a literal only
+#     when it began "ssh-". Use the key GitHub registered as an SSH SIGNING
+#     key (`gh api users/<login>/ssh_signing_keys`), not whichever
+#     `ssh-add -L` prints first; an unregistered one signs commits GitHub
+#     shows Unverified.
+#
+#   A path — a HOST path, which does not exist here. Recovered below by
+#     matching an agent key's comment against user.email. A comment is
+#     arbitrary metadata, so this misses good keys commented user@hostname.
 #
 # Verifying is a separate setting from signing: without
 # gpg.ssh.allowedSignersFile, git reports correctly-signed commits as "N" (no
-# signature) locally while GitHub reports them verified. Generated here too.
+# signature) locally while GitHub reports them verified. Written on both paths,
+# when user.email is set to say who the key is trusted for.
 #
 # Never fatal. Working in this container without commit signing is a perfectly
 # reasonable setup, and failing the create over it would be worse than the
@@ -36,6 +48,21 @@ set -euo pipefail
 note() { echo "    $*"; }
 warn() { echo "!!  $*" >&2; }
 
+# Record the signing key as trusted for user.email, so signatures verify
+# locally. Takes a public key as "<type> <base64> [comment]"; the comment is
+# dropped because allowed_signers matches on the key itself.
+write_allowed_signers() {
+	local allowed entry
+	[ -n "${email}" ] || return 0
+	allowed="${HOME}/.ssh/allowed_signers"
+	entry="${email} $(printf '%s' "$1" | cut -d' ' -f1,2)"
+	mkdir -p "${HOME}/.ssh"
+	if [ ! -f "${allowed}" ] || ! grep -qxF "${entry}" "${allowed}"; then
+		printf '%s\n' "${entry}" >> "${allowed}"
+	fi
+	git config --global gpg.ssh.allowedSignersFile "${allowed}"
+}
+
 [ "$(git config --global --get commit.gpgsign 2>/dev/null || echo false)" = "true" ] || exit 0
 [ "$(git config --global --get gpg.format 2>/dev/null || true)" = "ssh" ] || exit 0
 
@@ -44,6 +71,37 @@ email="$(git config --global --get user.email 2>/dev/null || true)"
 
 case "${signing_key}" in
 "~/"*) signing_key="${HOME}/${signing_key#\~/}" ;;
+esac
+
+# A literal key needs no recovery — but it is not a file either, so without
+# this branch the not-a-file test below would drag it through the recovery path
+# and warn that `git commit` will fail while signing in fact works.
+#
+# Ordered deliberately. allowed_signers needs no agent, so it is written first
+# and verification ends up configured even on a container that cannot sign.
+# Then the agent, which must not merely exist but actually HOLD the private
+# half: a registered, correct public key whose private half is missing signs
+# nothing, and announcing success there is the same misleading report this
+# branch exists to remove, one level deeper.
+case "${signing_key}" in
+key::*)
+	literal="${signing_key#key::}"
+	write_allowed_signers "${literal}"
+	# Compare type+material only, dropping the comment, which is arbitrary and
+	# differs between the config value and the agent's listing for the same key.
+	# `ssh-add -L` exits non-zero when the agent holds no identities, so under
+	# `pipefail` the pipeline fails and `!` reports the key as absent — which is
+	# the right answer for an empty agent, not an error to guard away.
+	if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+		warn "commit signing is on and user.signingkey is a literal key, but no ssh-agent is forwarded to hold its private half, so 'git commit' will fail. Enable agent forwarding, or unset commit.gpgsign for this container."
+	elif ! ssh-add -L 2>/dev/null | awk '{ print $1, $2 }' |
+		grep -qxF "$(awk '{ print $1, $2 }' <<<"${literal}")"; then
+		warn "commit signing is on but the forwarded agent does not hold the private half of user.signingkey, so 'git commit' will fail. On the host: ssh-add --apple-use-keychain <key> (macOS) or ssh-add <key>."
+	else
+		note "user.signingkey is a literal key; signing goes through the forwarded agent"
+	fi
+	exit 0
+	;;
 esac
 
 # Recover a usable public key when the configured one is not present here.
@@ -86,12 +144,4 @@ fi
 
 [ -n "${signing_key}" ] && [ -f "${signing_key}" ] || exit 0
 
-# allowed_signers, so signatures verify locally as well as on GitHub.
-if [ -n "${email}" ]; then
-	allowed="${HOME}/.ssh/allowed_signers"
-	entry="${email} $(cut -d' ' -f1,2 "${signing_key}")"
-	if [ ! -f "${allowed}" ] || ! grep -qxF "${entry}" "${allowed}"; then
-		printf '%s\n' "${entry}" >> "${allowed}"
-	fi
-	git config --global gpg.ssh.allowedSignersFile "${allowed}"
-fi
+write_allowed_signers "$(cat "${signing_key}")"

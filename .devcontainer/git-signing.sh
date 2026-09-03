@@ -22,12 +22,14 @@
 # through the forwarded agent, given a public key to identify WHICH key. Two
 # ways for user.signingkey to supply one, and only the second needs this script:
 #
-#   key::ssh-ed25519 AAAA... — a literal public key (git 2.34+). No path to go
-#     stale, so setting it once in the HOST's ~/.gitconfig covers every
-#     container and every repo, including repos not shipping this script.
-#     Prefer it. Use the key GitHub registered as an SSH SIGNING key
-#     (`gh api users/<login>/ssh_signing_keys`), not whichever `ssh-add -L`
-#     prints first; an unregistered one signs commits GitHub shows Unverified.
+#   key::ssh-ed25519 AAAA... — a literal public key. No path to go stale, so
+#     setting it once in the HOST's ~/.gitconfig covers every container and
+#     every repo, including repos not shipping this script. Prefer it. Needs
+#     git 2.35+, which added the key:: prefix; 2.34 accepted a literal only
+#     when it began "ssh-". Use the key GitHub registered as an SSH SIGNING
+#     key (`gh api users/<login>/ssh_signing_keys`), not whichever
+#     `ssh-add -L` prints first; an unregistered one signs commits GitHub
+#     shows Unverified.
 #
 #   A path — a HOST path, which does not exist here. Recovered below by
 #     matching an agent key's comment against user.email. A comment is
@@ -35,7 +37,8 @@
 #
 # Verifying is a separate setting from signing: without
 # gpg.ssh.allowedSignersFile, git reports correctly-signed commits as "N" (no
-# signature) locally while GitHub reports them verified. Written on both paths.
+# signature) locally while GitHub reports them verified. Written on both paths,
+# when user.email is set to say who the key is trusted for.
 #
 # Never fatal. Working in this container without commit signing is a perfectly
 # reasonable setup, and failing the create over it would be worse than the

@@ -4899,8 +4899,8 @@ dependencies = [
  "bytesize",
  "chrono",
  "derive_more 2.1.1",
- "near-config-utils 0.37.3",
- "near-crypto 0.37.3",
+ "near-config-utils 0.37.4",
+ "near-crypto 0.37.4",
  "near-parameters 0.37.3",
  "near-primitives 0.37.3",
  "near-time 0.37.3",
@@ -4928,9 +4928,9 @@ dependencies = [
 
 [[package]]
 name = "near-config-utils"
-version = "0.37.3"
+version = "0.37.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a3b681c0b0b3c39e12eb0d479d36b391c50e6071c9314a4836849784a13a247"
+checksum = "6d01bb25f02d563432385926f6c3869c4b2093cbf602b4d45e571c33a4c39aec"
 dependencies = [
  "anyhow",
  "json_comments",
@@ -4975,9 +4975,9 @@ dependencies = [
 
 [[package]]
 name = "near-crypto"
-version = "0.37.3"
+version = "0.37.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22bcbc525445bbc61b021ee9b7acf6191f557811efdb5471ef504d907544fd80"
+checksum = "76f1b80805c09154f284d3eec797d700d742a1fb42a8e4dfd561091725d9d9f3"
 dependencies = [
  "aws-lc-rs",
  "blake2",
@@ -4988,9 +4988,9 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "near-account-id",
- "near-config-utils 0.37.3",
- "near-schema-checker-lib 0.37.3",
- "near-stdx 0.37.3",
+ "near-config-utils 0.37.4",
+ "near-schema-checker-lib 0.37.4",
+ "near-stdx 0.37.4",
  "primitive-types 0.10.1",
  "rand 0.8.7",
  "secp256k1 0.27.0",
@@ -5085,7 +5085,7 @@ dependencies = [
  "lazy_static",
  "log",
  "near-chain-configs 0.37.3",
- "near-crypto 0.37.3",
+ "near-crypto 0.37.4",
  "near-jsonrpc-primitives 0.37.3",
  "near-primitives 0.37.3",
  "reqwest 0.12.28",
@@ -5120,9 +5120,9 @@ checksum = "04612551ef46e29707ed2b22f378e1e259d9344b80b2a0000899536a492486d9"
 dependencies = [
  "arbitrary",
  "near-chain-configs 0.37.3",
- "near-crypto 0.37.3",
+ "near-crypto 0.37.4",
  "near-primitives 0.37.3",
- "near-schema-checker-lib 0.37.3",
+ "near-schema-checker-lib 0.37.4",
  "near-time 0.37.3",
  "serde",
  "serde_json",
@@ -5138,7 +5138,7 @@ checksum = "2081b60cdaed83fe37d64e95daac61f6538c2f76aa6be87cd6e5cda3e9687fc6"
 dependencies = [
  "base64 0.21.7",
  "clap",
- "near-crypto 0.37.3",
+ "near-crypto 0.37.4",
  "near-primitives-core 0.37.3",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -5217,7 +5217,7 @@ dependencies = [
  "enum-map",
  "near-account-id",
  "near-primitives-core 0.37.3",
- "near-schema-checker-lib 0.37.3",
+ "near-schema-checker-lib 0.37.4",
  "num-rational 0.3.2",
  "serde",
  "serde_repr",
@@ -5287,12 +5287,12 @@ dependencies = [
  "enum-map",
  "hex",
  "itertools 0.14.0",
- "near-crypto 0.37.3",
+ "near-crypto 0.37.4",
  "near-fmt 0.37.3",
  "near-parameters 0.37.3",
  "near-primitives-core 0.37.3",
- "near-schema-checker-lib 0.37.3",
- "near-stdx 0.37.3",
+ "near-schema-checker-lib 0.37.4",
+ "near-stdx 0.37.4",
  "near-time 0.37.3",
  "num-rational 0.3.2",
  "ordered-float",
@@ -5349,7 +5349,7 @@ dependencies = [
  "enum-map",
  "near-account-id",
  "near-gas",
- "near-schema-checker-lib 0.37.3",
+ "near-schema-checker-lib 0.37.4",
  "near-token",
  "num-rational 0.3.2",
  "serde",
@@ -5389,9 +5389,9 @@ checksum = "f969a965d1ea04e1f085ee4d6c7273ae1064f578711087f3beaf8d400672cc7e"
 
 [[package]]
 name = "near-schema-checker-core"
-version = "0.37.3"
+version = "0.37.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8191f48b3da676d55f1a26182a909caf175af6cc7c6cb2ebeecba7f42a24ea3"
+checksum = "8f5f2034b461bed3b920b8cd97758333d17c07173b2b6e3f177ee28139b6bf61"
 
 [[package]]
 name = "near-schema-checker-lib"
@@ -5405,12 +5405,12 @@ dependencies = [
 
 [[package]]
 name = "near-schema-checker-lib"
-version = "0.37.3"
+version = "0.37.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ca77e2e2f93692644469b56bb25fb748a41aed7975c0e645294948d0a6bc3aa"
+checksum = "215c287df6ad953aa68f987011aa1a845940d3d01e7046cf96f23fb897df5670"
 dependencies = [
- "near-schema-checker-core 0.37.3",
- "near-schema-checker-macro 0.37.3",
+ "near-schema-checker-core 0.37.4",
+ "near-schema-checker-macro 0.37.4",
 ]
 
 [[package]]
@@ -5421,9 +5421,9 @@ checksum = "8a9eb7d4dc413fe39ffa7fe5591ed4c24bc8139b9de8497689178d0101ae5167"
 
 [[package]]
 name = "near-schema-checker-macro"
-version = "0.37.3"
+version = "0.37.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e33ec28fecc93bd84ce90d709c7d8d0bbf270c65ceaefc93c257fc02e16580c8"
+checksum = "c3e0305fa8bb353a81692076f9068abc777eea4084f9a0834f9a4a4fd6483fba"
 
 [[package]]
 name = "near-sdk"
@@ -5437,7 +5437,7 @@ dependencies = [
  "ed25519-dalek",
  "near-abi",
  "near-account-id",
- "near-crypto 0.37.3",
+ "near-crypto 0.37.4",
  "near-gas",
  "near-global-contracts",
  "near-parameters 0.37.3",
@@ -5495,7 +5495,7 @@ dependencies = [
  "bs58 0.5.1",
  "hex",
  "near-account-id",
- "near-crypto 0.37.3",
+ "near-crypto 0.37.4",
  "near-crypto-hash",
  "near-gas",
  "near-parameters 0.37.3",
@@ -5557,9 +5557,9 @@ checksum = "2c5dc0456309fcb256a0609d829971fd99f343e1a7f3b72f85364e64250a4555"
 
 [[package]]
 name = "near-stdx"
-version = "0.37.3"
+version = "0.37.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca828be685b2fbf18f6bea353ecbf0a645e5b22d52035a01c3c8a2aa6f463d69"
+checksum = "c21d35ea03501694725d7bac34adad2194e756fea9bf3ba886122a321fd0ef3e"
 
 [[package]]
 name = "near-sys"
@@ -5616,12 +5616,12 @@ dependencies = [
  "finite-wasm 0.5.1",
  "finite-wasm 0.6.1",
  "lru",
- "near-crypto 0.37.3",
+ "near-crypto 0.37.4",
  "near-o11y",
  "near-parameters 0.37.3",
  "near-primitives-core 0.37.3",
- "near-schema-checker-lib 0.37.3",
- "near-stdx 0.37.3",
+ "near-schema-checker-lib 0.37.4",
+ "near-stdx 0.37.4",
  "num-rational 0.3.2",
  "p256",
  "parking_lot",
@@ -8780,7 +8780,7 @@ dependencies = [
  "hex",
  "k256 0.14.0",
  "near-api",
- "near-crypto 0.37.3",
+ "near-crypto 0.37.4",
  "near-jsonrpc-client 0.22.0",
  "near-sdk",
  "reqwest 0.13.4",

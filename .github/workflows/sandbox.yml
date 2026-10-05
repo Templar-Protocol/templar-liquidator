@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1, reads rust-toolchain.toml
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v1, reads rust-toolchain.toml
 
       - name: Check out contracts at the pinned rev
         run: |
@@ -35,7 +35,7 @@ jobs:
       # contract (market, mock-ft, mock-mt, mock-oracle) the first time each
       # is requested.
       - name: Install cargo-near
-        uses: Templar-Protocol/contracts/.github/actions/cargo-near@f1a62bece8179103095019f2e30d7d699adae3c5
+        uses: Templar-Protocol/contracts/.github/actions/cargo-near@88a029d97c6e3564572f39a1b795509ac32cc5f8
 
       # `cargo near build` runs with its cwd inside /tmp/contracts, so rustup
       # resolves *that* checkout's own rust-toolchain.toml (a different

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-22
+
+### Security
+
+- The image no longer trusts the compromised eMudhra intermediate CAs (CVE-2026-111943, <https://emudhra.we-have-a-problem.com/>). Their private keys can be derived from the public certificates, so anyone could mint a certificate for any host — the 1-Click API whose deposit address the bot sends inventory to, the price APIs, the NEAR RPC — that this bot would accept. Every TLS client in the binary is native-tls, so the image's system store is its only trust: the runtime stage now fails the build unless `ca-certificates` is at least bookworm-security's `20250419~deb12u2`. Images up to and including 1.2.0 carry a store from before the fix; redeploy on 1.2.1. `webpki-roots`/`webpki-root-certs` move to 1.0.10 as well, which reaches only the test-time `near-sandbox` download. `rustls-webpki` cannot move to 0.103.16 while `near-crypto` 0.37 pins `aws-lc-rs =1.16.2`, and the binary does not use rustls on Linux in any case.
+
 ### Fixed
 
 - Dev container commit signing. `git-signing.sh` assumed `user.signingkey` names a file, so a literal `key::ssh-ed25519 ...` value (git 2.35+) failed its "configured key is not present here" test, fell into the recovery branch, and warned that `git commit` will fail — on every container start, while signing in fact worked. Literal keys are now recognised: `allowed_signers` is written from the key itself (when `user.email` is set) before any agent check, so local verification is configured even on a container that cannot sign; then the agent is checked for the private *half*, not merely for a socket, because a registered and correct public key whose private half is absent signs nothing while every other signal looks healthy. Both forms share one `write_allowed_signers`, so local verification no longer depends on which one the host uses. The header documents the literal form as the one to prefer: a path in the host's `~/.gitconfig` cannot resolve inside a container, while a literal key copies in verbatim on every rebuild and covers repos that ship no such script.

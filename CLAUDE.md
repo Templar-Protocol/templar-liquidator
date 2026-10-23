@@ -84,7 +84,7 @@ One line per file in `src/`:
   RedStone data for both legs: one client shared by every market, fetching
   every wanted feed at once and reusing the answer for 10 s (the keys are
   rate-limited), and
-  the scan-side median price. The public hosts stopped serving on
+  the scan-side median price. The public hosts stop serving on
   2026-10-29.
 - `redstone_push.rs` — the RedStone push leg's pure parts: signed data
   packages from the shared gateway client, serialized in the protocol

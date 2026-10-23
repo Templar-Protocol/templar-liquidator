@@ -1,9 +1,10 @@
 //! RedStone authenticated-gateway client: the one source of RedStone data,
 //! for both legs.
 //!
-//! RedStone switched its public gateways and its public price API
+//! RedStone switches its public gateways and its public price API
 //! (`api.redstone.finance`) off for good on 2026-10-29 00:00 UTC; those hosts
-//! answer `403 public_gateway_rejected` and name the replacement:
+//! refuse requests with `403 public_gateway_rejected`, naming the
+//! replacement:
 //! *authenticated gateways*, each a URL plus an API key sent as `x-api-key`
 //! — the RedStone SDK's `authenticatedGateways` parameter, in the same
 //! `{url, apiKey}` shape. They serve one endpoint,

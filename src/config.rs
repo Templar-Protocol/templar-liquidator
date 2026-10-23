@@ -335,8 +335,8 @@ pub struct Args {
     /// RedStone's authenticated gateways, read by both RedStone legs (scan
     /// pricing and the push): a JSON array of `{"url": "https://…",
     /// "apiKey": "…"}`, primary first — the RedStone SDK's
-    /// `authenticatedGateways` shape. RedStone's public hosts stopped serving
-    /// on 2026-10-29, so without it RedStone-sourced markets are filtered at
+    /// `authenticatedGateways` shape. RedStone's public hosts stop serving on
+    /// 2026-10-29, so without it RedStone-sourced markets are filtered at
     /// registration. Carries API keys: every rendering shows origins only.
     #[arg(long, env = "REDSTONE_AUTHENTICATED_GATEWAYS", hide_env_values = true)]
     pub redstone_authenticated_gateways: Option<String>,
@@ -547,7 +547,7 @@ impl std::fmt::Debug for Args {
     }
 }
 
-/// Env vars of RedStone's public hosts, which stopped serving on 2026-10-29.
+/// Env vars of RedStone's public hosts, which stop serving on 2026-10-29.
 const RETIRED_REDSTONE_VARS: [&str; 2] = ["REDSTONE_API_URL", "REDSTONE_GATEWAY_URL"];
 
 /// Whether the deprecated `NEAR_API_KEY` is the only RPC credential present.
@@ -950,15 +950,15 @@ impl Args {
             );
         }
 
-        // RedStone's public hosts stopped serving on 2026-10-29 and their two
-        // knobs went with them. A stale flag fails parsing; a stale env var
+        // RedStone's public hosts stop serving on 2026-10-29 and their two
+        // knobs are gone. A stale flag fails parsing; a stale env var
         // is simply never read — say so, since the replacement is a
         // credential the operator has to go and get.
         for retired in RETIRED_REDSTONE_VARS {
             if std::env::var_os(retired).is_some() {
                 tracing::warn!(
                     var = retired,
-                    "No longer read: RedStone's public hosts stopped serving on 2026-10-29. Set REDSTONE_AUTHENTICATED_GATEWAYS instead (see docs/configuration.md)"
+                    "No longer read: RedStone's public hosts stop serving on 2026-10-29. Set REDSTONE_AUTHENTICATED_GATEWAYS instead (see docs/configuration.md)"
                 );
             }
         }
@@ -1760,8 +1760,8 @@ mod tests {
         );
     }
 
-    /// RedStone's public hosts stopped serving on 2026-10-29 and their two
-    /// knobs went with them: a stale flag fails startup instead of pointing
+    /// RedStone's public hosts stop serving on 2026-10-29 and their two
+    /// knobs are gone: a stale flag fails startup instead of pointing
     /// a leg at a host that refuses every request.
     #[test]
     fn retired_redstone_knobs_are_rejected() {

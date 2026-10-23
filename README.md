@@ -40,6 +40,8 @@ Three env vars are required — the bot refuses to start without them:
 | `SIGNER_ACCOUNT_ID` | The NEAR account the bot signs transactions as — also where your inventory lives |
 | `SIGNER_KEY` | That account's private key, e.g. `ed25519:...` |
 
+Prices come from credentialed APIs, so two more decide which markets the bot can work: without `LAZER_API_TOKEN` (Pyth Pro) or `REDSTONE_AUTHENTICATED_GATEWAYS` (RedStone), markets priced from that source are filtered at registration rather than scanned. See [Oracle price sources](docs/configuration.md#oracle-price-sources).
+
 **The bot starts in DRY-RUN and sends nothing until you explicitly set `DRY_RUN=false`.** A fresh checkout scans markets and logs what it *would* liquidate — no transaction is ever submitted — until you opt in to live trading. See [Configuration](#configuration) below.
 
 ## What is a liquidator?

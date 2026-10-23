@@ -2,13 +2,15 @@
 //!
 //! Scan-time prices are **off-chain only**: proxy-oracle feeds are composed
 //! from each feed's configured sources in order, taking the first leg that
-//! yields a fresh price — the RedStone public price API ([`crate::redstone`])
-//! for RedStone sources, the token-gated Pyth Pro price API ([`crate::lazer`])
-//! for Pyth Pro sources, transformer inputs by free view call. There is no
+//! yields a fresh price — RedStone's authenticated gateways
+//! ([`crate::redstone`]) for RedStone sources, the token-gated Pyth Pro price
+//! API ([`crate::lazer`]) for Pyth Pro sources, transformer inputs by free
+//! view call. There is no
 //! on-chain price read at scan time: an on-chain price is either stale or
 //! costs a paid push every scan. Pyth Core sources are not composable (Pyth
-//! Core is not integrated — see the CHANGELOG), and a market whose feeds have
-//! no off-chain source is filtered at registration
+//! Core is not integrated — see the CHANGELOG), nor is a source whose leg
+//! has no credentials configured, and a market whose feeds have no
+//! off-chain source is filtered at registration
 //! ([`OracleFetcher::offchain_priceable`]), never failed per scan. Every
 //! composed price is bounded by the market's freshness window before use.
 //!
@@ -49,8 +51,8 @@ use crate::{
 // ── Off-chain proxy price composition ────────────────────────────────────────
 
 /// A proxy source request the bot can price at scan time, off-chain only:
-/// RedStone via the public price API ([`crate::redstone`]), Pyth Pro via
-/// the token-gated Pyth Pro API ([`crate::lazer`]). There is no on-chain
+/// RedStone via its authenticated gateways ([`crate::redstone`]), Pyth Pro
+/// via the token-gated Pyth Pro API ([`crate::lazer`]). There is no on-chain
 /// fallback: a stale or failed leg falls through to the feed's next
 /// configured source, and a feed no candidate can price stays missing for
 /// the caller's coverage gate to judge.
@@ -61,7 +63,7 @@ pub(crate) enum OffchainRequest {
 }
 
 /// The batched backend results one composition round prices its candidates
-/// from: one RedStone API call and one Pyth Pro API call.
+/// from: one RedStone gateway read and one Pyth Pro API call.
 struct FetchedBackends {
     redstone: HashMap<String, pyth::Price>,
     lazer: HashMap<(AccountId, u32), pyth::Price>,
@@ -121,21 +123,35 @@ pub(crate) fn covers_all(response: &OracleResponse, price_ids: &[PriceIdentifier
         .all(|id| matches!(response.get(id), Some(Some(_))))
 }
 
+/// Which off-chain scan legs have credentials. Both are credentialed
+/// services, and a source whose leg has none is not composable — its market
+/// is filtered at registration rather than failed every scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OffchainLegs {
+    /// `REDSTONE_AUTHENTICATED_GATEWAYS` is set.
+    pub redstone: bool,
+    /// `LAZER_API_TOKEN` is set.
+    pub pyth_pro: bool,
+}
+
 /// Classifies an [`OracleRequest`] as its scan-time pricing request, or
 /// `None` when the source has no off-chain leg: Pyth Core always (not
-/// integrated), and Pyth Pro when no API token is configured — there is
-/// deliberately no on-chain fallback for either.
+/// integrated), RedStone without gateway credentials, and Pyth Pro without
+/// an API token — there is deliberately no on-chain fallback for any of
+/// them.
 fn classify_offchain_request(
     request: &OracleRequest,
-    pyth_pro_api_configured: bool,
+    legs: OffchainLegs,
 ) -> Option<OffchainRequest> {
     match request {
-        OracleRequest::RedStone(req) => Some(OffchainRequest::RedStone(req.price_id.to_string())),
-        OracleRequest::Lazer(req) if pyth_pro_api_configured => Some(OffchainRequest::Lazer {
+        OracleRequest::RedStone(req) if legs.redstone => {
+            Some(OffchainRequest::RedStone(req.price_id.to_string()))
+        }
+        OracleRequest::Lazer(req) if legs.pyth_pro => Some(OffchainRequest::Lazer {
             oracle_id: req.oracle_id.clone(),
             feed_id: req.feed_id,
         }),
-        OracleRequest::Pyth(_) | OracleRequest::Lazer(_) => None,
+        OracleRequest::Pyth(_) | OracleRequest::RedStone(_) | OracleRequest::Lazer(_) => None,
     }
 }
 
@@ -178,20 +194,21 @@ fn collect_offchain_wants(
 /// on-chain and the market contract re-validates against its own oracle.
 pub(crate) fn plan_offchain_sources<'a>(
     sources: impl Iterator<Item = &'a Source>,
-    pyth_pro_api_configured: bool,
+    legs: OffchainLegs,
 ) -> Vec<OffchainPriceSource> {
     sources
         .filter_map(|source| match source {
-            Source::Request(request) => classify_offchain_request(request, pyth_pro_api_configured)
-                .map(OffchainPriceSource::Direct),
+            Source::Request(request) => {
+                classify_offchain_request(request, legs).map(OffchainPriceSource::Direct)
+            }
             Source::Transformer(transformer) => {
-                classify_offchain_request(&transformer.request, pyth_pro_api_configured).map(
-                    |request| OffchainPriceSource::Transformed {
+                classify_offchain_request(&transformer.request, legs).map(|request| {
+                    OffchainPriceSource::Transformed {
                         request,
                         call: transformer.call.clone(),
                         action: transformer.action.clone(),
-                    },
-                )
+                    }
+                })
             }
         })
         .collect()
@@ -276,18 +293,19 @@ pub struct OracleFetcher {
     /// Shared across all `OracleFetcher` instances so detection during registry
     /// refresh propagates to per-market fetchers.
     proxy_oracle_cache: ProxyOracleCache,
-    /// RedStone public price API, for composing proxy prices off-chain at
-    /// scan time.
-    redstone_api: crate::redstone::RedStoneApiClient,
+    /// RedStone's authenticated gateways, for both legs; shared by every
+    /// fetcher (see [`crate::OracleApis::redstone`]). `None` when no
+    /// credentials are configured — RedStone sources are then not priceable
+    /// and their markets are filtered at registration.
+    redstone: Option<std::sync::Arc<crate::redstone::RedStoneGatewayClient>>,
     /// Pyth Pro price API, for composing Pyth Pro–sourced proxy prices
     /// off-chain at scan time. `None` when no access token is configured —
     /// such feeds are then not priceable and their markets are filtered at
     /// registration. The config type's constructor enforces HTTPS, so this
     /// client can never send the bearer token over cleartext.
     lazer_api: Option<crate::lazer::LazerApiClient>,
-    /// RedStone push leg: `None` when disabled (`REDSTONE_PUSH=false`) or
-    /// when its no-redirect client could not be built.
-    redstone_push: Option<crate::redstone_push::RedStonePushClient>,
+    /// The RedStone push leg (`REDSTONE_PUSH`); inert without `redstone`.
+    redstone_push: bool,
     /// Last successful RedStone write, or in-flight reservation, per
     /// (adapter, feed) — see [`RedStonePushMemo`].
     redstone_push_memo: RedStonePushMemo,
@@ -331,34 +349,19 @@ impl OracleFetcher {
         redstone_push_memo: Option<RedStonePushMemo>,
     ) -> Self {
         let crate::OracleApis {
-            redstone_api_url,
-            redstone_data_service,
-            lazer_api,
+            redstone,
             redstone_push,
+            lazer_api,
         } = apis;
         Self {
             redstone_push_memo: redstone_push_memo.unwrap_or_default(),
-            redstone_push: redstone_push.and_then(|config| {
-                match crate::redstone_push::RedStonePushClient::new(config) {
-                    Ok(client) => Some(client),
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            "Could not build the no-redirect RedStone gateway client; RedStone-only feeds will not be pushed"
-                        );
-                        None
-                    }
-                }
-            }),
+            redstone,
+            redstone_push,
             client,
             pyth_pro_updates,
             proxy_oracle_cache: proxy_oracle_cache.unwrap_or_else(|| {
                 std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()))
             }),
-            redstone_api: crate::redstone::RedStoneApiClient::new(
-                redstone_api_url,
-                redstone_data_service,
-            ),
             lazer_api: lazer_api.and_then(|config| {
                 match crate::lazer::LazerApiClient::new(config) {
                     Ok(client) => Some(client),
@@ -377,6 +380,18 @@ impl OracleFetcher {
     /// Returns a clone of the shared RedStone last-push memo.
     pub fn redstone_push_memo(&self) -> RedStonePushMemo {
         self.redstone_push_memo.clone()
+    }
+
+    /// The gateway client when the push leg is on and has credentials.
+    fn redstone_push_client(&self) -> Option<&crate::redstone::RedStoneGatewayClient> {
+        self.redstone.as_deref().filter(|_| self.redstone_push)
+    }
+
+    fn offchain_legs(&self) -> OffchainLegs {
+        OffchainLegs {
+            redstone: self.redstone.is_some(),
+            pyth_pro: self.lazer_api.is_some(),
+        }
     }
 
     /// Returns a clone of the shared proxy oracle cache handle.
@@ -625,7 +640,7 @@ impl OracleFetcher {
         // leg there is nothing to resolve for. (A mixed-source feed is
         // admitted tokenless; the RedStone leg then covers its RedStone
         // source, since the Pyth Pro adapter cannot be pushed.)
-        if self.pyth_pro_updates.is_some() || self.redstone_push.is_some() {
+        if self.pyth_pro_updates.is_some() || self.redstone_push_client().is_some() {
             // Best-effort like the pushes themselves: a transient proxy-config
             // read failure must not skip the re-aggregation below.
             match self.resolve_update_targets(oracle, price_ids).await {
@@ -637,9 +652,15 @@ impl OracleFetcher {
                             }
                         }
                     }
-                    if let Some(push) = &self.redstone_push {
+                    if let Some(gateways) = self.redstone_push_client() {
                         if !targets.redstone.is_empty() {
-                            match push.fetch_packages().await {
+                            let feeds: Vec<String> = targets
+                                .redstone
+                                .values()
+                                .flatten()
+                                .map(|feed| feed.as_ref().to_string())
+                                .collect();
+                            match gateways.packages(&feeds).await {
                                 Ok(packages) => {
                                     for (adapter, feed_ids) in &targets.redstone {
                                         if self
@@ -827,8 +848,9 @@ impl OracleFetcher {
 
     /// Registration-time admission: scan prices are off-chain only, so a
     /// market is admitted only when its oracle is a proxy and every feed has
-    /// at least one off-chain-composable source (RedStone; Pyth Pro when the
-    /// API leg is configured). Filtering here — one log per refresh — beats
+    /// at least one off-chain-composable source (RedStone when its gateways
+    /// are configured; Pyth Pro when its API leg is). Filtering here — one
+    /// log per refresh — beats
     /// failing the market's scan every round and degrading `/healthz`. A
     /// transient proxy-config read failure filters the market for one
     /// refresh cycle (it is re-probed next refresh); a probe error on the
@@ -875,8 +897,7 @@ impl OracleFetcher {
                         tracing::debug!(%oracle, ?price_id, "Proxy has no entry for price id");
                         continue;
                     };
-                    let candidates =
-                        plan_offchain_sources(proxy.sources(), self.lazer_api.is_some());
+                    let candidates = plan_offchain_sources(proxy.sources(), self.offchain_legs());
                     if candidates.is_empty() {
                         tracing::debug!(
                             %oracle,
@@ -893,6 +914,36 @@ impl OracleFetcher {
             }
         }
         plans
+    }
+
+    /// Prices the wanted RedStone feeds from the shared gateway client's
+    /// packages ([`crate::redstone::scan_prices`]). A failed read prices
+    /// nothing — each feed falls through to its next source. Each market
+    /// logs its unpriced round, but the gateways are asked once per failure
+    /// window, not once per market: the client answers repeats from memory.
+    async fn fetch_redstone_prices(
+        &self,
+        symbols: &[String],
+        max_age_secs: u32,
+    ) -> HashMap<String, pyth::Price> {
+        let Some(gateways) = &self.redstone else {
+            return HashMap::new();
+        };
+        if symbols.is_empty() {
+            return HashMap::new();
+        }
+        match gateways.packages(symbols).await {
+            Ok(packages) => crate::redstone::scan_prices(
+                &packages,
+                symbols,
+                unix_now_ms().cast_signed(),
+                i64::from(max_age_secs) * 1000,
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "RedStone gateways unavailable; RedStone sources unpriced this round");
+                HashMap::new()
+            }
+        }
     }
 
     /// Prices the wanted Pyth Pro feeds from the Pyth Pro price API — the
@@ -990,7 +1041,7 @@ impl OracleFetcher {
 
     /// Composes proxy-oracle prices off-chain from each feed's configured
     /// sources, in order — the first candidate yielding a fresh price wins:
-    /// RedStone via the public price API, Pyth Pro via its price API,
+    /// RedStone via its authenticated gateways, Pyth Pro via its price API,
     /// transformers applied with their on-chain input (a free view call).
     ///
     /// Returns only the feeds it could price; the rest stay missing and the
@@ -1007,13 +1058,13 @@ impl OracleFetcher {
             return OracleResponse::new();
         }
 
-        // Batch the underlying fetches: one RedStone call, one Pyth Pro API
-        // call. Every candidate of every feed is fetched up front, so falling
-        // through to a later candidate below costs no extra round-trip.
+        // Batch the underlying fetches: one RedStone gateway read, one Pyth
+        // Pro API call. Every candidate of every feed is fetched up front, so
+        // falling through to a later candidate below costs no extra
+        // round-trip.
         let (redstone_symbols, lazer_wanted) = collect_offchain_wants(&plans);
         let redstone_prices = self
-            .redstone_api
-            .get_prices(&redstone_symbols, max_age_secs)
+            .fetch_redstone_prices(&redstone_symbols, max_age_secs)
             .await;
         let lazer_prices = self.fetch_lazer_prices(lazer_wanted, max_age_secs).await;
         let backends = FetchedBackends {
@@ -1268,6 +1319,11 @@ mod tests {
         input::ProxyPriceTransformer, price_transformer::Call, request::OracleRequest,
     };
 
+    const BOTH: OffchainLegs = OffchainLegs {
+        redstone: true,
+        pyth_pro: true,
+    };
+
     fn pyth_source() -> Source {
         Source::Request(OracleRequest::pyth(
             "pyth-oracle.near".parse().unwrap(),
@@ -1316,7 +1372,7 @@ mod tests {
     /// still prices from RedStone instead of dying on its first source.
     #[test]
     fn plan_keeps_every_source_in_configured_order() {
-        let plans = plan_offchain_sources([&lazer_source(), &redstone_source()].into_iter(), true);
+        let plans = plan_offchain_sources([&lazer_source(), &redstone_source()].into_iter(), BOTH);
         assert_eq!(
             plans,
             vec![
@@ -1330,28 +1386,44 @@ mod tests {
     }
 
     /// Scan prices are off-chain only: Pyth Core sources contribute no
-    /// candidate (not integrated), and Pyth Pro sources contribute one only
-    /// when the API leg is configured — there is no adapter read to fall
-    /// back to, so without a token the feed is simply not priceable.
+    /// candidate (not integrated), and RedStone and Pyth Pro sources
+    /// contribute one only when their own leg has credentials — there is no
+    /// adapter read to fall back to, so without them the feed is simply not
+    /// priceable. Each leg's credentials gate only that leg.
     #[test]
     fn only_offchain_composable_sources_yield_candidates() {
-        assert_eq!(classify_offchain_request(&pyth_request(), true), None);
-        assert_eq!(classify_offchain_request(&lazer_request(), false), None);
+        let redstone_only = OffchainLegs {
+            redstone: true,
+            pyth_pro: false,
+        };
+        let pyth_pro_only = OffchainLegs {
+            redstone: false,
+            pyth_pro: true,
+        };
+        assert_eq!(classify_offchain_request(&pyth_request(), BOTH), None);
+        assert_eq!(
+            classify_offchain_request(&lazer_request(), redstone_only),
+            None
+        );
+        assert_eq!(
+            classify_offchain_request(&redstone_request(), pyth_pro_only),
+            None
+        );
         assert!(matches!(
-            classify_offchain_request(&redstone_request(), false),
+            classify_offchain_request(&redstone_request(), redstone_only),
             Some(OffchainRequest::RedStone(_))
         ));
         assert!(matches!(
-            classify_offchain_request(&lazer_request(), true),
+            classify_offchain_request(&lazer_request(), pyth_pro_only),
             Some(OffchainRequest::Lazer { feed_id: 7, .. })
         ));
         // A proxy whose only source is Pyth Core composes nothing.
-        assert!(plan_offchain_sources([&pyth_source()].into_iter(), true).is_empty());
+        assert!(plan_offchain_sources([&pyth_source()].into_iter(), BOTH).is_empty());
     }
 
     #[test]
     fn plan_is_empty_when_no_source_is_configured() {
-        assert!(plan_offchain_sources([].into_iter(), true).is_empty());
+        assert!(plan_offchain_sources([].into_iter(), BOTH).is_empty());
     }
 
     /// The on-chain push resolves only Pyth Pro adapters from a proxy's
@@ -1389,7 +1461,7 @@ mod tests {
         let plan_for = |id| {
             (
                 id,
-                plan_offchain_sources([&redstone_source()].into_iter(), true),
+                plan_offchain_sources([&redstone_source()].into_iter(), BOTH),
             )
         };
         assert_eq!(
@@ -1409,7 +1481,7 @@ mod tests {
     #[test]
     fn plan_carries_transformers_over_priceable_inners() {
         let inner = OracleRequest::lazer("pyth-lazer.near".parse().unwrap(), 9);
-        let plan = plan_offchain_sources([&transformer_source(inner)].into_iter(), true)
+        let plan = plan_offchain_sources([&transformer_source(inner)].into_iter(), BOTH)
             .into_iter()
             .next()
             .expect("transformer over a Pyth Pro feed is priceable off-chain");
@@ -1488,7 +1560,7 @@ mod tests {
         let inner = OracleRequest::lazer("pyth-lazer.near".parse().unwrap(), 9);
         let plan = plan_offchain_sources(
             [&transformer_source(inner), &redstone_source()].into_iter(),
-            true,
+            BOTH,
         )
         .into_iter()
         .next()

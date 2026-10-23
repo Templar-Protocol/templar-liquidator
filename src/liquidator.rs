@@ -771,14 +771,16 @@ pub struct SwapConfig {
 /// The off-chain price APIs scan-side composition fetches from.
 #[derive(Clone)]
 pub struct OracleApis {
-    pub redstone_api_url: url::Url,
-    /// The RedStone data service both legs name. One value so the scan-side
-    /// price API and the push leg's signed packages describe the same feed
-    /// set; see [`crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID`].
-    pub redstone_data_service: String,
+    /// RedStone's authenticated gateways, for both legs. `None` when
+    /// `REDSTONE_AUTHENTICATED_GATEWAYS` is unset: RedStone sources are then
+    /// not composable (their markets are filtered at registration) and no
+    /// RedStone adapter is pushed. One client shared by every market's
+    /// fetcher — its cache is what keeps a scan round inside the keys' rate
+    /// limit.
+    pub redstone: Option<std::sync::Arc<crate::redstone::RedStoneGatewayClient>>,
+    /// The RedStone push leg (`REDSTONE_PUSH`); inert without `redstone`.
+    pub redstone_push: bool,
     pub lazer_api: Option<crate::lazer::LazerApiConfig>,
-    /// RedStone push leg; `None` disables it.
-    pub redstone_push: Option<crate::redstone_push::RedStonePushConfig>,
 }
 
 /// Loop-liquidation policy: whether to repeat against the same position, and

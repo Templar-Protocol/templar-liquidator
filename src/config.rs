@@ -137,9 +137,9 @@ impl std::fmt::Debug for ValidatedSignerKey {
 
 /// The RedStone data service used when the operator names none: the public
 /// service whose signer set the shipped adapters are configured with. It is
-/// the default for `REDSTONE_DATA_SERVICE_ID`, and that one value reaches
-/// both legs — the scan-side price API and the push leg's signed packages —
-/// so overriding the knob moves both together rather than splitting them.
+/// the default for `REDSTONE_DATA_SERVICE_ID`, and that one value selects
+/// the signed packages both legs read — scan pricing and the push — so
+/// overriding the knob moves both together rather than splitting them.
 pub const DEFAULT_REDSTONE_DATA_SERVICE_ID: &str = "redstone-primary-prod";
 
 /// Command-line arguments for the liquidator bot.
@@ -332,28 +332,18 @@ pub struct Args {
     )]
     pub lazer_ws_url: Url,
 
-    /// RedStone public price API, used to compose proxy-oracle prices
-    /// off-chain at scan time. Scan-side only — execution still prices
-    /// through the on-chain oracle.
-    #[arg(
-        long,
-        env = "REDSTONE_API_URL",
-        default_value = "https://api.redstone.finance"
-    )]
-    pub redstone_api_url: Url,
-
-    /// RedStone data-package gateway the RedStone push leg fetches signed
-    /// packages from (public, no key). Must be `https`.
-    #[arg(
-        long,
-        env = "REDSTONE_GATEWAY_URL",
-        default_value = "https://oracle-gateway-1.a.redstone.finance"
-    )]
-    pub redstone_gateway_url: Url,
+    /// RedStone's authenticated gateways, read by both RedStone legs (scan
+    /// pricing and the push): a JSON array of `{"url": "https://…",
+    /// "apiKey": "…"}`, primary first — the RedStone SDK's
+    /// `authenticatedGateways` shape. RedStone's public hosts stopped serving
+    /// on 2026-10-29, so without it RedStone-sourced markets are filtered at
+    /// registration. Carries API keys: every rendering shows origins only.
+    #[arg(long, env = "REDSTONE_AUTHENTICATED_GATEWAYS", hide_env_values = true)]
+    pub redstone_authenticated_gateways: Option<String>,
 
     /// RedStone data-service id whose signer set the adapters are configured
-    /// with; packages from any other service are rejected on-chain. The same
-    /// service the scan-side price API is queried with — see
+    /// with; packages from any other service are rejected on-chain. Both legs
+    /// read the gateways' packages for it — see
     /// [`DEFAULT_REDSTONE_DATA_SERVICE_ID`].
     #[arg(
         long,
@@ -365,8 +355,9 @@ pub struct Args {
     /// Push RedStone-signed packages to the RedStone adapter before a
     /// liquidation, for the feeds the Pyth Pro push cannot refresh: those
     /// with no Pyth Pro source, and — without a `LAZER_API_TOKEN` — every
-    /// feed. Nothing else keeps those adapters fresh. Same optional-value
-    /// form as `--dry-run`.
+    /// feed. Nothing else keeps those adapters fresh. Needs
+    /// `REDSTONE_AUTHENTICATED_GATEWAYS`. Same optional-value form as
+    /// `--dry-run`.
     #[arg(
         long,
         env = "REDSTONE_PUSH",
@@ -467,8 +458,9 @@ pub struct Args {
 
 impl std::fmt::Debug for Args {
     /// Redacts every field that carries credentials — the signer key and the
-    /// four token fields (`near_rpc_api_key`, `oneclick_api_token`,
-    /// `telegram_bot_token`, `lazer_api_token`) — and renders
+    /// five credential fields (`near_rpc_api_key`, `oneclick_api_token`,
+    /// `telegram_bot_token`, `lazer_api_token`,
+    /// `redstone_authenticated_gateways`) — and renders
     /// `lazer_api_url` as its origin only: not itself a credential, but a
     /// URL's userinfo/query components can carry one.
     /// Presence is still reported for the optional
@@ -520,8 +512,10 @@ impl std::fmt::Debug for Args {
                 "lazer_ws_url",
                 &self.lazer_ws_url.origin().ascii_serialization(),
             )
-            .field("redstone_api_url", &self.redstone_api_url)
-            .field("redstone_gateway_url", &self.redstone_gateway_url)
+            .field(
+                "redstone_authenticated_gateways",
+                &shown(self.redstone_authenticated_gateways.as_ref()),
+            )
             .field("redstone_data_service_id", &self.redstone_data_service_id)
             .field("redstone_push", &self.redstone_push)
             .field(
@@ -552,6 +546,9 @@ impl std::fmt::Debug for Args {
             .finish()
     }
 }
+
+/// Env vars of RedStone's public hosts, which stopped serving on 2026-10-29.
+const RETIRED_REDSTONE_VARS: [&str; 2] = ["REDSTONE_API_URL", "REDSTONE_GATEWAY_URL"];
 
 /// Whether the deprecated `NEAR_API_KEY` is the only RPC credential present.
 ///
@@ -802,8 +799,8 @@ impl Args {
 
         // Checked here rather than at either use site: this one value selects
         // the data service for BOTH RedStone legs, and blank fails far from
-        // its cause — the scan query degrades to `provider=` and the push URL
-        // loses its last path segment, each looking like an upstream problem.
+        // its cause — the gateway URL loses its last path segment and every
+        // request is refused, looking like an upstream or key problem.
         // Any whitespace, not just an all-blank value: a trailing space is
         // easy to leave in a `.env` line or a compose `env_file`, both of
         // which preserve it, and trimming to decide while storing the padded
@@ -813,52 +810,36 @@ impl Args {
             || self.redstone_data_service_id.contains(char::is_whitespace)
         {
             return Err(format!(
-                "REDSTONE_DATA_SERVICE_ID must name a data service with no whitespace (e.g. redstone-primary-prod), got {:?}: it selects both the scan-side price query and the push leg's signed packages, and a padded or empty value breaks each of them somewhere far from here",
+                "REDSTONE_DATA_SERVICE_ID must name a data service with no whitespace (e.g. redstone-primary-prod), got {:?}: it selects the signed packages both RedStone legs read, and a padded or empty value breaks each of them somewhere far from here",
                 self.redstone_data_service_id
             ));
         }
 
-        let redstone_push = if self.redstone_push {
-            if self.redstone_gateway_url.scheme() != "https" {
-                return Err(format!(
-                    "REDSTONE_GATEWAY_URL must be https (got scheme '{}'): the packages are signed, but the gateway decides which feed set the bot submits",
-                    self.redstone_gateway_url.scheme()
-                ));
-            }
-            // The endpoint is appended to the URL's path and the URL is
-            // logged in full, so it must carry nothing but origin and path.
-            if !self.redstone_gateway_url.username().is_empty()
-                || self.redstone_gateway_url.password().is_some()
-                || self.redstone_gateway_url.query().is_some()
-                || self.redstone_gateway_url.fragment().is_some()
-            {
-                return Err(
-                    "REDSTONE_GATEWAY_URL must carry no credentials, query or fragment: only an origin and an optional path prefix"
-                        .to_string(),
-                );
-            }
-            Some(crate::redstone_push::RedStonePushConfig {
-                gateway_url: self.redstone_gateway_url.clone(),
-                data_service_id: self.redstone_data_service_id.clone(),
-            })
-        } else {
-            None
-        };
+        // Parsed whether or not the push leg is on: scan pricing reads the
+        // same gateways. The parser's messages never echo the value, which
+        // carries the keys.
+        let redstone_gateways = crate::redstone::RedStoneGatewayConfig::parse(
+            self.redstone_authenticated_gateways
+                .as_deref()
+                .unwrap_or(""),
+            self.redstone_data_service_id.clone(),
+        )?;
 
         // A live push-check with no push leg at all would push nothing and
         // then "verify" it — refuse rather than report a hollow pass. Either
         // leg suffices: the Pyth Pro token, or the RedStone leg (on by
-        // default), which is what a RedStone-only market is checked with.
+        // default, with gateways), which is what a RedStone-only market is
+        // checked with.
         if self.effective_run_mode() == RunMode::PushCheck
             && !self.dry_run
             && self
                 .lazer_api_token
                 .as_deref()
                 .is_none_or(|token| token.trim().is_empty())
-            && redstone_push.is_none()
+            && !(self.redstone_push && redstone_gateways.is_some())
         {
             return Err(
-                "RUN_MODE=push-check with DRY_RUN=false needs a push leg: set LAZER_API_TOKEN (Pyth Pro) or leave REDSTONE_PUSH=true (RedStone); with neither there is nothing to push, so the check would prove nothing"
+                "RUN_MODE=push-check with DRY_RUN=false needs a push leg: set LAZER_API_TOKEN (Pyth Pro) or REDSTONE_AUTHENTICATED_GATEWAYS with REDSTONE_PUSH=true (RedStone); with neither there is nothing to push, so the check would prove nothing"
                     .to_string(),
             );
         }
@@ -924,9 +905,8 @@ impl Args {
             max_loop_iterations: self.max_loop_iterations,
             lazer_ws_url: self.lazer_ws_url.clone(),
             pyth_pro_source,
-            redstone_api_url: self.redstone_api_url.clone(),
-            redstone_data_service_id: self.redstone_data_service_id.clone(),
-            redstone_push,
+            redstone_gateways,
+            redstone_push: self.redstone_push,
             // The config type's constructor enforces HTTPS — a bearer token
             // over plain http travels in cleartext. Refused at startup,
             // where the operator sees it, rather than leaking the credential
@@ -970,6 +950,19 @@ impl Args {
             );
         }
 
+        // RedStone's public hosts stopped serving on 2026-10-29 and their two
+        // knobs went with them. A stale flag fails parsing; a stale env var
+        // is simply never read — say so, since the replacement is a
+        // credential the operator has to go and get.
+        for retired in RETIRED_REDSTONE_VARS {
+            if std::env::var_os(retired).is_some() {
+                tracing::warn!(
+                    var = retired,
+                    "No longer read: RedStone's public hosts stopped serving on 2026-10-29. Set REDSTONE_AUTHENTICATED_GATEWAYS instead (see docs/configuration.md)"
+                );
+            }
+        }
+
         if self.dry_run {
             tracing::info!("DRY RUN MODE: Scanning only, no transactions will be executed");
         } else {
@@ -995,6 +988,9 @@ mod tests {
         near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "liquidator-test")
             .to_string()
     }
+
+    /// A valid `REDSTONE_AUTHENTICATED_GATEWAYS` value: two gateways.
+    const TEST_GATEWAYS: &str = r#"[{"url":"https://primary.example","apiKey":"k1"},{"url":"https://backup.example","apiKey":"k2"}]"#;
 
     fn create_test_args() -> Args {
         Args {
@@ -1028,10 +1024,7 @@ mod tests {
             lazer_ws_url: "wss://pyth-lazer-0.dourolabs.app/v1/stream"
                 .parse()
                 .expect("valid ws url"),
-            redstone_api_url: "https://api.redstone.finance".parse().unwrap(),
-            redstone_gateway_url: "https://oracle-gateway-1.a.redstone.finance"
-                .parse()
-                .unwrap(),
+            redstone_authenticated_gateways: None,
             redstone_data_service_id: DEFAULT_REDSTONE_DATA_SERVICE_ID.to_string(),
             redstone_push: true,
             lazer_api_url: "https://pyth-lazer.dourolabs.app".parse().unwrap(),
@@ -1111,51 +1104,51 @@ mod tests {
         assert_eq!(declared_default("once"), ["false"]);
     }
 
-    /// The RedStone push leg is on by default against RedStone's public
-    /// gateway, can be switched off, and refuses a cleartext gateway: the
-    /// packages are signed, but the URL still decides which server's view
-    /// of the feed set the bot submits.
+    /// The gateways reach the config validated, read by both legs with the
+    /// configured data service; unset means no RedStone at all. The push leg
+    /// is on by default and can be switched off independently. A cleartext
+    /// gateway is refused by the knob's name — the full matrix of
+    /// rejections is pinned in `redstone.rs`.
     #[test]
-    fn redstone_push_defaults_on_can_be_disabled_and_requires_https() {
+    fn redstone_gateways_reach_config_and_push_defaults_on() {
         let config = parse_with(&[]).build_config().expect("valid test config");
-        let push = config.redstone_push.expect("on by default");
-        assert_eq!(
-            push.gateway_url.as_str(),
-            "https://oracle-gateway-1.a.redstone.finance/"
+        assert!(
+            config.redstone_gateways.is_none(),
+            "unset means no RedStone"
         );
-        assert_eq!(push.data_service_id, "redstone-primary-prod");
+        assert!(config.redstone_push, "push on by default");
 
-        let off = parse_with(&["--redstone-push=false"])
+        let config = parse_with(&["--redstone-authenticated-gateways", TEST_GATEWAYS])
             .build_config()
             .unwrap();
-        assert!(off.redstone_push.is_none());
+        let gateways = config.redstone_gateways.expect("configured");
+        assert_eq!(gateways.gateway_count(), 2);
+        assert_eq!(gateways.data_service_id(), "redstone-primary-prod");
 
-        let err = parse_with(&["--redstone-gateway-url", "http://gw.example"])
-            .build_config()
-            .expect_err("plain http must be refused");
-        assert!(
-            err.contains("REDSTONE_GATEWAY_URL"),
-            "names the knob: {err}"
-        );
-        for bad in [
-            "https://gw.example/gw?key=abc",
-            "https://gw.example/gw#frag",
-            "https://user:pw@gw.example/gw",
-        ] {
-            let err = parse_with(&["--redstone-gateway-url", bad])
-                .build_config()
-                .expect_err("a query, fragment or credential must be refused");
-            assert!(err.contains("REDSTONE_GATEWAY_URL"), "{bad}: {err}");
-        }
-        parse_with(&["--redstone-gateway-url", "https://mirror.example/redstone"])
-            .build_config()
-            .expect("a path prefix is allowed");
+        let off = parse_with(&[
+            "--redstone-authenticated-gateways",
+            TEST_GATEWAYS,
+            "--redstone-push=false",
+        ])
+        .build_config()
+        .unwrap();
+        assert!(!off.redstone_push);
+        assert!(off.redstone_gateways.is_some(), "scan pricing keeps them");
+
+        let err = parse_with(&[
+            "--redstone-authenticated-gateways",
+            r#"[{"url":"http://gw.example","apiKey":"k"}]"#,
+        ])
+        .build_config()
+        .expect_err("plain http must be refused");
+        assert!(err.contains("REDSTONE_AUTHENTICATED_GATEWAYS"), "{err}");
     }
 
     /// `push-check` is a diagnostic mode: it parses like the others, and in
     /// live mode it needs at least one push leg — the Pyth Pro token, or the
-    /// RedStone leg (on by default) — since with neither there is nothing to
-    /// push and "checking" the push would be a lie; dry-run only reads.
+    /// RedStone leg (on by default, needing gateways) — since with neither
+    /// there is nothing to push and "checking" the push would be a lie;
+    /// dry-run only reads.
     #[test]
     fn push_check_mode_parses_and_refuses_live_without_a_push_leg() {
         let config = parse_with(&["--run-mode", "push-check"])
@@ -1163,24 +1156,38 @@ mod tests {
             .expect("dry-run push-check needs no token");
         assert_eq!(config.run_mode, RunMode::PushCheck);
 
-        parse_with(&["--run-mode", "push-check", "--dry-run=false"])
-            .build_config()
-            .expect("tokenless live push-check runs on the RedStone leg alone");
-
-        let err = parse_with(&[
+        parse_with(&[
             "--run-mode",
             "push-check",
             "--dry-run=false",
-            "--redstone-push=false",
+            "--redstone-authenticated-gateways",
+            TEST_GATEWAYS,
         ])
         .build_config()
-        .expect_err("live push-check with no push leg must refuse to start");
-        assert!(
-            err.contains("LAZER_API_TOKEN")
-                && err.contains("REDSTONE_PUSH")
-                && err.contains("push-check"),
-            "names both knobs and the mode: {err}"
-        );
+        .expect("tokenless live push-check runs on the RedStone leg alone");
+
+        for no_leg in [
+            &["--run-mode", "push-check", "--dry-run=false"][..],
+            &[
+                "--run-mode",
+                "push-check",
+                "--dry-run=false",
+                "--redstone-authenticated-gateways",
+                TEST_GATEWAYS,
+                "--redstone-push=false",
+            ][..],
+        ] {
+            let err = parse_with(no_leg)
+                .build_config()
+                .expect_err("live push-check with no push leg must refuse to start");
+            assert!(
+                err.contains("LAZER_API_TOKEN")
+                    && err.contains("REDSTONE_AUTHENTICATED_GATEWAYS")
+                    && err.contains("REDSTONE_PUSH")
+                    && err.contains("push-check"),
+                "names every knob and the mode: {err}"
+            );
+        }
 
         parse_with(&[
             "--run-mode",
@@ -1601,9 +1608,9 @@ mod tests {
     }
 
     /// An empty data service id is representable through the CLI and reaches
-    /// both RedStone legs, where it fails far from its cause: the scan query
-    /// becomes `provider=` (the API answers, with nothing usable) and the push
-    /// URL loses its last path segment. Refuse it at startup instead.
+    /// both RedStone legs, where it fails far from its cause: the gateway URL
+    /// loses its last path segment and every request is refused. Refuse it
+    /// at startup instead.
     #[test]
     fn redstone_data_service_id_must_not_be_blank() {
         for bad in [
@@ -1622,9 +1629,17 @@ mod tests {
             );
         }
 
-        let args = parse_with(&["--redstone-data-service-id", "redstone-avalanche-prod"]);
+        let args = parse_with(&[
+            "--redstone-data-service-id",
+            "redstone-avalanche-prod",
+            "--redstone-authenticated-gateways",
+            TEST_GATEWAYS,
+        ]);
         let config = args.build_config().expect("a named service is accepted");
-        assert_eq!(config.redstone_data_service_id, "redstone-avalanche-prod");
+        assert_eq!(
+            config.redstone_gateways.unwrap().data_service_id(),
+            "redstone-avalanche-prod"
+        );
     }
 
     /// The retired-market list must refuse startup on an unparseable entry,
@@ -1745,29 +1760,30 @@ mod tests {
         );
     }
 
-    /// Scan-side proxy-price composition reads the RedStone public API. The
-    /// default must stay on the public price API (api.redstone.finance) —
-    /// the data-package gateways serve a different, signed format.
+    /// RedStone's public hosts stopped serving on 2026-10-29 and their two
+    /// knobs went with them: a stale flag fails startup instead of pointing
+    /// a leg at a host that refuses every request.
     #[test]
-    fn redstone_api_url_defaults_to_the_public_api() {
-        assert_eq!(
-            parse_with(&[]).redstone_api_url.as_str(),
-            "https://api.redstone.finance/"
-        );
-        assert_eq!(
-            create_test_args()
-                .build_config()
-                .expect("valid test config")
-                .redstone_api_url
-                .as_str(),
-            "https://api.redstone.finance/"
-        );
+    fn retired_redstone_knobs_are_rejected() {
+        for args in [
+            ["--redstone-api-url", "https://api.redstone.finance"],
+            [
+                "--redstone-gateway-url",
+                "https://oracle-gateway-1.a.redstone.finance",
+            ],
+        ] {
+            let err = try_parse_with(&args).expect_err("retired flag must be rejected");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{args:?}"
+            );
+        }
     }
 
     /// A documented no-op knob (nothing consumed the value) is gone rather
     /// than silently accepted — a removed flag must fail startup loudly, not
-    /// swallow an operator's intent. (`--redstone-gateway-url` left the same
-    /// way and returned with a real function: the RedStone push leg.)
+    /// swallow an operator's intent.
     #[test]
     fn removed_knobs_are_rejected_at_parse_time() {
         let args = ["--transaction-timeout", "60"];
@@ -1894,6 +1910,8 @@ mod tests {
         args.near_rpc_api_key = Some("rpc-api-key-value".to_string());
         args.oneclick_api_token = Some("oneclick-token-value".to_string());
         args.lazer_api_token = Some("lazer-token-value".to_string());
+        args.redstone_authenticated_gateways =
+            Some(r#"[{"url":"https://gw.example","apiKey":"redstone-key-value"}]"#.to_string());
         let rendered = format!("{:?}", args.build_config());
 
         let key = test_signer_key();
@@ -1907,6 +1925,7 @@ mod tests {
             "rpc-api-key-value",
             "oneclick-token-value",
             "lazer-token-value",
+            "redstone-key-value",
         ] {
             assert!(
                 !rendered.contains(value),
@@ -1918,9 +1937,10 @@ mod tests {
     #[test]
     fn args_debug_formatting_never_reveals_secrets() {
         // `Args` implements `Debug` by hand for the same reason
-        // `ServiceConfig` does above: the signer key and the three token
+        // `ServiceConfig` does above: the signer key and the credential
         // fields (`near_rpc_api_key`, `oneclick_api_token`,
-        // `telegram_bot_token`) must never appear in a
+        // `telegram_bot_token`, `lazer_api_token`,
+        // `redstone_authenticated_gateways`) must never appear in a
         // `tracing::debug!(?args)` or a panic payload that formats `Args`.
         let mut args = create_test_args();
         args.near_rpc_api_key = Some("rpc-api-key-value".to_string());
@@ -1928,6 +1948,8 @@ mod tests {
         args.lazer_api_token = Some("lazer-token-value".to_string());
         args.telegram_bot_token = Some("telegram-bot-token-value".to_string());
         args.telegram_chat_id = Some("-100123".to_string());
+        args.redstone_authenticated_gateways =
+            Some(r#"[{"url":"https://gw.example","apiKey":"redstone-key-value"}]"#.to_string());
         let rendered = format!("{args:?}");
 
         let key = test_signer_key();
@@ -1942,6 +1964,7 @@ mod tests {
             "oneclick-token-value",
             "lazer-token-value",
             "telegram-bot-token-value",
+            "redstone-key-value",
         ] {
             assert!(
                 !rendered.contains(value),

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **RedStone needs an API key.** RedStone switched its public gateways and its public price API off for good on 2026-10-29 00:00 UTC — the hosts answer `403 public_gateway_rejected` — so both RedStone legs now read RedStone's *authenticated gateways*, configured by `REDSTONE_AUTHENTICATED_GATEWAYS`: a JSON array of `{"url", "apiKey"}`, primary first, the RedStone SDK's `authenticatedGateways` shape. Unset, RedStone-sourced markets are filtered at registration and no RedStone adapter is pushed, so set it when upgrading. Scan pricing now takes each feed's median across signers from the same signed packages the push leg verifies, instead of the public `/prices` API. The keys are rate-limited, so one client serves every market: it asks for every wanted feed at once and reuses the answer for 10 s (the data service's signing cadence), fails over between gateways on any non-success status, follows no redirects, answers a failure from memory for 10 s, and never logs a key or a response body.
+
+### Removed
+
+- `REDSTONE_API_URL` and `REDSTONE_GATEWAY_URL`, whose hosts no longer serve. A stale flag is rejected at parse; a stale env var logs a warning at startup.
+
 ## [1.2.1] - 2026-10-23
 
 ### Security

@@ -122,19 +122,13 @@ pub struct ServiceConfig {
     /// gateway builds a reconnecting websocket subscriber from it; without it
     /// Pyth Pro–sourced feeds rely on an external pusher at execution time.
     pub pyth_pro_source: Option<templar_gateway_oracle_updates_dispatch::LazerSourceConfig>,
-    /// RedStone public price API for scan-side proxy price composition
-    pub redstone_api_url: url::Url,
-
-    /// Which RedStone data service to read, from `REDSTONE_DATA_SERVICE_ID`.
-    ///
-    /// One value feeds both legs: the scan-side `/prices` query and the push
-    /// leg's signed packages. Held here rather than read back out of
-    /// `redstone_push` because that leg is optional (`REDSTONE_PUSH=false`)
-    /// while scan pricing still needs the value.
-    pub redstone_data_service_id: String,
-    /// RedStone push leg (`REDSTONE_PUSH`, `REDSTONE_GATEWAY_URL`,
-    /// `REDSTONE_DATA_SERVICE_ID`); `None` when disabled.
-    pub redstone_push: Option<crate::redstone_push::RedStonePushConfig>,
+    /// RedStone's authenticated gateways (`REDSTONE_AUTHENTICATED_GATEWAYS`)
+    /// and the data service both legs read (`REDSTONE_DATA_SERVICE_ID`),
+    /// validated at parse; `None` when no gateway is configured — RedStone
+    /// sources are then not priceable and no RedStone adapter is pushed.
+    pub redstone_gateways: Option<crate::redstone::RedStoneGatewayConfig>,
+    /// RedStone push leg (`REDSTONE_PUSH`); inert without `redstone_gateways`.
+    pub redstone_push: bool,
     /// Lazer (Pyth Pro) price API endpoint + token, HTTPS-validated at
     /// construction; the API leg is disabled when `None`
     pub lazer_api: Option<crate::lazer::LazerApiConfig>,
@@ -204,15 +198,9 @@ impl std::fmt::Debug for ServiceConfig {
                 &self.lazer_ws_url.origin().ascii_serialization(),
             )
             .field("pyth_pro_source", &self.pyth_pro_source.is_some())
-            .field("redstone_api_url", &self.redstone_api_url)
-            .field("redstone_data_service_id", &self.redstone_data_service_id)
-            .field(
-                "redstone_push",
-                &self
-                    .redstone_push
-                    .as_ref()
-                    .map(|push| push.gateway_url.as_str()),
-            )
+            // Delegates to the config's redacting `Debug`: origins, never keys.
+            .field("redstone_gateways", &self.redstone_gateways)
+            .field("redstone_push", &self.redstone_push)
             .field("lazer_api", &self.lazer_api)
             .field("min_swap_value_usd", &self.min_swap_value_usd)
             .field("batch_swap_on_cycle_start", &self.batch_swap_on_cycle_start)
@@ -239,6 +227,9 @@ pub struct LiquidatorService {
     oneclick_provider: Option<crate::swap::SwapProviderImpl>,
     /// Oracle fetcher for batch swap USD threshold checks
     oracle_fetcher: crate::OracleFetcher,
+    /// The one RedStone gateway client, handed to every market's fetcher so
+    /// they share its cache — see [`crate::OracleApis::redstone`].
+    redstone: Option<Arc<crate::redstone::RedStoneGatewayClient>>,
     /// Collateral asset → price / swap target info (built from market configs)
     collateral_price_map: HashMap<String, CollateralPriceInfo>,
     /// Set when SIGTERM/ctrl-C arrives: in-flight work finishes, nothing new
@@ -336,6 +327,7 @@ impl LiquidatorService {
                 "LAZER_API_TOKEN unset: Pyth Pro–sourced markets cannot be priced off-chain and will be filtered at registration"
             );
         }
+        let redstone = Self::create_redstone_client(&config);
 
         let metrics = Arc::new(Metrics::default());
         let inventory = Arc::new(RwLock::new({
@@ -352,10 +344,9 @@ impl LiquidatorService {
             client.clone(),
             pyth_pro_updates.clone(),
             crate::OracleApis {
-                redstone_api_url: config.redstone_api_url.clone(),
-                redstone_data_service: config.redstone_data_service_id.clone(),
+                redstone: redstone.clone(),
+                redstone_push: config.redstone_push,
                 lazer_api: config.lazer_api.clone(),
-                redstone_push: config.redstone_push.clone(),
             },
             None,
             None,
@@ -379,6 +370,7 @@ impl LiquidatorService {
             markets: HashMap::new(),
             oneclick_provider,
             oracle_fetcher,
+            redstone,
             collateral_price_map: HashMap::new(),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             shutdown_wake_tx,
@@ -386,6 +378,39 @@ impl LiquidatorService {
             scan_failure_counts: HashMap::new(),
             metrics,
         }
+    }
+
+    /// Builds the one RedStone gateway client every market's fetcher shares,
+    /// or `None` — RedStone sources then filter their markets at
+    /// registration — stating which at startup.
+    fn create_redstone_client(
+        config: &ServiceConfig,
+    ) -> Option<Arc<crate::redstone::RedStoneGatewayClient>> {
+        let redstone = config.redstone_gateways.clone().and_then(|gateways| {
+            match crate::redstone::RedStoneGatewayClient::new(gateways) {
+                Ok(client) => Some(Arc::new(client)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Could not build the no-redirect RedStone gateway client; RedStone-sourced markets will be filtered at registration and no RedStone adapter is pushed"
+                    );
+                    None
+                }
+            }
+        });
+        match &redstone {
+            Some(client) => tracing::info!(
+                gateways = client.config().gateway_count(),
+                data_service = client.config().data_service_id(),
+                push = config.redstone_push,
+                "RedStone authenticated gateways configured"
+            ),
+            None if config.redstone_gateways.is_none() => tracing::warn!(
+                "REDSTONE_AUTHENTICATED_GATEWAYS unset: RedStone serves no data without an API key, so RedStone-sourced markets cannot be priced off-chain and will be filtered at registration, and no RedStone adapter is pushed"
+            ),
+            None => {}
+        }
+        redstone
     }
 
     /// Creates the swap provider for collateral rebalancing (`None` for the
@@ -1180,10 +1205,9 @@ impl LiquidatorService {
                         collateral_strategy: self.config.collateral_strategy.clone(),
                     },
                     crate::OracleApis {
-                        redstone_api_url: self.config.redstone_api_url.clone(),
-                        redstone_data_service: self.config.redstone_data_service_id.clone(),
+                        redstone: self.redstone.clone(),
+                        redstone_push: self.config.redstone_push,
                         lazer_api: self.config.lazer_api.clone(),
-                        redstone_push: self.config.redstone_push.clone(),
                     },
                     crate::LoopPolicy {
                         enabled: self.config.loop_liquidation,

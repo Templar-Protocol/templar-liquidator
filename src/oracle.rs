@@ -660,7 +660,7 @@ impl OracleFetcher {
                                 .flatten()
                                 .map(|feed| feed.as_ref().to_string())
                                 .collect();
-                            match gateways.packages(&feeds).await {
+                            match gateways.packages_for_push(&feeds).await {
                                 Ok(packages) => {
                                     for (adapter, feed_ids) in &targets.redstone {
                                         if self

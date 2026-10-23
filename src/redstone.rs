@@ -52,9 +52,10 @@ pub(crate) const MAX_FUTURE_SKEW_MS: i64 = 30_000;
 /// packages, only requests against a rate-limited key.
 pub(crate) const PACKAGE_TTL: Duration = Duration::from_secs(10);
 
-/// How long a failed fetch is answered from memory before the gateways are
-/// asked again. Without it, every market in a round re-runs the full
-/// failover chain against gateways that just failed it.
+/// How long a failed fetch is answered from memory for scan callers before
+/// the gateways are asked again. Without it, every market in a round re-runs
+/// the full failover chain against gateways that just failed it. The
+/// execution-time push never reads this memo (`packages_for_push`).
 pub(crate) const FAILURE_BACKOFF: Duration = Duration::from_secs(10);
 
 /// Per-request timeout. A fetch tries each gateway in turn, so the worst
@@ -326,6 +327,28 @@ impl RedStoneGatewayClient {
     /// memory for `FAILURE_BACKOFF` (10 s). Messages name gateways by origin and
     /// never carry a key or a response body.
     pub async fn packages(&self, feeds: &[String]) -> Result<Arc<PackageMap>, String> {
+        self.packages_inner(feeds, true).await
+    }
+
+    /// [`Self::packages`] for the execution-time push: a fresh snapshot is
+    /// still reused, but a recent failure is never replayed. A liquidation
+    /// is waiting on this read, so it asks the gateways itself rather than
+    /// inherit a failure some other market's scan recorded up to 10 s ago
+    /// against gateways that may have recovered since. Its own failure is
+    /// recorded for the scan callers.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::packages`], without the replay.
+    pub async fn packages_for_push(&self, feeds: &[String]) -> Result<Arc<PackageMap>, String> {
+        self.packages_inner(feeds, false).await
+    }
+
+    async fn packages_inner(
+        &self,
+        feeds: &[String],
+        replay_failure: bool,
+    ) -> Result<Arc<PackageMap>, String> {
         if feeds.is_empty() {
             return Ok(Arc::default());
         }
@@ -339,7 +362,7 @@ impl RedStoneGatewayClient {
                 return Ok(Arc::clone(&last.packages));
             }
         }
-        if let Some((failed_at, error)) = &state.last_failure {
+        if let Some((failed_at, error)) = state.last_failure.as_ref().filter(|_| replay_failure) {
             if now.saturating_duration_since(*failed_at) < self.failure_backoff {
                 return Err(error.clone());
             }
@@ -407,6 +430,18 @@ impl RedStoneGatewayClient {
             .map_err(|error| format!("request failed: {}", error.without_url()))?;
         let status = response.status();
         if status.as_u16() == STATUS_NO_TRACKED_FEEDS {
+            // Not a gateway failure — every gateway serves the same service,
+            // so failing over would only repeat it — but rarely healthy
+            // either: the usual cause is a data service that tracks none of
+            // these feeds. Said here, since nothing else on the RedStone path
+            // would say why every RedStone-priced feed is unpriced; once per
+            // fetch, so at most once per TTL window.
+            tracing::warn!(
+                gateway = %gateway.origin(),
+                data_service = %self.config.data_service_id,
+                requested = feeds.len(),
+                "RedStone gateway tracks none of the requested feeds (513); check REDSTONE_DATA_SERVICE_ID"
+            );
             return Ok(PackageMap::new());
         }
         // The body of a refused authenticated request is never logged or
@@ -829,6 +864,36 @@ mod tests {
         let second = client.packages(&feeds(&["BTC"])).await.unwrap_err();
         assert_eq!(first, second);
         assert_eq!(heads.lock().unwrap().len(), 1);
+    }
+
+    /// The execution-time push never inherits a scan's failure: inside the
+    /// backoff a scan caller gets the memo, the push asks the gateways — and
+    /// its success then serves the scan callers too.
+    #[tokio::test]
+    async fn the_push_is_never_answered_from_the_failure_memo() {
+        let (url, heads) = crate::rpc::test_support::scripted_server_heads(vec![
+            (503, String::new()),
+            (200, FIXTURE.to_string()),
+        ])
+        .await;
+        let client = client_for(&[&url]);
+        let scan_error = client.packages(&feeds(&["BTC"])).await.unwrap_err();
+        assert_eq!(
+            client.packages(&feeds(&["BTC"])).await.unwrap_err(),
+            scan_error,
+            "a scan caller inside the backoff gets the memo"
+        );
+        assert_eq!(heads.lock().unwrap().len(), 1);
+
+        let pushed = client.packages_for_push(&feeds(&["BTC"])).await.unwrap();
+        assert_eq!(pushed["BTC"].len(), 5);
+        assert_eq!(heads.lock().unwrap().len(), 2, "the push asked the gateway");
+        assert!(client.packages(&feeds(&["BTC"])).await.is_ok());
+        assert_eq!(
+            heads.lock().unwrap().len(),
+            2,
+            "and its answer serves scans"
+        );
     }
 
     #[tokio::test]

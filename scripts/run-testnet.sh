@@ -197,6 +197,9 @@ CMD_ARGS+=("--collateral-strategy" "$COLLATERAL_STRATEGY")
 # Pyth Pro token: secret, goes via the environment, not argv. Without it every
 # Pyth Pro-sourced market is filtered at registration.
 [ -n "$LAZER_API_TOKEN" ] && export LAZER_API_TOKEN
+# RedStone's authenticated gateways carry API keys: environment, not argv.
+# Without them every RedStone-sourced market is filtered at registration.
+[ -n "$REDSTONE_AUTHENTICATED_GATEWAYS" ] && export REDSTONE_AUTHENTICATED_GATEWAYS
 
 # Add market filtering arguments
 if [ -n "$ALLOWED_COLLATERAL_ASSETS" ]; then

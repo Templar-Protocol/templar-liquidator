@@ -7,7 +7,8 @@
 //! interval, enforced inside the contract). Nothing else keeps those
 //! adapters fresh, so without this leg a RedStone-only feed is never
 //! priceable on-chain. The bot fetches signed packages from RedStone's
-//! public gateway, serializes them in the RedStone protocol layout, recovers
+//! authenticated gateways ([`crate::redstone`]), serializes them in the
+//! RedStone protocol layout, recovers
 //! every signature locally against the adapter's own signer set and
 //! timestamp window (both read from the contract), submits only a payload
 //! the contract will accept, and skips feeds it pushed within the adapter's
@@ -15,23 +16,15 @@
 //! could foresee.
 //!
 //! This module holds the pure parts (parsing, serialization, signer
-//! recovery, payload assembly) and the gateway client; target resolution
-//! and the on-chain write live in [`crate::oracle`].
+//! recovery, payload assembly); the fetch is the shared gateway client's
+//! ([`crate::redstone::RedStoneGatewayClient`]), and target resolution and
+//! the on-chain write live in [`crate::oracle`].
 
 use std::collections::{BTreeSet, HashMap};
 
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use near_sdk::base64::prelude::*;
 use sha3::{Digest, Keccak256};
-use url::Url;
-
-/// Where signed packages come from: the gateway, and the data-service id
-/// whose signer set the adapters are configured with.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RedStonePushConfig {
-    pub gateway_url: Url,
-    pub data_service_id: String,
-}
 
 /// One signed single-feed package as the gateway serves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +67,7 @@ impl From<&templar_common::oracle::redstone::Config> for AdapterRules {
 /// RedStone protocol constants: values are 32-byte big-endian integers at
 /// 8 decimals; a payload ends with the unsigned-metadata size and the marker.
 const VALUE_BYTES: usize = 32;
-const DECIMALS: u32 = 8;
+pub(crate) const DECIMALS: u32 = 8;
 const REDSTONE_MARKER: [u8; 9] = [0x00, 0x00, 0x02, 0xed, 0x57, 0x01, 0x1e, 0x00, 0x00];
 
 /// Parses a `0x`-prefixed (or bare) 20-byte hex address.
@@ -116,11 +109,13 @@ pub(crate) fn scale_value(text: &str) -> Option<u128> {
     }
 }
 
-/// Parses the gateway's `data-packages/latest/{service}` body: a map from
-/// feed id to its signed packages. Tolerant per package — one entry that
-/// does not parse is skipped, not the whole response — and keyed only by
-/// single-feed packages whose data point names the feed they are filed
-/// under.
+/// Parses a gateway's by-feeds body: a map from feed id to its signed
+/// packages. Tolerant per package — one entry that does not parse is
+/// skipped, not the whole response — and keyed only by single-feed packages
+/// whose data point names the feed they are filed under. A package the
+/// gateway itself flags `isSignatureValid: false` is dropped here: the push
+/// leg would refuse it at recovery anyway, and scan pricing, which recovers
+/// nothing, would otherwise count it.
 pub(crate) fn parse_gateway_response(
     body: &str,
 ) -> Result<HashMap<String, Vec<SignedPackage>>, String> {
@@ -153,6 +148,9 @@ pub(crate) fn parse_gateway_response(
 }
 
 fn parse_package(feed: &str, entry: &near_sdk::serde_json::Value) -> Option<SignedPackage> {
+    if entry.get("isSignatureValid") == Some(&near_sdk::serde_json::Value::Bool(false)) {
+        return None;
+    }
     let points = entry.get("dataPoints")?.as_array()?;
     let [point] = points.as_slice() else {
         return None;
@@ -335,103 +333,15 @@ pub(crate) fn release<F: Clone + Eq + std::hash::Hash>(
     }
 }
 
-/// The data-packages URL for a gateway config: the endpoint is appended to
-/// the configured *path* (a prefix is kept), and any query or fragment is
-/// dropped rather than folded into the path — `build_config` refuses such a
-/// URL at startup anyway, so the endpoint can never slide into a query.
-pub(crate) fn packages_url(config: &RedStonePushConfig) -> Url {
-    let mut url = config.gateway_url.clone();
-    url.set_query(None);
-    url.set_fragment(None);
-    let path = format!(
-        "{}/data-packages/latest/{}",
-        url.path().trim_end_matches('/'),
-        config.data_service_id
-    );
-    url.set_path(&path);
-    url
-}
-
-/// Fetches signed packages from the RedStone gateway. Follows no redirects:
-/// the packages are signed, but the URL decides whose view of the feed set
-/// the bot submits, so a redirect is a failed fetch rather than a followed
-/// one.
-pub struct RedStonePushClient {
-    http: reqwest::Client,
-    config: RedStonePushConfig,
-}
-
-impl std::fmt::Debug for RedStonePushClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The full URL, prefix included: `build_config` refuses a gateway
-        // URL carrying userinfo, a query or a fragment, so it never holds a
-        // credential.
-        f.debug_struct("RedStonePushClient")
-            .field("gateway", &self.config.gateway_url.as_str())
-            .field("data_service_id", &self.config.data_service_id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl RedStonePushClient {
-    /// # Errors
-    ///
-    /// The no-redirect client failing to build — the caller disables the
-    /// leg rather than fall back to a redirect-following client.
-    pub fn new(config: RedStonePushConfig) -> Result<Self, String> {
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|error| {
-                format!(
-                    "RedStone gateway client could not be built: {}",
-                    error.without_url()
-                )
-            })?;
-        Ok(Self { http, config })
-    }
-
-    #[must_use]
-    pub fn config(&self) -> &RedStonePushConfig {
-        &self.config
-    }
-
-    /// One GET of the whole data-service dump (the gateway ignores feed
-    /// filters), parsed per package.
-    ///
-    /// # Errors
-    ///
-    /// Transport failure, a non-success status (a redirect included), or a
-    /// body that is not the expected object.
-    pub async fn fetch_packages(&self) -> Result<HashMap<String, Vec<SignedPackage>>, String> {
-        let url = packages_url(&self.config);
-        let response =
-            self.http.get(url).send().await.map_err(|error| {
-                format!("RedStone gateway request failed: {}", error.without_url())
-            })?;
-        if !response.status().is_success() {
-            return Err(format!("RedStone gateway returned {}", response.status()));
-        }
-        let body = response.text().await.map_err(|error| {
-            format!(
-                "RedStone gateway body could not be read: {}",
-                error.without_url()
-            )
-        })?;
-        parse_gateway_response(&body)
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Three live packages per feed captured from RedStone's gateway
     /// (`redstone-primary-prod`, 2026-08-26), signatures included. Any drift
     /// in the serialization fails signer recovery below.
-    const FIXTURE: &str = r#"{"USDC":[{"timestampMilliseconds":1787785650000,"signature":"ABcQP5mJtTnMD4jL/7eiW1ARh+Z4Gptnc/nBoCZ9uUwACiEWnSwCmfcR3aKvHXvwRei5enwN/TTAyLQEBG8XxBw=","dataPoints":[{"dataFeedId":"USDC","value":0.99994}],"signerAddress":"0x9c5AE89C4Af6aA32cE58588DBaF90d18a855B6de","dataServiceId":"redstone-primary-prod","dataPackageId":"USDC"},{"timestampMilliseconds":1787785650000,"signature":"/Hp8oxkfepb0EvgLNkOel18NXg3O2c3xGoZOicwoYow7PHLZ03UGMyRy39xKXWPqre18xWXTX56y33iyTG76Vxw=","dataPoints":[{"dataFeedId":"USDC","value":0.999915}],"signerAddress":"0xDD682daEC5A90dD295d14DA4b0bec9281017b5bE","dataServiceId":"redstone-primary-prod","dataPackageId":"USDC"},{"timestampMilliseconds":1787785650000,"signature":"mQ42qftcdRKraXg41DnY2LgQAQ6hG/QZqpwvWqVC6A4Vf5YHLI7iIj/2AXShlq6iHvI8QZ8/zluBlEZPTnnSUBw=","dataPoints":[{"dataFeedId":"USDC","value":0.99994}],"signerAddress":"0xdEB22f54738d54976C4c0fe5ce6d408E40d88499","dataServiceId":"redstone-primary-prod","dataPackageId":"USDC"}],"CETES":[{"timestampMilliseconds":1787785650000,"signature":"1NQturtmLidJ0ICFtXxDd+VOYb0rZVf8aA6IofVU41E7SCJ+o/g+Lq8jiXMDupGR7EuauIdNpwBFXEq6l/T0chw=","dataPoints":[{"dataFeedId":"CETES","value":0.069524}],"signerAddress":"0xdEB22f54738d54976C4c0fe5ce6d408E40d88499","dataServiceId":"redstone-primary-prod","dataPackageId":"CETES"},{"timestampMilliseconds":1787785650000,"signature":"V0cdw0OoDsj8Nk39x8m9iRQN0g2su5JhYe4a7W7dJJVdqWFsToIMtAbyXAnNKt8rMgI/p4cIe3upn5Ke9WTs3Rs=","dataPoints":[{"dataFeedId":"CETES","value":0.069524}],"signerAddress":"0x51Ce04Be4b3E32572C4Ec9135221d0691Ba7d202","dataServiceId":"redstone-primary-prod","dataPackageId":"CETES"},{"timestampMilliseconds":1787785650000,"signature":"ERWoIG0jq1ApSN9cmIXOGemdLUo+V6rqT1EMz0zYs+tXyrU1MCiEYuCrhRC+5577mfw+7CFeg2jGJB8sq3W1cxw=","dataPoints":[{"dataFeedId":"CETES","value":0.069524}],"signerAddress":"0xDD682daEC5A90dD295d14DA4b0bec9281017b5bE","dataServiceId":"redstone-primary-prod","dataPackageId":"CETES"}],"BTC":[{"timestampMilliseconds":1787785650000,"signature":"ykv9wwxjgcAu90OwW8eCPoIBghKhN9h7SLGrw+k/mIZZPD7Gp6ZtSibE5ZOMMOYwRqlwRQlfKgk2IA9hI7JM0hw=","dataPoints":[{"dataFeedId":"BTC","value":78676.8627996}],"signerAddress":"0x9c5AE89C4Af6aA32cE58588DBaF90d18a855B6de","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"},{"timestampMilliseconds":1787785650000,"signature":"xH0Ho5qiyFrgx8AFyOfE7FJL2tY1yX4IZbBVHVgJUl8pvuqJou2PZ1E1rNTq+8Uu20eX3qSaTjI01ngQBucWLBs=","dataPoints":[{"dataFeedId":"BTC","value":78676.8627996}],"signerAddress":"0xDD682daEC5A90dD295d14DA4b0bec9281017b5bE","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"},{"timestampMilliseconds":1787785650000,"signature":"xC37xCs/WdMKATMYRKOH+s8QTHAp7QOBUGuJxfY9Tb914ZyOy5ytcvnEjclG/lMyvxPrl6eQYlwKaTRirVPGLhs=","dataPoints":[{"dataFeedId":"BTC","value":78676.8627996}],"signerAddress":"0xdEB22f54738d54976C4c0fe5ce6d408E40d88499","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"},{"timestampMilliseconds":1787785650000,"signature":"vStS0UR8LW+2dlBAYXL0WqG6ZeyRGohvMIoR8QV6z4p+8qo1XD2s9HaXXJdD1AXZ7Z71HgBnc3y/YOLX7js2NRs=","dataPoints":[{"dataFeedId":"BTC","value":78676.8577998}],"signerAddress":"0x51Ce04Be4b3E32572C4Ec9135221d0691Ba7d202","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"},{"timestampMilliseconds":1787785650000,"signature":"uETOJEc1hKZQIZmaAdP/wnHSVetyTFH49vSaMdQgkvhOLhaBvLCmmfG5NQv8KYNVhHs+z6f+d4K5t7cMWocICBs=","dataPoints":[{"dataFeedId":"BTC","value":78676.8627996}],"signerAddress":"0x8BB8F32Df04c8b654987DAaeD53D6B6091e3B774","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"}]}"#;
-    const FIXTURE_TS_MS: u64 = 1_787_785_650_000;
+    pub(crate) const FIXTURE: &str = r#"{"USDC":[{"timestampMilliseconds":1787785650000,"signature":"ABcQP5mJtTnMD4jL/7eiW1ARh+Z4Gptnc/nBoCZ9uUwACiEWnSwCmfcR3aKvHXvwRei5enwN/TTAyLQEBG8XxBw=","dataPoints":[{"dataFeedId":"USDC","value":0.99994}],"signerAddress":"0x9c5AE89C4Af6aA32cE58588DBaF90d18a855B6de","dataServiceId":"redstone-primary-prod","dataPackageId":"USDC"},{"timestampMilliseconds":1787785650000,"signature":"/Hp8oxkfepb0EvgLNkOel18NXg3O2c3xGoZOicwoYow7PHLZ03UGMyRy39xKXWPqre18xWXTX56y33iyTG76Vxw=","dataPoints":[{"dataFeedId":"USDC","value":0.999915}],"signerAddress":"0xDD682daEC5A90dD295d14DA4b0bec9281017b5bE","dataServiceId":"redstone-primary-prod","dataPackageId":"USDC"},{"timestampMilliseconds":1787785650000,"signature":"mQ42qftcdRKraXg41DnY2LgQAQ6hG/QZqpwvWqVC6A4Vf5YHLI7iIj/2AXShlq6iHvI8QZ8/zluBlEZPTnnSUBw=","dataPoints":[{"dataFeedId":"USDC","value":0.99994}],"signerAddress":"0xdEB22f54738d54976C4c0fe5ce6d408E40d88499","dataServiceId":"redstone-primary-prod","dataPackageId":"USDC"}],"CETES":[{"timestampMilliseconds":1787785650000,"signature":"1NQturtmLidJ0ICFtXxDd+VOYb0rZVf8aA6IofVU41E7SCJ+o/g+Lq8jiXMDupGR7EuauIdNpwBFXEq6l/T0chw=","dataPoints":[{"dataFeedId":"CETES","value":0.069524}],"signerAddress":"0xdEB22f54738d54976C4c0fe5ce6d408E40d88499","dataServiceId":"redstone-primary-prod","dataPackageId":"CETES"},{"timestampMilliseconds":1787785650000,"signature":"V0cdw0OoDsj8Nk39x8m9iRQN0g2su5JhYe4a7W7dJJVdqWFsToIMtAbyXAnNKt8rMgI/p4cIe3upn5Ke9WTs3Rs=","dataPoints":[{"dataFeedId":"CETES","value":0.069524}],"signerAddress":"0x51Ce04Be4b3E32572C4Ec9135221d0691Ba7d202","dataServiceId":"redstone-primary-prod","dataPackageId":"CETES"},{"timestampMilliseconds":1787785650000,"signature":"ERWoIG0jq1ApSN9cmIXOGemdLUo+V6rqT1EMz0zYs+tXyrU1MCiEYuCrhRC+5577mfw+7CFeg2jGJB8sq3W1cxw=","dataPoints":[{"dataFeedId":"CETES","value":0.069524}],"signerAddress":"0xDD682daEC5A90dD295d14DA4b0bec9281017b5bE","dataServiceId":"redstone-primary-prod","dataPackageId":"CETES"}],"BTC":[{"timestampMilliseconds":1787785650000,"signature":"ykv9wwxjgcAu90OwW8eCPoIBghKhN9h7SLGrw+k/mIZZPD7Gp6ZtSibE5ZOMMOYwRqlwRQlfKgk2IA9hI7JM0hw=","dataPoints":[{"dataFeedId":"BTC","value":78676.8627996}],"signerAddress":"0x9c5AE89C4Af6aA32cE58588DBaF90d18a855B6de","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"},{"timestampMilliseconds":1787785650000,"signature":"xH0Ho5qiyFrgx8AFyOfE7FJL2tY1yX4IZbBVHVgJUl8pvuqJou2PZ1E1rNTq+8Uu20eX3qSaTjI01ngQBucWLBs=","dataPoints":[{"dataFeedId":"BTC","value":78676.8627996}],"signerAddress":"0xDD682daEC5A90dD295d14DA4b0bec9281017b5bE","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"},{"timestampMilliseconds":1787785650000,"signature":"xC37xCs/WdMKATMYRKOH+s8QTHAp7QOBUGuJxfY9Tb914ZyOy5ytcvnEjclG/lMyvxPrl6eQYlwKaTRirVPGLhs=","dataPoints":[{"dataFeedId":"BTC","value":78676.8627996}],"signerAddress":"0xdEB22f54738d54976C4c0fe5ce6d408E40d88499","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"},{"timestampMilliseconds":1787785650000,"signature":"vStS0UR8LW+2dlBAYXL0WqG6ZeyRGohvMIoR8QV6z4p+8qo1XD2s9HaXXJdD1AXZ7Z71HgBnc3y/YOLX7js2NRs=","dataPoints":[{"dataFeedId":"BTC","value":78676.8577998}],"signerAddress":"0x51Ce04Be4b3E32572C4Ec9135221d0691Ba7d202","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"},{"timestampMilliseconds":1787785650000,"signature":"uETOJEc1hKZQIZmaAdP/wnHSVetyTFH49vSaMdQgkvhOLhaBvLCmmfG5NQv8KYNVhHs+z6f+d4K5t7cMWocICBs=","dataPoints":[{"dataFeedId":"BTC","value":78676.8627996}],"signerAddress":"0x8BB8F32Df04c8b654987DAaeD53D6B6091e3B774","dataServiceId":"redstone-primary-prod","dataPackageId":"BTC"}]}"#;
+    pub(crate) const FIXTURE_TS_MS: u64 = 1_787_785_650_000;
 
     fn rules() -> AdapterRules {
         AdapterRules {
@@ -575,35 +485,6 @@ mod tests {
         );
     }
 
-    /// A gateway configured with a path prefix keeps it, and a query or
-    /// fragment is dropped rather than folded into the path.
-    #[test]
-    fn packages_url_keeps_a_path_prefix() {
-        let with_query = packages_url(&RedStonePushConfig {
-            gateway_url: "https://mirror.example/gw?key=abc#x".parse().unwrap(),
-            data_service_id: "redstone-primary-prod".to_string(),
-        });
-        assert_eq!(
-            with_query.as_str(),
-            "https://mirror.example/gw/data-packages/latest/redstone-primary-prod"
-        );
-        let url = packages_url(&RedStonePushConfig {
-            gateway_url: "https://mirror.example/redstone".parse().unwrap(),
-            data_service_id: "redstone-primary-prod".to_string(),
-        });
-        assert_eq!(
-            url.as_str(),
-            "https://mirror.example/redstone/data-packages/latest/redstone-primary-prod"
-        );
-        let default = packages_url(&RedStonePushConfig {
-            gateway_url: "https://oracle-gateway-1.a.redstone.finance"
-                .parse()
-                .unwrap(),
-            data_service_id: "redstone-primary-prod".to_string(),
-        });
-        assert_eq!(default.as_str(), "https://oracle-gateway-1.a.redstone.finance/data-packages/latest/redstone-primary-prod");
-    }
-
     /// A feed with fewer distinct in-set signers than the adapter's
     /// threshold is refused, naming the feed and the shortfall — no gas is
     /// spent on a payload the contract would reject.
@@ -642,25 +523,25 @@ mod tests {
         );
     }
 
-    /// The fetch is one GET of the whole service dump (the gateway ignores
-    /// feed filters), over a no-redirect client; an HTTP error is a failed
-    /// fetch, not an empty map.
-    #[tokio::test]
-    async fn fetch_reads_the_service_dump_once() {
-        let (url, requests) = crate::rpc::test_support::scripted_server(vec![
-            (200, FIXTURE.to_string()),
-            (502, String::new()),
-        ])
-        .await;
-        let client = RedStonePushClient::new(RedStonePushConfig {
-            gateway_url: url.clone(),
-            data_service_id: "redstone-primary-prod".to_string(),
-        })
-        .unwrap();
-        let packages = client.fetch_packages().await.unwrap();
+    /// The by-feeds answer carries the gateway's own verdict per package:
+    /// one it flags invalid is dropped at parse, one it vouches for or says
+    /// nothing about is kept.
+    #[test]
+    fn packages_the_gateway_flags_invalid_are_dropped() {
+        let body = FIXTURE
+            .replacen(
+                r#""dataPackageId":"USDC"}"#,
+                r#""dataPackageId":"USDC","isSignatureValid":false}"#,
+                1,
+            )
+            .replacen(
+                r#""dataPackageId":"CETES"}"#,
+                r#""dataPackageId":"CETES","isSignatureValid":true}"#,
+                1,
+            );
+        let packages = parse_gateway_response(&body).unwrap();
+        assert_eq!(packages["USDC"].len(), 2);
+        assert_eq!(packages["CETES"].len(), 3);
         assert_eq!(packages["BTC"].len(), 5);
-        assert!(client.fetch_packages().await.unwrap_err().contains("502"));
-        let sent = requests.lock().unwrap();
-        assert_eq!(sent.len(), 2);
     }
 }

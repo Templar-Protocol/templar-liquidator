@@ -15,7 +15,7 @@ running:
 ```bash
 cp .env.example .env
 nano .env  # fill in the three required vars below
-docker run --env-file .env ghcr.io/templar-protocol/templar-liquidator:1.2.1
+docker run --env-file .env ghcr.io/templar-protocol/templar-liquidator:1.3.0
 ```
 
 Or build and run locally with Docker Compose:
@@ -39,6 +39,8 @@ Three env vars are required — the bot refuses to start without them:
 | `REGISTRY_ACCOUNT_IDS` | Templar market registry contract(s) to discover markets from, e.g. `v1.tmplr.near` |
 | `SIGNER_ACCOUNT_ID` | The NEAR account the bot signs transactions as — also where your inventory lives |
 | `SIGNER_KEY` | That account's private key, e.g. `ed25519:...` |
+
+Prices come from credentialed APIs, so two more decide which markets the bot can work: without `LAZER_API_TOKEN` (Pyth Pro) or `REDSTONE_AUTHENTICATED_GATEWAYS` (RedStone), markets priced from that source are filtered at registration rather than scanned. See [Oracle price sources](docs/configuration.md#oracle-price-sources).
 
 **The bot starts in DRY-RUN and sends nothing until you explicitly set `DRY_RUN=false`.** A fresh checkout scans markets and logs what it *would* liquidate — no transaction is ever submitted — until you opt in to live trading. See [Configuration](#configuration) below.
 

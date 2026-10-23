@@ -165,6 +165,22 @@ pub(crate) mod test_support {
     pub(crate) async fn scripted_server(
         responses: Vec<(u16, String)>,
     ) -> (url::Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        serve_scripted(responses, |_, body| body.to_string()).await
+    }
+
+    /// [`scripted_server`], logging each request's head (request line and
+    /// headers, verbatim) instead of its body — for GET clients whose
+    /// request is all path, query and headers.
+    pub(crate) async fn scripted_server_heads(
+        responses: Vec<(u16, String)>,
+    ) -> (url::Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        serve_scripted(responses, |head, _| head.to_string()).await
+    }
+
+    async fn serve_scripted(
+        responses: Vec<(u16, String)>,
+        record: fn(&str, &str) -> String,
+    ) -> (url::Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -188,8 +204,9 @@ pub(crate) mod test_support {
                     }
                 };
                 let Some(header_end) = header_end else { return };
-                let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
-                let content_length: usize = headers
+                let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                let content_length: usize = head
+                    .to_lowercase()
                     .lines()
                     .find_map(|l| l.strip_prefix("content-length:"))
                     .and_then(|v| v.trim().parse().ok())
@@ -201,10 +218,9 @@ pub(crate) mod test_support {
                     }
                     buf.extend_from_slice(&chunk[..n]);
                 }
-                log.lock().unwrap().push(
-                    String::from_utf8_lossy(&buf[header_end..header_end + content_length])
-                        .to_string(),
-                );
+                let request_body =
+                    String::from_utf8_lossy(&buf[header_end..header_end + content_length]);
+                log.lock().unwrap().push(record(&head, &request_body));
                 let response = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
@@ -263,10 +279,8 @@ pub(crate) mod test_support {
             client,
             None,
             crate::OracleApis {
-                redstone_api_url: "https://redstone.invalid".parse().unwrap(),
-                redstone_data_service: crate::config::DEFAULT_REDSTONE_DATA_SERVICE_ID.to_string(),
+                redstone: None,
                 lazer_api,
-                redstone_push: None,
             },
             None,
             None,

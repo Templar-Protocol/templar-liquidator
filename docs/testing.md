@@ -224,7 +224,8 @@ Each market logs one line with `before` / `after` ages per feed, `pushed`,
 and the `verdict`; the run ends with a `push-check completed` summary.
 
 Live mode needs the signer key and at least one push leg: `LAZER_API_TOKEN`
-for Pyth Pro, or `REDSTONE_PUSH` (on by default) for RedStone. With neither,
+for Pyth Pro, or `REDSTONE_AUTHENTICATED_GATEWAYS` with `REDSTONE_PUSH` (on by
+default) for RedStone. With neither,
 it is refused at startup.
 
 Use `ALLOWED_MARKETS` to bound what gets pushed; without it, every admitted

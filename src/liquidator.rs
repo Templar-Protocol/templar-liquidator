@@ -120,7 +120,7 @@ pub use service::{LiquidatorService, ServiceConfig};
 
 // Constructor parameter groups (see `Liquidator::new`)
 pub use executor::{ExecutionRequest, MarketDecimals, Settlement};
-// (MarketContext, SwapConfig, OracleApis, LoopPolicy, SharedHandles are
+// (MarketContext, SwapConfig, OracleApis, RedStoneLeg, LoopPolicy, SharedHandles are
 // defined below in this module and exported from the crate root.)
 
 // Error conversions
@@ -771,16 +771,24 @@ pub struct SwapConfig {
 /// The off-chain price APIs scan-side composition fetches from.
 #[derive(Clone)]
 pub struct OracleApis {
-    /// RedStone's authenticated gateways, for both legs. `None` when
+    /// RedStone, for both legs. `None` when
     /// `REDSTONE_AUTHENTICATED_GATEWAYS` is unset: RedStone sources are then
     /// not composable (their markets are filtered at registration) and no
-    /// RedStone adapter is pushed. One client shared by every market's
-    /// fetcher — its cache is what keeps a scan round inside the keys' rate
-    /// limit.
-    pub redstone: Option<std::sync::Arc<crate::redstone::RedStoneGatewayClient>>,
-    /// The RedStone push leg (`REDSTONE_PUSH`); inert without `redstone`.
-    pub redstone_push: bool,
+    /// RedStone adapter is pushed.
+    pub redstone: Option<RedStoneLeg>,
     pub lazer_api: Option<crate::lazer::LazerApiConfig>,
+}
+
+/// The RedStone leg as the fetchers see it: the gateway client and whether
+/// the execution-time push is on, in one value so "push on, no gateways"
+/// cannot be built.
+#[derive(Clone)]
+pub struct RedStoneLeg {
+    /// Shared by every market's fetcher — its cache is what keeps a scan
+    /// round inside the keys' rate limit.
+    pub client: std::sync::Arc<crate::redstone::RedStoneGatewayClient>,
+    /// `REDSTONE_PUSH`.
+    pub push: bool,
 }
 
 /// Loop-liquidation policy: whether to repeat against the same position, and

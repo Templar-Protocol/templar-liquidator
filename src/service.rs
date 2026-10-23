@@ -227,9 +227,10 @@ pub struct LiquidatorService {
     oneclick_provider: Option<crate::swap::SwapProviderImpl>,
     /// Oracle fetcher for batch swap USD threshold checks
     oracle_fetcher: crate::OracleFetcher,
-    /// The one RedStone gateway client, handed to every market's fetcher so
-    /// they share its cache — see [`crate::OracleApis::redstone`].
-    redstone: Option<Arc<crate::redstone::RedStoneGatewayClient>>,
+    /// The one RedStone gateway client (with the push flag), handed to
+    /// every market's fetcher so they share its cache — see
+    /// [`crate::OracleApis::redstone`].
+    redstone: Option<crate::RedStoneLeg>,
     /// Collateral asset → price / swap target info (built from market configs)
     collateral_price_map: HashMap<String, CollateralPriceInfo>,
     /// Set when SIGTERM/ctrl-C arrives: in-flight work finishes, nothing new
@@ -327,7 +328,10 @@ impl LiquidatorService {
                 "LAZER_API_TOKEN unset: Pyth Pro–sourced markets cannot be priced off-chain and will be filtered at registration"
             );
         }
-        let redstone = Self::create_redstone_client(&config);
+        let redstone = Self::create_redstone_client(&config).map(|client| crate::RedStoneLeg {
+            client,
+            push: config.redstone_push,
+        });
 
         let metrics = Arc::new(Metrics::default());
         let inventory = Arc::new(RwLock::new({
@@ -345,7 +349,6 @@ impl LiquidatorService {
             pyth_pro_updates.clone(),
             crate::OracleApis {
                 redstone: redstone.clone(),
-                redstone_push: config.redstone_push,
                 lazer_api: config.lazer_api.clone(),
             },
             None,
@@ -1206,7 +1209,6 @@ impl LiquidatorService {
                     },
                     crate::OracleApis {
                         redstone: self.redstone.clone(),
-                        redstone_push: self.config.redstone_push,
                         lazer_api: self.config.lazer_api.clone(),
                     },
                     crate::LoopPolicy {

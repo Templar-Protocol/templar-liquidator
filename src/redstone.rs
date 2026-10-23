@@ -434,8 +434,9 @@ impl RedStoneGatewayClient {
             // so failing over would only repeat it — but rarely healthy
             // either: the usual cause is a data service that tracks none of
             // these feeds. Said here, since nothing else on the RedStone path
-            // would say why every RedStone-priced feed is unpriced; once per
-            // fetch, so at most once per TTL window.
+            // would say why every RedStone-priced feed is unpriced. Once per
+            // fetch: once per widening fetch while a round grows the wanted
+            // set, then at most once per TTL window.
             tracing::warn!(
                 gateway = %gateway.origin(),
                 data_service = %self.config.data_service_id,

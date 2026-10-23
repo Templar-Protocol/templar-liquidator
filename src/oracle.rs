@@ -293,19 +293,17 @@ pub struct OracleFetcher {
     /// Shared across all `OracleFetcher` instances so detection during registry
     /// refresh propagates to per-market fetchers.
     proxy_oracle_cache: ProxyOracleCache,
-    /// RedStone's authenticated gateways, for both legs; shared by every
-    /// fetcher (see [`crate::OracleApis::redstone`]). `None` when no
+    /// RedStone's authenticated gateways, for both legs, and whether the
+    /// push is on (see [`crate::OracleApis::redstone`]). `None` when no
     /// credentials are configured — RedStone sources are then not priceable
     /// and their markets are filtered at registration.
-    redstone: Option<std::sync::Arc<crate::redstone::RedStoneGatewayClient>>,
+    redstone: Option<crate::RedStoneLeg>,
     /// Pyth Pro price API, for composing Pyth Pro–sourced proxy prices
     /// off-chain at scan time. `None` when no access token is configured —
     /// such feeds are then not priceable and their markets are filtered at
     /// registration. The config type's constructor enforces HTTPS, so this
     /// client can never send the bearer token over cleartext.
     lazer_api: Option<crate::lazer::LazerApiClient>,
-    /// The RedStone push leg (`REDSTONE_PUSH`); inert without `redstone`.
-    redstone_push: bool,
     /// Last successful RedStone write, or in-flight reservation, per
     /// (adapter, feed) — see [`RedStonePushMemo`].
     redstone_push_memo: RedStonePushMemo,
@@ -350,13 +348,11 @@ impl OracleFetcher {
     ) -> Self {
         let crate::OracleApis {
             redstone,
-            redstone_push,
             lazer_api,
         } = apis;
         Self {
             redstone_push_memo: redstone_push_memo.unwrap_or_default(),
             redstone,
-            redstone_push,
             client,
             pyth_pro_updates,
             proxy_oracle_cache: proxy_oracle_cache.unwrap_or_else(|| {
@@ -384,7 +380,10 @@ impl OracleFetcher {
 
     /// The gateway client when the push leg is on and has credentials.
     fn redstone_push_client(&self) -> Option<&crate::redstone::RedStoneGatewayClient> {
-        self.redstone.as_deref().filter(|_| self.redstone_push)
+        self.redstone
+            .as_ref()
+            .filter(|leg| leg.push)
+            .map(|leg| &*leg.client)
     }
 
     fn offchain_legs(&self) -> OffchainLegs {
@@ -926,7 +925,10 @@ impl OracleFetcher {
         symbols: &[String],
         max_age_secs: u32,
     ) -> HashMap<String, pyth::Price> {
-        let Some(gateways) = &self.redstone else {
+        let Some(crate::RedStoneLeg {
+            client: gateways, ..
+        }) = &self.redstone
+        else {
             return HashMap::new();
         };
         if symbols.is_empty() {

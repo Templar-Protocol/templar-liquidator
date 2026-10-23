@@ -280,7 +280,6 @@ pub(crate) mod test_support {
             None,
             crate::OracleApis {
                 redstone: None,
-                redstone_push: false,
                 lazer_api,
             },
             None,

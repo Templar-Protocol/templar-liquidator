@@ -25,12 +25,27 @@ FROM rust:1.97.0-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e7
 # `.with_pyth_source`) unconditionally depends on templar-redstone-bridge,
 # whose build.rs unconditionally shells out to `npm install`/`build`/`bundle`
 # to produce a JS bundle embedded in the compiled binary.
+#
+# ca-certificates is named so apt upgrades the copy this base image ships
+# (20230311+deb12u1, from before the eMudhra fix), and is held to the same
+# floor as the runtime stage below (CVE-2026-111943): this stage's own
+# fetches over TLS, the npm install whose bundle ships inside the binary
+# among them, must not trust the compromised intermediates either. Node
+# does not read that store by default — it trusts its compiled-in roots,
+# which in bookworm's nodejs 18 still include emSign ECC Root CA - G3 — so
+# NODE_OPTIONS=--use-openssl-ca points it, and npm, at the system store.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     pkg-config \
     libssl-dev \
     nodejs \
     npm \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && v="$(dpkg-query -W -f='${Version}' ca-certificates)" \
+    && if dpkg --compare-versions "$v" lt '20250419~deb12u2'; then \
+        echo "ca-certificates $v predates the eMudhra fix (20250419~deb12u2)" >&2; exit 1; \
+    fi
+ENV NODE_OPTIONS=--use-openssl-ca
 
 WORKDIR /app
 

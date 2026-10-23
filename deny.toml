@@ -68,6 +68,47 @@ ignore = [
     # compile time and contributes no code to the compiled binary. Clears
     # when alloy drops its `paste` dependency upstream.
     { id = "RUSTSEC-2024-0436", reason = "paste is a proc-macro (compile-time only, no runtime code in the shipped binary), pulled in transitively via alloy -> templar-universal-account. Unmaintained, not a vulnerability; no safe upgrade exists. Clears when alloy drops it." },
+
+    # wasmtime 45.0.3 — six more advisories on the same crate and the same
+    # dev-only path as RUSTSEC-2026-0222 / -0269 above (near-sdk feature
+    # `unit-testing` -> near-vm-runner -> wasmtime, requested only by the
+    # dev-dependencies templar-gateway-testing / test-utils). Re-verified
+    # rather than assumed: `cargo tree -e normal --target all -i wasmtime`
+    # prints nothing. No 45.x release carries the fixes (they landed in
+    # 36.0.x, 48.x and 49.x), and every near-vm-runner through 0.38.0-rc.6
+    # requires `wasmtime ^45`, so no lockfile move reaches a patched version.
+    # Clears with the same contracts-rev bump as the two above.
+    { id = "RUSTSEC-2026-0316", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
+    { id = "RUSTSEC-2026-0327", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
+    { id = "RUSTSEC-2026-0359", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
+    { id = "RUSTSEC-2026-0362", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
+    { id = "RUSTSEC-2026-0363", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
+    { id = "RUSTSEC-2026-0379", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
+
+    # rustls 0.23.43 and rustls-webpki 0.103.13. The release binary has no
+    # rustls on any target — `cargo tree -e normal --target all -i rustls`
+    # prints nothing; every shipped TLS client is native-tls (OpenSSL on
+    # Linux). The one path in is the dev-dependency templar-gateway-testing
+    # -> near-sandbox -> ureq, which downloads the `neard` sandbox binary
+    # over TLS at test time. The fixes cannot resolve: rustls >=0.23.45 and
+    # rustls-webpki >=0.103.14 need `aws-lc-rs ^1.18`, and near-crypto pins
+    # `aws-lc-rs =1.16.2` in every release through 0.38.0-rc.5 (rc.6 is the
+    # first to relax it). Clears when a stable near-crypto with the relaxed
+    # pin lands and the templar-* rev moves onto it.
+    { id = "RUSTSEC-2026-0285", reason = "rustls: dev-only (near-sandbox's test-time neard download via ureq), absent from the release binary on every target; >=0.23.45 needs aws-lc-rs ^1.18, blocked by near-crypto's =1.16.2 pin." },
+    { id = "RUSTSEC-2026-0346", reason = "rustls: dev-only (near-sandbox's test-time neard download via ureq), absent from the release binary on every target; >=0.23.46 needs aws-lc-rs ^1.18, blocked by near-crypto's =1.16.2 pin." },
+    { id = "RUSTSEC-2026-0348", reason = "rustls: dev-only (near-sandbox's test-time neard download via ureq), absent from the release binary on every target; >=0.23.46 needs aws-lc-rs ^1.18, blocked by near-crypto's =1.16.2 pin." },
+    { id = "RUSTSEC-2026-0349", reason = "rustls: dev-only (near-sandbox's test-time neard download via ureq), absent from the release binary on every target; >=0.23.46 needs aws-lc-rs ^1.18, blocked by near-crypto's =1.16.2 pin." },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki: dev-only (rustls via near-sandbox's test-time neard download), absent from the release binary on every target; >=0.103.16 needs aws-lc-rs ^1.18, blocked by near-crypto's =1.16.2 pin." },
+
+    # RUSTSEC-2024-0449 — unsafe-libyaml 0.2.11, unmaintained (not a
+    # vulnerability; no safe upgrade). This one does ship: near-jsonrpc-client
+    # (via templar-common) -> near-chain-configs -> near-parameters ->
+    # serde_yaml 0.9.34+deprecated -> unsafe-libyaml. near-parameters uses
+    # it to parse nearcore's bundled runtime-config YAML, which is compiled
+    # into the crate — the bot never feeds it external YAML. Clears when
+    # nearcore moves off serde_yaml.
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml: unmaintained, not a vulnerability; reached via near-parameters' serde_yaml, which parses only nearcore's compiled-in runtime config, never external input. No safe upgrade exists. Clears when nearcore drops serde_yaml." },
 ]
 
 [bans]

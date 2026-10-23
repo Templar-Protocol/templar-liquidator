@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `tokio` 1.53.1 → 1.53.3 (RUSTSEC-2026-0386, unsound `AsyncFd` constructors) and `ctutils` 0.4.2 → 0.4.5 (RUSTSEC-2026-0385, non-constant-time comparisons, reached through `elliptic-curve`). Both ship in the release binary. `webpki-roots` / `webpki-root-certs` move to 1.0.11 (RUSTSEC-2026-0381, the emSign roots), which reach only the test-time `near-sandbox` download.
+- `cargo-deny` documents the advisories no lockfile move can clear, each re-verified against the dependency graph: six on `wasmtime` 45.0.3 and five on `rustls` 0.23.43 / `rustls-webpki` 0.103.13, all dev-only and absent from the release binary on every target (`cargo tree -e normal --target all` prints nothing), and held back by upstream pins (`near-vm-runner` requires `wasmtime ^45`; the `rustls` fixes need `aws-lc-rs ^1.18`, which `near-crypto`'s `=1.16.2` pin blocks); plus RUSTSEC-2024-0449, `unsafe-libyaml` unmaintained, which does ship but only parses `near-parameters`' compiled-in runtime config.
+- Dependabot no longer bumps sandbox.yml's `cargo-near` action ref on its own. That ref names a contracts rev, and THE SINGLE-REV RULE requires it to match the `templar-*` pins, so it moves by hand with them.
+
 ### Fixed
 
 - Dev container commit signing. `git-signing.sh` assumed `user.signingkey` names a file, so a literal `key::ssh-ed25519 ...` value (git 2.35+) failed its "configured key is not present here" test, fell into the recovery branch, and warned that `git commit` will fail — on every container start, while signing in fact worked. Literal keys are now recognised: `allowed_signers` is written from the key itself (when `user.email` is set) before any agent check, so local verification is configured even on a container that cannot sign; then the agent is checked for the private *half*, not merely for a socket, because a registered and correct public key whose private half is absent signs nothing while every other signal looks healthy. Both forms share one `write_allowed_signers`, so local verification no longer depends on which one the host uses. The header documents the literal form as the one to prefer: a path in the host's `~/.gitconfig` cannot resolve inside a container, while a literal key copies in verbatim on every rebuild and covers repos that ship no such script.

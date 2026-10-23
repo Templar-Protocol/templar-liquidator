@@ -62,6 +62,12 @@ updates:
     labels: ["dependencies"]
     commit-message:
       prefix: "ci"
+    ignore:
+      # THE SINGLE-REV RULE — see the header. sandbox.yml installs cargo-near
+      # from the contracts repo at the same rev as the templar-* crates
+      # (scripts/check-repo-invariants.sh fails CI otherwise), so this action
+      # moves by hand, with them.
+      - dependency-name: "Templar-Protocol/contracts/.github/actions/cargo-near"
     groups:
       github-actions:
         patterns: ["*"]

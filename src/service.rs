@@ -977,6 +977,13 @@ impl LiquidatorService {
                 "Refreshing registry deployments"
             );
 
+            // Before any fallible registry read, so a refresh that fails
+            // still reports the token's approaching expiry: loop mode keeps
+            // swapping for the markets it already holds.
+            if let Some(ref provider) = self.oneclick_provider {
+                provider.log_api_token_expiry();
+            }
+
             let listed = list_all_deployments(
                 &self.client,
                 self.config.registries.clone(),
@@ -1606,6 +1613,19 @@ impl LiquidatorService {
                                 from = %asset_key,
                                 error = %e,
                                 "Batch swap failed, will retry next cycle"
+                            );
+                        }
+                        // Re-attempted next round too, but it fails the same
+                        // way until an operator rotates or unsets the token,
+                        // so it logs at error. Still log-only: this runs every
+                        // round with no dedup, and the JIT path alerts.
+                        crate::swap::SwapErrorKind::PreDeposit(
+                            crate::swap::PreDepositError::Unauthorized { .. },
+                        ) => {
+                            tracing::error!(
+                                from = %asset_key,
+                                error = %e,
+                                "Batch swap rejected: 1-Click refused the API token; held until it is rotated or unset"
                             );
                         }
                     }

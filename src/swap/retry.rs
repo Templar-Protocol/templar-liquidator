@@ -48,6 +48,14 @@ pub enum PreDepositError {
     #[error("Validation error: {message}")]
     ValidationError { message: String },
 
+    /// The venue rejected the request's credential (HTTP 401): an expired
+    /// or revoked API token. Not retryable — the same credential gets the
+    /// same answer until an operator rotates or removes it, so a retry only
+    /// spends the attempt budget. Kept apart from `ValidationError` because
+    /// the remedy is the operator's configuration, not the request.
+    #[error("Unauthorized: {message}")]
+    Unauthorized { message: String },
+
     /// Timed out (retryable — pre-deposit phases are idempotent). There is
     /// deliberately no timeout variant on [`PostDepositError`]: a timeout at
     /// or after the deposit transfer is an unknown outcome and must be
@@ -156,6 +164,14 @@ impl SwapErrorKind {
     /// a post-deposit call (deposit notification) has already moved funds
     /// and must classify as [`PostDepositError`] at its own site.
     pub fn from_oneclick_response(status: u16, body: &str) -> PreDepositError {
+        // A rejected credential outranks every body phrase below: with the
+        // token refused, nothing else the response says is about the request.
+        if status == 401 {
+            return PreDepositError::Unauthorized {
+                message: body.to_string(),
+            };
+        }
+
         if body.contains("Amount is too low for bridge") {
             return PreDepositError::AmountTooLow {
                 message: body.to_string(),
@@ -374,6 +390,10 @@ mod tests {
             message: String::new()
         }
         .is_retryable());
+        assert!(!PreDepositError::Unauthorized {
+            message: String::new()
+        }
+        .is_retryable());
         assert!(!PreDepositError::Unknown {
             message: String::new()
         }
@@ -414,6 +434,46 @@ mod tests {
         let kind = SwapErrorKind::from_oneclick_response(429, "Too Many Requests");
         assert!(kind.is_retryable());
         assert!(matches!(kind, PreDepositError::RateLimited));
+    }
+
+    /// A 401 is a rejected credential: it classifies as `Unauthorized`, keeps
+    /// the response body verbatim, and is not retryable — the same token gets
+    /// the same answer until an operator rotates or removes it. The body is
+    /// 1-Click's answer to an expired token, verbatim.
+    #[test]
+    fn test_unauthorized_classification() {
+        let body = r#"{"message":"Invalid token","error":"Unauthorized","statusCode":401,"timestamp":"2026-11-10T17:04:17.056Z","path":"/v0/quote"}"#;
+        let kind = SwapErrorKind::from_oneclick_response(401, body);
+        assert!(
+            matches!(&kind, PreDepositError::Unauthorized { message } if message == body),
+            "401 must classify as Unauthorized carrying the body, got {kind:?}"
+        );
+        assert!(!kind.is_retryable());
+        // Other 4xx stay validation errors.
+        assert!(matches!(
+            SwapErrorKind::from_oneclick_response(400, r#"{"message":"bad amount"}"#),
+            PreDepositError::ValidationError { .. }
+        ));
+    }
+
+    /// The status decides before any body phrase: a 401 whose body happens
+    /// to carry a phrase the classifier matches on is still `Unauthorized`,
+    /// never `QuoteFailed` or `AmountTooLow` (which would stop the swap
+    /// alert or report no route instead of naming the token).
+    #[test]
+    fn test_unauthorized_outranks_body_phrases() {
+        for body in [
+            r#"{"message":"Failed to get quote: Unauthorized"}"#,
+            r#"{"message":"Amount is too low for bridge, try at least 10000"}"#,
+        ] {
+            assert!(
+                matches!(
+                    SwapErrorKind::from_oneclick_response(401, body),
+                    PreDepositError::Unauthorized { .. }
+                ),
+                "401 with body {body:?} must classify as Unauthorized"
+            );
+        }
     }
 
     /// An indeterminate error means funds may already have moved (the deposit

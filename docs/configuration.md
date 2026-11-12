@@ -54,7 +54,7 @@ The bot refuses to start without these three:
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
 | `COLLATERAL_STRATEGY` | `--collateral-strategy` | `hold` | `hold` (keep collateral as received) or `swap-to-borrow` (route back to the market's borrow asset). |
-| `ONECLICK_API_TOKEN` | `--oneclick-api-token` | unset | 1-Click API auth token. Optional but avoids a 0.1% fee; unauthenticated calls still work. |
+| `ONECLICK_API_TOKEN` | `--oneclick-api-token` | unset | 1-Click API auth token. Optional but avoids a 0.1% fee; unauthenticated calls still work. A set token must be *accepted*: 1-Click answers an expired or revoked one with `401` on every quote, so every swap fails (not retried) until the token is rotated or unset. 1-Click tokens are JWTs that expire (`exp` claim); each registry refresh logs the expiry, a warning from 14 days before it, and an error once it has passed. |
 | `MIN_SWAP_VALUE_USD` | `--min-swap-value-usd` | `10.0` | Minimum USD value to attempt a swap (just-in-time or batch); smaller amounts are deferred to the next batch cycle. |
 | `BATCH_SWAP_ON_CYCLE_START` | `--batch-swap-on-cycle-start` | `true` | Swap all accumulated collateral above the threshold at the start of each liquidation round. |
 | `SWAP_RETRY_ATTEMPTS` | `--swap-retry-attempts` | `3` | Retry attempts for transient swap errors (includes the first attempt). |

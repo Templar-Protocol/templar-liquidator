@@ -51,22 +51,28 @@ ignore = [
     # RUSTSEC-2026-0387 — crypto-bigint, "timing variability in operations
     # intended to be constant-time". Two copies are in the tree. 0.7.x (our
     # direct k256 0.14) is on 0.7.11, inside the patched range, so only 0.5.5
-    # still matches, and it does ship: elliptic-curve 0.13 -> k256 0.13
+    # still matches, and it does ship, by two independent routes onto
+    # elliptic-curve 0.13. One is the pinned contracts stack: k256 0.13
     # (templar-common, alloy-primitives, alloy-signer) and p256 0.13
-    # (near-sdk, templar-universal-account), all through the pinned contracts
-    # rev. The advisory is a side channel on *secret* operands, and no secret
-    # reaches those curves at runtime. templar-common's k256 recovers RedStone
-    # signer addresses from public signatures; near-sdk's p256 backs a mocked
-    # `p256_verify`; universal-account's p256 parses public keys, and its key
-    # generation and alloy's PrivateKeySigner sit under `#[cfg(test)]` —
-    # `cargo tree -e normal --target all -i alloy-signer-local` prints
-    # nothing. The one secret the bot holds, the NEAR signer key, is used
-    # through near-crypto, which signs with ed25519-dalek and the libsecp256k1
-    # bindings (`secp256k1`); neither depends on crypto-bigint. The only
-    # patched range is >=0.7.6 and elliptic-curve 0.13 requires crypto-bigint
-    # ^0.5, so no lockfile move reaches a fix. Clears when the contracts rev
-    # moves its k256/p256/alloy stack onto elliptic-curve 0.14.
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 only (0.7.x is patched at 0.7.11): reached via elliptic-curve 0.13 (k256/p256 0.13 in the pinned templar-* stack), used at runtime only on public data (signature recovery, public-key parsing). The NEAR signer key goes through ed25519-dalek / secp256k1, not crypto-bigint. No patched 0.5.x exists; clears when the contracts rev moves to elliptic-curve 0.14." },
+    # (templar-universal-account). The other is near-sdk 5.29.1 itself, whose
+    # `non-contract-usage` feature takes p256 0.13 on non-wasm targets; this
+    # crate enables that feature directly in Cargo.toml, and the templar-*
+    # crates enable it too. The advisory is a side channel on *secret*
+    # operands, and no secret reaches those curves at runtime.
+    # templar-common's k256 recovers RedStone signer addresses from public
+    # signatures; near-sdk's p256 backs `env::p256_verify`, which checks a
+    # signature against a public key; universal-account's p256 parses public
+    # keys, and its key generation and alloy's PrivateKeySigner sit under
+    # `#[cfg(test)]` — `cargo tree -e normal --target all -i
+    # alloy-signer-local` prints nothing. The one secret the bot holds, the
+    # NEAR signer key, is used through near-crypto, which signs with
+    # ed25519-dalek and the libsecp256k1 bindings (`secp256k1`); neither
+    # depends on crypto-bigint. The only patched range is >=0.7.6 and
+    # elliptic-curve 0.13 requires crypto-bigint ^0.5, so no lockfile move
+    # removes 0.5.5. Clears only once both routes are gone: the contracts rev
+    # moves its k256/p256/alloy stack onto elliptic-curve 0.14, and near-sdk
+    # reaches 5.30+, whose p256 requirement is ^0.14.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 only (0.7.x is patched at 0.7.11): reached via elliptic-curve 0.13 by two routes, k256/p256 0.13 in the pinned templar-* stack and p256 0.13 from near-sdk 5.29.1's non-contract-usage feature (enabled directly and by templar-*), used at runtime only on public data (signature recovery and verification, public-key parsing). The NEAR signer key goes through ed25519-dalek / secp256k1, not crypto-bigint. No patched 0.5.x exists; clears only when the contracts rev moves to elliptic-curve 0.14 and near-sdk to 5.30+ (p256 ^0.14)." },
 
     # rustls 0.23.43 and rustls-webpki 0.103.13. The release binary has no
     # rustls on any target — `cargo tree -e normal --target all -i rustls`

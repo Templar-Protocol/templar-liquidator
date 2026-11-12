@@ -977,6 +977,13 @@ impl LiquidatorService {
                 "Refreshing registry deployments"
             );
 
+            // Before any fallible registry read, so a refresh that fails
+            // still reports the token's approaching expiry: loop mode keeps
+            // swapping for the markets it already holds.
+            if let Some(ref provider) = self.oneclick_provider {
+                provider.log_api_token_expiry();
+            }
+
             let listed = list_all_deployments(
                 &self.client,
                 self.config.registries.clone(),
@@ -1241,11 +1248,9 @@ impl LiquidatorService {
                 "Built collateral price map"
             );
 
-            // Refresh 1-Click supported tokens cache, and report the API
-            // token's expiry while there is still time to rotate it
+            // Refresh 1-Click supported tokens cache
             if let Some(ref provider) = self.oneclick_provider {
                 provider.load_supported_tokens().await;
-                provider.log_api_token_expiry();
             }
 
             Ok(())

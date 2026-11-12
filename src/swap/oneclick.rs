@@ -340,10 +340,12 @@ impl OneClickSwap {
     }
 
     /// Logs where the configured API token stands against its `exp` claim:
-    /// `info` while valid, `warn` inside the last 14 days
-    /// (`API_TOKEN_EXPIRY_WARNING_DAYS`), `error` once expired (1-Click then
-    /// rejects every quote with 401). Meant for every registry refresh, so a
-    /// long-running bot reports the approach of expiry, not only its state
+    /// `info` while the expiry is further off, `warn` inside the last 14
+    /// days (`API_TOKEN_EXPIRY_WARNING_DAYS`), `error` once expired (1-Click
+    /// then rejects every quote with 401). It reads the claim only, so it
+    /// never asserts that 1-Click *accepts* the token — a revoked token is
+    /// only seen as a 401 at quote time. Meant for every registry refresh, so
+    /// a long-running bot reports the approach of expiry, not only its state
     /// at startup. Logs the expiry, never the token.
     pub fn log_api_token_expiry(&self) {
         let now = Utc::now();
@@ -357,7 +359,7 @@ impl OneClickSwap {
             ),
             ApiTokenExpiry::Valid { expires_at } => tracing::info!(
                 expires_at = %at(expires_at),
-                "1-Click API token valid"
+                "1-Click API token expiry claim is more than 14 days away"
             ),
             ApiTokenExpiry::ExpiringSoon { expires_at } => tracing::warn!(
                 expires_at = %at(expires_at),
@@ -1738,8 +1740,8 @@ mod api_token_tests {
         assert_eq!(state(expires_at), ApiTokenExpiry::Expired { expires_at });
     }
 
-    /// The 2026-11-10 incident: a partner token issued for a year, still
-    /// configured 18 days after its `exp`.
+    /// A one-year partner token left configured weeks past its `exp` reads
+    /// as `Expired`, whatever its other claims say.
     #[test]
     fn incident_token_reads_as_expired() {
         let token = fake_jwt(PARTNER_CLAIMS);

@@ -164,6 +164,14 @@ impl SwapErrorKind {
     /// a post-deposit call (deposit notification) has already moved funds
     /// and must classify as [`PostDepositError`] at its own site.
     pub fn from_oneclick_response(status: u16, body: &str) -> PreDepositError {
+        // A rejected credential outranks every body phrase below: with the
+        // token refused, nothing else the response says is about the request.
+        if status == 401 {
+            return PreDepositError::Unauthorized {
+                message: body.to_string(),
+            };
+        }
+
         if body.contains("Amount is too low for bridge") {
             return PreDepositError::AmountTooLow {
                 message: body.to_string(),
@@ -177,9 +185,6 @@ impl SwapErrorKind {
         }
 
         match status {
-            401 => PreDepositError::Unauthorized {
-                message: body.to_string(),
-            },
             429 => PreDepositError::RateLimited,
             400..=499 => PreDepositError::ValidationError {
                 message: body.to_string(),
@@ -431,11 +436,10 @@ mod tests {
         assert!(matches!(kind, PreDepositError::RateLimited));
     }
 
-    /// 1-Click's answer to an expired or revoked API token, verbatim. It is
-    /// a credential failure, not a malformed request: classifying it as
-    /// `ValidationError` sent operators looking at the request instead of at
-    /// `ONECLICK_API_TOKEN`. Not retryable — the same token gets the same
-    /// answer until an operator rotates or removes it.
+    /// A 401 is a rejected credential: it classifies as `Unauthorized`, keeps
+    /// the response body verbatim, and is not retryable — the same token gets
+    /// the same answer until an operator rotates or removes it. The body is
+    /// 1-Click's answer to an expired token, verbatim.
     #[test]
     fn test_unauthorized_classification() {
         let body = r#"{"message":"Invalid token","error":"Unauthorized","statusCode":401,"timestamp":"2026-11-10T17:04:17.056Z","path":"/v0/quote"}"#;
@@ -450,6 +454,26 @@ mod tests {
             SwapErrorKind::from_oneclick_response(400, r#"{"message":"bad amount"}"#),
             PreDepositError::ValidationError { .. }
         ));
+    }
+
+    /// The status decides before any body phrase: a 401 whose body happens
+    /// to carry a phrase the classifier matches on is still `Unauthorized`,
+    /// never `QuoteFailed` or `AmountTooLow` (which would stop the swap
+    /// alert or report no route instead of naming the token).
+    #[test]
+    fn test_unauthorized_outranks_body_phrases() {
+        for body in [
+            r#"{"message":"Failed to get quote: Unauthorized"}"#,
+            r#"{"message":"Amount is too low for bridge, try at least 10000"}"#,
+        ] {
+            assert!(
+                matches!(
+                    SwapErrorKind::from_oneclick_response(401, body),
+                    PreDepositError::Unauthorized { .. }
+                ),
+                "401 with body {body:?} must classify as Unauthorized"
+            );
+        }
     }
 
     /// An indeterminate error means funds may already have moved (the deposit

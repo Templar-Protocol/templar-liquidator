@@ -613,6 +613,22 @@ impl LiquidationExecutor {
                                 error: e.to_string(),
                             })
                         }
+                        // Every swap fails this way until an operator rotates
+                        // or unsets the token, so it logs at error; the alert
+                        // carries the message naming ONECLICK_API_TOKEN.
+                        crate::swap::PreDepositError::Unauthorized { .. } => {
+                            tracing::error!(
+                                swap = %swap_name,
+                                error = %e,
+                                "JIT swap rejected: 1-Click refused the API token, holding collateral"
+                            );
+                            Some(SwapIssue::Failed {
+                                from: from_short,
+                                to: to_short,
+                                amount: amount_short,
+                                error: e.to_string(),
+                            })
+                        }
                     },
                     crate::swap::SwapErrorKind::PostDeposit(post) => match post {
                         crate::swap::PostDepositError::Indeterminate { .. } => {

@@ -19,6 +19,8 @@
 
 use std::fmt::Write;
 
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
+use near_sdk::base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine as _};
 use near_sdk::{
     account_id::AccountType,
     json_types::U128,
@@ -55,6 +57,10 @@ const MAX_SWAP_WAIT_SECONDS: u64 = 240;
 /// control, so send the minimum — what matters is that creation *failures*
 /// stop the swap before the token deposit (see the status match below).
 const IMPLICIT_ACCOUNT_FUNDING: NearToken = NearToken::from_yoctonear(1);
+
+/// How many days before the API token's `exp` the expiry log turns into a
+/// warning: enough lead time to have a new token issued and deployed.
+const API_TOKEN_EXPIRY_WARNING_DAYS: i64 = 14;
 
 /// Swap type for the 1-Click API
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -329,6 +335,42 @@ impl OneClickSwap {
         self.client.account_id().0.clone()
     }
 
+    fn api_token_expiry(&self, now: DateTime<Utc>) -> ApiTokenExpiry {
+        ApiTokenExpiry::of(self.api_token.as_deref(), now)
+    }
+
+    /// Logs where the configured API token stands against its `exp` claim:
+    /// `info` while valid, `warn` inside the last 14 days
+    /// (`API_TOKEN_EXPIRY_WARNING_DAYS`), `error` once expired (1-Click then
+    /// rejects every quote with 401). Meant for every registry refresh, so a
+    /// long-running bot reports the approach of expiry, not only its state
+    /// at startup. Logs the expiry, never the token.
+    pub fn log_api_token_expiry(&self) {
+        let now = Utc::now();
+        let at = |t: DateTime<Utc>| t.to_rfc3339_opts(SecondsFormat::Secs, true);
+        match self.api_token_expiry(now) {
+            // The provider's construction already warned about the fee.
+            ApiTokenExpiry::NoToken => {}
+            ApiTokenExpiry::Unknown => tracing::info!(
+                "1-Click API token expiry unreadable (not a JWT with an integer exp claim); \
+                 a rejected token still surfaces as Unauthorized"
+            ),
+            ApiTokenExpiry::Valid { expires_at } => tracing::info!(
+                expires_at = %at(expires_at),
+                "1-Click API token valid"
+            ),
+            ApiTokenExpiry::ExpiringSoon { expires_at } => tracing::warn!(
+                expires_at = %at(expires_at),
+                days_left = (expires_at - now).num_days(),
+                "1-Click API token expires soon; rotate ONECLICK_API_TOKEN before then or every swap fails with 401"
+            ),
+            ApiTokenExpiry::Expired { expires_at } => tracing::error!(
+                expires_at = %at(expires_at),
+                "1-Click API token has expired; every swap fails with 401 until ONECLICK_API_TOKEN is rotated, or unset to swap unauthenticated at the 0.1% fee"
+            ),
+        }
+    }
+
     /// Fetches the list of supported tokens from the 1-Click API `/v0/tokens`
     /// endpoint and populates the local cache.
     ///
@@ -506,8 +548,19 @@ impl OneClickSwap {
         })?;
 
         if !status.is_success() {
-            let kind =
-                crate::swap::SwapErrorKind::from_oneclick_response(status.as_u16(), &response_text);
+            let kind = match crate::swap::SwapErrorKind::from_oneclick_response(
+                status.as_u16(),
+                &response_text,
+            ) {
+                crate::swap::PreDepositError::Unauthorized { message } => {
+                    crate::swap::PreDepositError::Unauthorized {
+                        message: self
+                            .api_token_expiry(Utc::now())
+                            .rejection_message(&message),
+                    }
+                }
+                kind => kind,
+            };
             tracing::error!(
                 status = %status,
                 response = %response_text,
@@ -1267,6 +1320,89 @@ fn classify_swap_status(
     }
 }
 
+/// Reads a JWT's `exp` claim **without verifying the signature**. Only
+/// informational — expiry logs and the `Unauthorized` message; 1-Click
+/// stays the authority on whether a token is accepted, so nothing here
+/// gates a request. `None` for anything that is not a three-segment JWT
+/// whose payload carries an integer `exp`.
+fn jwt_expiry(token: &str) -> Option<DateTime<Utc>> {
+    #[derive(Deserialize)]
+    struct Claims {
+        exp: Option<i64>,
+    }
+
+    let mut segments = token.split('.');
+    let (Some(_header), Some(payload), Some(_signature), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return None;
+    };
+    // RFC 7515 base64url is unpadded; tolerate an encoder that pads anyway.
+    let payload = BASE64_URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let claims: Claims = near_sdk::serde_json::from_slice(&payload).ok()?;
+    DateTime::from_timestamp(claims.exp?, 0)
+}
+
+/// Where the configured API token stands against its own `exp` claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiTokenExpiry {
+    /// No token configured: requests go unauthenticated, at the 0.1% fee.
+    NoToken,
+    /// A token whose expiry can't be read (see [`jwt_expiry`]).
+    Unknown,
+    /// Expires later than [`API_TOKEN_EXPIRY_WARNING_DAYS`] from now.
+    Valid { expires_at: DateTime<Utc> },
+    /// Expires within [`API_TOKEN_EXPIRY_WARNING_DAYS`] from now.
+    ExpiringSoon { expires_at: DateTime<Utc> },
+    /// At or past `exp`: 1-Click answers every authenticated call with 401.
+    Expired { expires_at: DateTime<Utc> },
+}
+
+impl ApiTokenExpiry {
+    fn of(token: Option<&str>, now: DateTime<Utc>) -> Self {
+        let Some(token) = token else {
+            return Self::NoToken;
+        };
+        let Some(expires_at) = jwt_expiry(token) else {
+            return Self::Unknown;
+        };
+        if expires_at <= now {
+            Self::Expired { expires_at }
+        } else if expires_at - now <= TimeDelta::days(API_TOKEN_EXPIRY_WARNING_DAYS) {
+            Self::ExpiringSoon { expires_at }
+        } else {
+            Self::Valid { expires_at }
+        }
+    }
+
+    /// The [`Unauthorized`](crate::swap::PreDepositError::Unauthorized)
+    /// message for a 401 from 1-Click. It reaches the swap-failed alert
+    /// verbatim, so it names the variable, what the token's own claims say
+    /// about why, and both remedies, then carries the response body.
+    fn rejection_message(self, body: &str) -> String {
+        let why = match self {
+            Self::NoToken => {
+                return format!("1-Click requires an API token: set ONECLICK_API_TOKEN — {body}");
+            }
+            Self::Expired { expires_at } => format!(
+                "expired {}",
+                expires_at.to_rfc3339_opts(SecondsFormat::Secs, true)
+            ),
+            Self::Valid { .. } | Self::ExpiringSoon { .. } => "not expired — revoked?".to_string(),
+            Self::Unknown => "expiry unreadable — revoked or mistyped?".to_string(),
+        };
+        format!(
+            "1-Click rejected ONECLICK_API_TOKEN ({why}); rotate it, or unset it to swap \
+             unauthenticated at the 0.1% fee — {body}"
+        )
+    }
+}
+
 /// Whether the supported-token cache admits a pair. An empty cache fails
 /// closed: it means `/v0/tokens` could not be fetched, and the trait contract
 /// prefers declining a routable pair over deferring the failure to after the
@@ -1507,5 +1643,144 @@ mod cache_tests {
             .expect("refunded classifies as an error")
             .to_string();
         assert!(rendered.contains("dep.near"));
+    }
+}
+
+#[cfg(test)]
+mod api_token_tests {
+    use super::*;
+    use near_sdk::base64::prelude::*;
+
+    /// A JWT-shaped token with the given claims and a dummy signature —
+    /// enough for `jwt_expiry`, which never checks the signature.
+    fn fake_jwt(claims: &str) -> String {
+        let header = BASE64_URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = BASE64_URL_SAFE_NO_PAD.encode(claims);
+        format!("{header}.{payload}.c2lnbmF0dXJl")
+    }
+
+    fn at(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339)
+            .expect("test timestamp parses")
+            .with_timezone(&Utc)
+    }
+
+    /// The claim shape 1-Click issues partner tokens with, `exp` = 2026-10-23T14:54:14Z.
+    const PARTNER_CLAIMS: &str = r#"{"v":1,"key_type":"distribution_channel","partner_id":"example","iat":1761231254,"exp":1792767254}"#;
+
+    #[test]
+    fn jwt_expiry_reads_the_exp_claim() {
+        assert_eq!(
+            jwt_expiry(&fake_jwt(PARTNER_CLAIMS)),
+            Some(at("2026-10-23T14:54:14Z"))
+        );
+    }
+
+    /// RFC 7515 base64url omits padding, but a padded payload carries the
+    /// same claims and must read the same.
+    #[test]
+    fn jwt_expiry_tolerates_a_padded_payload() {
+        let claims = r#"{"exp":1792767254,"v":12}"#; // 25 bytes: encodes with "=="
+        let padded = BASE64_URL_SAFE.encode(claims);
+        assert!(padded.ends_with('='), "fixture must actually be padded");
+        let token = format!("e30.{padded}.c2ln");
+        assert_eq!(jwt_expiry(&token), Some(at("2026-10-23T14:54:14Z")));
+    }
+
+    #[test]
+    fn jwt_expiry_is_none_when_unreadable() {
+        let no_exp = fake_jwt(r#"{"iat":1761231254}"#);
+        let string_exp = fake_jwt(r#"{"exp":"1792767254"}"#);
+        let float_exp = fake_jwt(r#"{"exp":1792767254.5}"#);
+        let payload = BASE64_URL_SAFE_NO_PAD.encode(r#"{"exp":1792767254}"#);
+        for token in [
+            "opaque-api-key",
+            &format!("e30.{payload}"),           // two segments
+            &format!("e30.{payload}.c2ln.c2ln"), // four segments
+            "e30.!!!not-base64!!!.c2ln",
+            &format!("e30.{}.c2ln", BASE64_URL_SAFE_NO_PAD.encode("not json")),
+            &no_exp,
+            &string_exp,
+            &float_exp,
+        ] {
+            assert_eq!(jwt_expiry(token), None, "token {token:?}");
+        }
+    }
+
+    #[test]
+    fn expiry_states_and_boundaries() {
+        let token = fake_jwt(PARTNER_CLAIMS);
+        let expires_at = at("2026-10-23T14:54:14Z");
+        let window = TimeDelta::days(API_TOKEN_EXPIRY_WARNING_DAYS);
+        let state = |now| ApiTokenExpiry::of(Some(&token), now);
+
+        assert_eq!(
+            ApiTokenExpiry::of(None, expires_at),
+            ApiTokenExpiry::NoToken
+        );
+        assert_eq!(
+            ApiTokenExpiry::of(Some("opaque-api-key"), expires_at),
+            ApiTokenExpiry::Unknown
+        );
+        assert_eq!(
+            state(expires_at - window - TimeDelta::seconds(1)),
+            ApiTokenExpiry::Valid { expires_at }
+        );
+        assert_eq!(
+            state(expires_at - window),
+            ApiTokenExpiry::ExpiringSoon { expires_at }
+        );
+        assert_eq!(
+            state(expires_at - TimeDelta::seconds(1)),
+            ApiTokenExpiry::ExpiringSoon { expires_at }
+        );
+        // `exp` is the first instant the token is no longer accepted.
+        assert_eq!(state(expires_at), ApiTokenExpiry::Expired { expires_at });
+    }
+
+    /// The 2026-11-10 incident: a partner token issued for a year, still
+    /// configured 18 days after its `exp`.
+    #[test]
+    fn incident_token_reads_as_expired() {
+        let token = fake_jwt(PARTNER_CLAIMS);
+        assert_eq!(
+            ApiTokenExpiry::of(Some(&token), at("2026-11-10T17:04:17Z")),
+            ApiTokenExpiry::Expired {
+                expires_at: at("2026-10-23T14:54:14Z")
+            }
+        );
+    }
+
+    #[test]
+    fn rejection_message_names_the_knob_the_cause_and_both_remedies() {
+        let body = r#"{"message":"Invalid token","statusCode":401}"#;
+        let expires_at = at("2026-10-23T14:54:14Z");
+
+        let expired = ApiTokenExpiry::Expired { expires_at }.rejection_message(body);
+        assert_eq!(
+            expired,
+            "1-Click rejected ONECLICK_API_TOKEN (expired 2026-10-23T14:54:14Z); rotate it, \
+             or unset it to swap unauthenticated at the 0.1% fee — \
+             {\"message\":\"Invalid token\",\"statusCode\":401}"
+        );
+
+        for live in [
+            ApiTokenExpiry::Valid { expires_at },
+            ApiTokenExpiry::ExpiringSoon { expires_at },
+        ] {
+            let message = live.rejection_message(body);
+            assert!(message.contains("(not expired — revoked?)"), "{message}");
+            assert!(message.ends_with(body), "{message}");
+        }
+        assert!(ApiTokenExpiry::Unknown
+            .rejection_message(body)
+            .contains("(expiry unreadable — revoked or mistyped?)"));
+
+        let unset = ApiTokenExpiry::NoToken.rejection_message(body);
+        assert!(
+            unset.starts_with("1-Click requires an API token: set ONECLICK_API_TOKEN"),
+            "{unset}"
+        );
+        assert!(unset.ends_with(body), "{unset}");
     }
 }

@@ -48,6 +48,14 @@ pub enum PreDepositError {
     #[error("Validation error: {message}")]
     ValidationError { message: String },
 
+    /// The venue rejected the request's credential (HTTP 401): an expired
+    /// or revoked API token. Not retryable — the same credential gets the
+    /// same answer until an operator rotates or removes it, so a retry only
+    /// spends the attempt budget. Kept apart from `ValidationError` because
+    /// the remedy is the operator's configuration, not the request.
+    #[error("Unauthorized: {message}")]
+    Unauthorized { message: String },
+
     /// Timed out (retryable — pre-deposit phases are idempotent). There is
     /// deliberately no timeout variant on [`PostDepositError`]: a timeout at
     /// or after the deposit transfer is an unknown outcome and must be
@@ -169,6 +177,9 @@ impl SwapErrorKind {
         }
 
         match status {
+            401 => PreDepositError::Unauthorized {
+                message: body.to_string(),
+            },
             429 => PreDepositError::RateLimited,
             400..=499 => PreDepositError::ValidationError {
                 message: body.to_string(),
@@ -374,6 +385,10 @@ mod tests {
             message: String::new()
         }
         .is_retryable());
+        assert!(!PreDepositError::Unauthorized {
+            message: String::new()
+        }
+        .is_retryable());
         assert!(!PreDepositError::Unknown {
             message: String::new()
         }
@@ -414,6 +429,27 @@ mod tests {
         let kind = SwapErrorKind::from_oneclick_response(429, "Too Many Requests");
         assert!(kind.is_retryable());
         assert!(matches!(kind, PreDepositError::RateLimited));
+    }
+
+    /// 1-Click's answer to an expired or revoked API token, verbatim. It is
+    /// a credential failure, not a malformed request: classifying it as
+    /// `ValidationError` sent operators looking at the request instead of at
+    /// `ONECLICK_API_TOKEN`. Not retryable — the same token gets the same
+    /// answer until an operator rotates or removes it.
+    #[test]
+    fn test_unauthorized_classification() {
+        let body = r#"{"message":"Invalid token","error":"Unauthorized","statusCode":401,"timestamp":"2026-11-10T17:04:17.056Z","path":"/v0/quote"}"#;
+        let kind = SwapErrorKind::from_oneclick_response(401, body);
+        assert!(
+            matches!(&kind, PreDepositError::Unauthorized { message } if message == body),
+            "401 must classify as Unauthorized carrying the body, got {kind:?}"
+        );
+        assert!(!kind.is_retryable());
+        // Other 4xx stay validation errors.
+        assert!(matches!(
+            SwapErrorKind::from_oneclick_response(400, r#"{"message":"bad amount"}"#),
+            PreDepositError::ValidationError { .. }
+        ));
     }
 
     /// An indeterminate error means funds may already have moved (the deposit

@@ -1241,9 +1241,11 @@ impl LiquidatorService {
                 "Built collateral price map"
             );
 
-            // Refresh 1-Click supported tokens cache
+            // Refresh 1-Click supported tokens cache, and report the API
+            // token's expiry while there is still time to rotate it
             if let Some(ref provider) = self.oneclick_provider {
                 provider.load_supported_tokens().await;
+                provider.log_api_token_expiry();
             }
 
             Ok(())
@@ -1606,6 +1608,19 @@ impl LiquidatorService {
                                 from = %asset_key,
                                 error = %e,
                                 "Batch swap failed, will retry next cycle"
+                            );
+                        }
+                        // Re-attempted next round too, but it fails the same
+                        // way until an operator rotates or unsets the token,
+                        // so it logs at error. Still log-only: this runs every
+                        // round with no dedup, and the JIT path alerts.
+                        crate::swap::SwapErrorKind::PreDeposit(
+                            crate::swap::PreDepositError::Unauthorized { .. },
+                        ) => {
+                            tracing::error!(
+                                from = %asset_key,
+                                error = %e,
+                                "Batch swap rejected: 1-Click refused the API token; held until it is rotated or unset"
                             );
                         }
                     }

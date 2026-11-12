@@ -38,6 +38,13 @@ impl SwapProviderImpl {
         let Self::OneClick(provider) = self;
         provider.load_supported_tokens().await;
     }
+
+    /// Logs the provider's API-credential expiry (no-op for providers
+    /// without an expiring credential).
+    pub fn log_api_token_expiry(&self) {
+        let Self::OneClick(provider) = self;
+        provider.log_api_token_expiry();
+    }
 }
 
 #[async_trait::async_trait]

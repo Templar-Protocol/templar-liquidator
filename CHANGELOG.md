@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `zstd` 0.13.3 → 0.13.4, `zstd-safe` 7.2.4 → 7.4.0 and `zstd-sys` 2.0.16 → 2.1.2 (RUSTSEC-2026-0391, -0398, -0403, -0410), reached through `near-api` and `near-primitives`; `crypto-bigint` 0.7.5 → 0.7.11 (RUSTSEC-2026-0387, secret-dependent branches in constant-time arithmetic; 0.7.5 is also yanked), reached through the direct `k256` that recovers RedStone signers. All ship in the release binary; the change is lockfile-only. `wnaf` 0.14.0 → 0.14.1 replaces a yanked release.
+- `cargo-deny` documents RUSTSEC-2026-0387 for `crypto-bigint` 0.5.5, which no lockfile move can clear: the only patched range is `>=0.7.6`, and `elliptic-curve` 0.13 requires `^0.5`. It arrives by two routes: `k256` / `p256` 0.13 in the pinned contracts stack, and `p256` 0.13 from `near-sdk` 5.29.1's `non-contract-usage` feature, which this crate enables directly. Both must move (the contracts stack to `elliptic-curve` 0.14, `near-sdk` to 5.30+) before the ignore can go. The advisory concerns secret operands, and at runtime those curves see only public data (RedStone signature recovery, P-256 signature verification, public-key parsing). The NEAR signer key goes through `ed25519-dalek` and `secp256k1`, which do not use `crypto-bigint`. The eight `wasmtime` ignores are removed: `near-sdk` 5.29.1 takes `near-vm-runner` without its default `wasmtime_vm` backend, so `wasmtime` is gone from the dependency graph.
+
 ## [1.3.0] - 2026-10-23
 
 ### Changed

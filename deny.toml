@@ -31,34 +31,13 @@ ignore = [
     # the ignores are removed rather than left to rot as `advisory-not-detected`
     # warnings. Nothing to re-add if a future bump reintroduces them — they
     # would be new findings on their own merits.
-
-    # RUSTSEC-2026-0222 — wasmtime 45.0.3, "Stores can mix up type indices
-    # between engines". Path: near-sdk 5.29.0 (feature `unit-testing`) ->
-    # near-vm-runner -> wasmtime. `unit-testing` is enabled ONLY by our
-    # dev-dependencies templar-gateway-testing / test-utils (pinned
-    # Templar-Protocol/contracts rev), which use it as a mock-contract WASM
-    # test harness — none of the crate's own [dependencies] or the regular
-    # (non-dev) templar-* deps request it. Verified with
-    # `cargo tree -e normal -i wasmtime` and `cargo tree -e no-dev -i
-    # wasmtime`: both resolve to nothing, so wasmtime is entirely absent
-    # from `cargo build --release --bin liquidator` — it never ships, and
-    # our own source never touches near-vm-runner/wasmtime APIs. Clears
-    # when near-sdk ships a patched wasmtime, or the templar-* pin moves to
-    # a contracts rev whose test harness is off the vulnerable range.
-    { id = "RUSTSEC-2026-0222", reason = "wasmtime is reachable only through near-sdk's unit-testing feature, activated solely by our dev-dependencies (templar-gateway-testing / test-utils); confirmed absent from the release binary via `cargo tree -e normal -i wasmtime` (empty). Clears when near-sdk ships a patched wasmtime." },
-
-    # RUSTSEC-2026-0269 — wasmtime 45.0.3, "Filesystem sandbox escape when
-    # paths or symlinks contain trailing slashes". Same crate and same path as
-    # RUSTSEC-2026-0222 above: near-sdk 5.29.0 (feature `unit-testing`) ->
-    # near-vm-runner -> wasmtime, and that feature is requested only by the
-    # dev-dependencies templar-gateway-testing / test-utils. Re-verified on
-    # this advisory rather than assumed: `cargo tree -e normal -i wasmtime`
-    # prints nothing, so no wasmtime code reaches the release binary — and the
-    # bot never loads untrusted WASM in any case. The wasmtime version is
-    # fixed by the pinned contracts rev (see THE SINGLE-REV RULE), so the
-    # upgrade is not ours to make; this clears when near-sdk ships a patched
-    # wasmtime and we bump that rev.
-    { id = "RUSTSEC-2026-0269", reason = "wasmtime is reachable only through near-sdk's unit-testing feature, activated solely by our dev-dependencies (templar-gateway-testing / test-utils); confirmed absent from the release binary via `cargo tree -e normal -i wasmtime` (empty). Clears when near-sdk ships a patched wasmtime." },
+    #
+    # The same goes for the eight wasmtime 45.0.3 advisories once ignored here
+    # (RUSTSEC-2026-0222, -0269, -0316, -0327, -0359, -0362, -0363, -0379),
+    # all on the dev-only near-sdk `unit-testing` -> near-vm-runner path.
+    # near-sdk 5.29.1 takes near-vm-runner with `default-features = false`,
+    # which drops its default `wasmtime_vm` backend: wasmtime is gone from
+    # Cargo.lock, so those ignores are removed too.
 
     # RUSTSEC-2024-0436 — `paste` 1.0.15, unmaintained (not a vulnerability;
     # repo archived, no safe upgrade). Path: alloy (via
@@ -69,21 +48,31 @@ ignore = [
     # when alloy drops its `paste` dependency upstream.
     { id = "RUSTSEC-2024-0436", reason = "paste is a proc-macro (compile-time only, no runtime code in the shipped binary), pulled in transitively via alloy -> templar-universal-account. Unmaintained, not a vulnerability; no safe upgrade exists. Clears when alloy drops it." },
 
-    # wasmtime 45.0.3 — six more advisories on the same crate and the same
-    # dev-only path as RUSTSEC-2026-0222 / -0269 above (near-sdk feature
-    # `unit-testing` -> near-vm-runner -> wasmtime, requested only by the
-    # dev-dependencies templar-gateway-testing / test-utils). Re-verified
-    # rather than assumed: `cargo tree -e normal --target all -i wasmtime`
-    # prints nothing. No 45.x release carries the fixes (they landed in
-    # 36.0.x, 48.x and 49.x), and every near-vm-runner through 0.38.0-rc.6
-    # requires `wasmtime ^45`, so no lockfile move reaches a patched version.
-    # Clears with the same contracts-rev bump as the two above.
-    { id = "RUSTSEC-2026-0316", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
-    { id = "RUSTSEC-2026-0327", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
-    { id = "RUSTSEC-2026-0359", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
-    { id = "RUSTSEC-2026-0362", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
-    { id = "RUSTSEC-2026-0363", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
-    { id = "RUSTSEC-2026-0379", reason = "wasmtime: dev-only (near-sdk unit-testing via templar-gateway-testing / test-utils), absent from the release binary on every target; no patched 45.x exists and near-vm-runner requires ^45." },
+    # RUSTSEC-2026-0387 — crypto-bigint, "timing variability in operations
+    # intended to be constant-time". Two copies are in the tree. 0.7.x (our
+    # direct k256 0.14) is on 0.7.11, inside the patched range, so only 0.5.5
+    # still matches, and it does ship, by two independent routes onto
+    # elliptic-curve 0.13. One is the pinned contracts stack: k256 0.13
+    # (templar-common, alloy-primitives, alloy-signer) and p256 0.13
+    # (templar-universal-account). The other is near-sdk 5.29.1 itself, whose
+    # `non-contract-usage` feature takes p256 0.13 on non-wasm targets; this
+    # crate enables that feature directly in Cargo.toml, and the templar-*
+    # crates enable it too. The advisory is a side channel on *secret*
+    # operands, and no secret reaches those curves at runtime.
+    # templar-common's k256 recovers RedStone signer addresses from public
+    # signatures; near-sdk's p256 backs `env::p256_verify`, which checks a
+    # signature against a public key; universal-account's p256 parses public
+    # keys, and its key generation and alloy's PrivateKeySigner sit under
+    # `#[cfg(test)]` — `cargo tree -e normal --target all -i
+    # alloy-signer-local` prints nothing. The one secret the bot holds, the
+    # NEAR signer key, is used through near-crypto, which signs with
+    # ed25519-dalek and the libsecp256k1 bindings (`secp256k1`); neither
+    # depends on crypto-bigint. The only patched range is >=0.7.6 and
+    # elliptic-curve 0.13 requires crypto-bigint ^0.5, so no lockfile move
+    # removes 0.5.5. Clears only once both routes are gone: the contracts rev
+    # moves its k256/p256/alloy stack onto elliptic-curve 0.14, and near-sdk
+    # reaches 5.30+, whose p256 requirement is ^0.14.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 only (0.7.x is patched at 0.7.11): reached via elliptic-curve 0.13 by two routes, k256/p256 0.13 in the pinned templar-* stack and p256 0.13 from near-sdk 5.29.1's non-contract-usage feature (enabled directly and by templar-*), used at runtime only on public data (signature recovery and verification, public-key parsing). The NEAR signer key goes through ed25519-dalek / secp256k1, not crypto-bigint. No patched 0.5.x exists; clears only when the contracts rev moves to elliptic-curve 0.14 and near-sdk to 5.30+ (p256 ^0.14)." },
 
     # rustls 0.23.43 and rustls-webpki 0.103.13. The release binary has no
     # rustls on any target — `cargo tree -e normal --target all -i rustls`
